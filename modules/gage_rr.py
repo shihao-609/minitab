@@ -1,0 +1,187 @@
+"""
+量具重复性和再现性 (Gage R&R) 分析模块
+支持交叉型 (Crossed) 和平均值-极差法
+"""
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+
+def gage_rr_crossed(parts, operators, measurements):
+    """
+    交叉型 Gage R&R (平均值-极差法)
+    
+    参数:
+        parts: 部件编号列表
+        operators: 操作员列表  
+        measurements: 测量值列表
+    
+    返回包含方差分量和图形的字典
+    """
+    df = pd.DataFrame({
+        'Part': parts,
+        'Operator': operators,
+        'Measurement': measurements
+    })
+
+    n_parts = df['Part'].nunique()
+    n_operators = df['Operator'].nunique()
+    n_trials = df.groupby(['Part', 'Operator']).size().iloc[0]
+
+    # 计算每个部件-操作员组合的平均值和极差
+    summary = df.groupby(['Part', 'Operator']).agg(
+        avg=('Measurement', 'mean'),
+        range_=('Measurement', lambda x: x.max() - x.min())
+    ).reset_index()
+
+    # 各操作员的 R_bar
+    R_bar_by_op = summary.groupby('Operator')['range_'].mean()
+    R_bar = R_bar_by_op.mean()
+
+    # d2常数（查表）
+    d2_table = {2: 1.128, 3: 1.693, 4: 2.059, 5: 2.326, 6: 2.534,
+                7: 2.704, 8: 2.847, 9: 2.970, 10: 3.078}
+    d2 = d2_table.get(n_trials, d2_table[3])
+
+    # 重复性 (Repeatability) = Equipment Variation (EV)
+    EV = R_bar / d2
+    var_EV = EV ** 2
+
+    # 再现性 (Reproducibility) = Appraiser Variation (AV)
+    xbar_by_op = summary.groupby('Operator')['avg'].mean()
+    X_bar_diff = xbar_by_op.max() - xbar_by_op.min()
+    d2_op_table = {2: 1.128, 3: 1.693, 4: 2.059, 5: 2.326}
+    d2_op = d2_op_table.get(n_operators, 1.693)
+
+    AV_sq = (X_bar_diff / d2_op) ** 2 - var_EV / (n_parts * n_trials)
+    AV = np.sqrt(max(AV_sq, 0))
+    var_AV = AV ** 2
+
+    # GRR (Gage R&R)
+    var_GRR = var_EV + var_AV
+    GRR = np.sqrt(var_GRR)
+
+    # 部件间变异 (Part Variation, PV)
+    part_avgs = summary.groupby('Part')['avg'].mean()
+    Rp = part_avgs.max() - part_avgs.min()
+
+    d2_part_table = {2: 1.128, 3: 1.693, 4: 2.059, 5: 2.326,
+                     6: 2.534, 7: 2.704, 8: 2.847, 9: 2.970, 10: 3.078,
+                     15: 3.472, 20: 3.735}
+    d2_part = d2_part_table.get(n_parts, d2_part_table[10])
+    PV = Rp / d2_part
+    var_PV = PV ** 2
+
+    # 总变异 (Total Variation, TV)
+    var_TV = var_GRR + var_PV
+    TV = np.sqrt(var_TV)
+
+    # 各分量的百分比贡献
+    pct_EV = (EV / TV * 100) if TV > 0 else 0
+    pct_AV = (AV / TV * 100) if TV > 0 else 0
+    pct_GRR = (GRR / TV * 100) if TV > 0 else 0
+    pct_PV = (PV / TV * 100) if TV > 0 else 0
+
+    # 区分数 (Number of Distinct Categories, ndc)
+    ndc = int(np.floor(1.41 * PV / GRR)) if GRR > 0 else np.inf
+
+    # 评估
+    def evaluate_grr(pct):
+        if pct < 10:
+            return '优秀 (可接受)'
+        elif pct < 30:
+            return '临界 (可能需要改进)'
+        else:
+            return '不可接受 (需要改进)'
+
+    # 图表
+    chart = gage_rr_chart(df, summary, n_parts, n_operators, n_trials)
+
+    results = {
+        'chart': chart,
+        'variance_components': {
+            '重复性 (EV)': EV, '再现性 (AV)': AV,
+            'GRR': GRR, '部件间 (PV)': PV, '总变异 (TV)': TV,
+        },
+        'stddev_contributions': {
+            '重复性 (EV)': f'{EV:.5f}',
+            '再现性 (AV)': f'{AV:.5f}',
+            'GRR': f'{GRR:.5f}',
+            '部件间 (PV)': f'{PV:.5f}',
+            '总变异 (TV)': f'{TV:.5f}',
+        },
+        'percent_contributions': {
+            '重复性占比 %EV': f'{pct_EV:.2f}%',
+            '再现性占比 %AV': f'{pct_AV:.2f}%',
+            'GRR占比 %GRR': f'{pct_GRR:.2f}%',
+            '部件间占比 %PV': f'{pct_PV:.2f}%',
+        },
+        'ndc': ndc,
+        'evaluation': evaluate_grr(pct_GRR),
+        'n_parts': n_parts, 'n_operators': n_operators, 'n_trials': n_trials,
+    }
+    return results
+
+
+def gage_rr_chart(df, summary, n_parts, n_operators, n_trials):
+    """生成 Gage R&R 分析图表"""
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=[
+            f'各操作员测量值分布 (按部件)',
+            '部件 × 操作员 交互作用图 (均值)',
+            '各操作员平均差值',
+            '方差分量占比'
+        ],
+        specs=[[{'type': 'xy'}, {'type': 'xy'}],
+               [{'type': 'xy'}, {'type': 'domain'}]],
+        vertical_spacing=0.18, horizontal_spacing=0.10
+    )
+
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+
+    # 图表1: 各操作员箱线图
+    for i, op in enumerate(sorted(df['Operator'].unique())):
+        op_data = summary[summary['Operator'] == op]['avg']
+        fig.add_trace(go.Box(y=op_data, name=f'操作员{op}',
+                             marker=dict(color=colors[i % len(colors)]),
+                             boxmean='sd'), row=1, col=1)
+
+    # 图表2: 交互作用图
+    parts_sorted = sorted(df['Part'].unique())
+    for i, op in enumerate(sorted(df['Operator'].unique())):
+        op_summary = summary[summary['Operator'] == op].set_index('Part')
+        avgs = [op_summary.loc[p, 'avg'] for p in parts_sorted if p in op_summary.index]
+        fig.add_trace(go.Scatter(x=parts_sorted[:len(avgs)], y=avgs, mode='lines+markers',
+                                 name=f'操作员{op}',
+                                 line=dict(color=colors[i % len(colors)]),
+                                 marker=dict(size=6)), row=1, col=2)
+
+    # 图表3: 各操作员平均值比较
+    op_means = []
+    op_names = []
+    op_colors_list = []
+    for i, op in enumerate(sorted(df['Operator'].unique())):
+        op_means.append(summary[summary['Operator'] == op]['avg'].mean())
+        op_names.append(f'操作员{op}')
+        op_colors_list.append(colors[i % len(colors)])
+    fig.add_trace(go.Bar(x=op_names, y=op_means, marker=dict(color=op_colors_list),
+                         text=[f'{m:.4f}' for m in op_means], textposition='outside'),
+                  row=2, col=1)
+
+    # 图表4: 方差分量占比扇形图
+    ev_val = df.groupby(['Part', 'Operator']).size().iloc[0]
+    fig.add_trace(go.Pie(
+        labels=['重复性(EV)', '再现性(AV)', '部件间(PV)'],
+        values=[30, 15, 55],  # 占位值，将在app.py中更新
+        marker=dict(colors=['#3498db', '#e74c3c', '#2ecc71']),
+        textinfo='label+percent', hole=0.3
+    ), row=2, col=2)
+
+    fig.update_layout(height=700, template='plotly_white', showlegend=True)
+    fig.update_xaxes(title_text='部件编号', row=1, col=2)
+    fig.update_yaxes(title_text='测量平均值', row=1, col=1)
+    fig.update_yaxes(title_text='测量平均值', row=1, col=2)
+
+    return fig
