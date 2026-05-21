@@ -1,24 +1,24 @@
 """
-质量管理系统 (Quality Management System) v1.0
+质量管理系统 (Quality Management System) v2.0
 =============================================
 一个类 Minitab 的质量管理 Web 应用
 功能模块：
-  1. SPC 控制图 (X-bar R, X-bar S, I-MR, P, NP, C, U)
-  2. 过程能力分析 (Cp, Cpk, Pp, Ppk)
-  3. 帕累托图 & 直方图
-  4. 量具 R&R 分析
-  5. 正态性检验 & 散点图
+  1. SPC 控制图 (休哈特七图 / EWMA / CUSUM / 多变量 T²)
+  2. 过程能力分析 (Cp/Cpk/Pp/Ppk / Cg/Cgk 检具能力)
+  3. 质量图形工具 (帕累托 / 直方图 / 箱线图 / 运行图 / 鱼骨图)
+  4. 测量系统分析 MSA (计量型GRR / 计数型GRR / 测量不确定度)
+  5. 统计推断 (正态性检验 / 假设检验 / 回归 / 相关性)
+  6. 高级分析 (DOE / Weibull 可靠性 / 抽样方案 / FMEA)
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import io
-import os
 from dotenv import load_dotenv
-from modules import spc_charts, capability, pareto_histogram, gage_rr, supabase_helper
 
-# 加载 .env 环境变量
+from modules import spc_charts, capability, pareto_histogram, gage_rr, supabase_helper
+from modules import spc_advanced, msa_advanced, stats_tools, quality_tools, advanced_analysis
+
 load_dotenv()
 
 st.set_page_config(
@@ -28,43 +28,50 @@ st.set_page_config(
     initial_sidebar_state='expanded',
 )
 
-# ==================== 侧边栏导航 ====================
+# ==================== 侧边栏 ====================
 st.sidebar.title('📊 质量管理系统')
-st.sidebar.caption('Quality Management System v1.0')
+st.sidebar.caption('Quality Management System v2.0')
 
 menu = st.sidebar.radio(
     '选择分析模块',
     ['📁 数据导入',
      '📈 SPC 控制图',
      '🎯 过程能力分析',
-     '📊 帕累托图 & 直方图',
-     '🔬 量具 R&R 分析',
-     '🔢 正态性检验',
-     '📉 散点图 & 回归'],
+     '📊 质量图形工具',
+     '🔬 测量系统分析 MSA',
+     '🔢 统计推断',
+     '🧪 高级分析'],
 )
-
 st.sidebar.divider()
-st.sidebar.caption('支持格式: CSV, Excel (.xlsx/.xls)')
+st.sidebar.caption('支持 CSV / Excel · 支持 Supabase 云存储')
 
-# ==================== 数据导入(全局数据管理) ====================
-def load_data():
-    """数据导入组件"""
+
+# ==================== 工具函数 ====================
+def check_data():
+    if 'user_data' not in st.session_state or st.session_state.user_data is None:
+        return None
+    return st.session_state.user_data
+
+def show_data_info():
+    if 'user_data' in st.session_state and st.session_state.user_data is not None:
+        df = st.session_state.user_data
+        with st.expander('📋 当前数据预览', expanded=False):
+            st.dataframe(df.head(20), use_container_width=True)
+            st.caption(f'{df.shape[0]} 行 × {df.shape[1]} 列')
+            st.download_button('💾 下载 (CSV)', df.to_csv(index=False).encode('utf-8-sig'),
+                               'qms_data.csv', 'text/csv')
+
+
+# ==================== 1. 数据导入 ====================
+def page_data_import():
     st.header('📁 数据导入')
-
     tab1, tab2, tab3, tab4 = st.tabs(['上传文件', '示例数据', '手动输入', '☁️ Supabase'])
 
     with tab1:
-        uploaded_file = st.file_uploader(
-            '选择 CSV 或 Excel 文件',
-            type=['csv', 'xlsx', 'xls'],
-            help='支持 .csv, .xlsx, .xls 格式'
-        )
+        uploaded_file = st.file_uploader('选择 CSV 或 Excel 文件', type=['csv', 'xlsx', 'xls'])
         if uploaded_file:
             try:
-                if uploaded_file.name.endswith('.csv'):
-                    df = pd.read_csv(uploaded_file)
-                else:
-                    df = pd.read_excel(uploaded_file)
+                df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
                 st.session_state.user_data = df
                 st.success(f'✅ 成功加载: {df.shape[0]} 行 × {df.shape[1]} 列')
                 st.dataframe(df.head(10), use_container_width=True)
@@ -72,724 +79,980 @@ def load_data():
                 st.error(f'加载失败: {e}')
 
     with tab2:
-        st.write('**使用内置示例数据**')
-        col1, col2, col3 = st.columns(3)
-        with col1:
+        cols = st.columns(3)
+        with cols[0]:
             if st.button('📐 正态分布样本', use_container_width=True):
                 np.random.seed(42)
-                data = np.random.normal(loc=10.0, scale=0.5, size=100)
-                st.session_state.user_data = pd.DataFrame({'测量值': data})
+                st.session_state.user_data = pd.DataFrame({'测量值': np.random.normal(10.0, 0.5, 100)})
                 st.success('已加载 100 个正态分布样本')
-        with col2:
+        with cols[1]:
             if st.button('📏 SPC 多子组样本', use_container_width=True):
                 np.random.seed(42)
-                data = []
-                for i in range(25):
-                    subgroup = np.random.normal(loc=10.0 + (i % 5) * 0.1, scale=0.3, size=5)
-                    data.extend(subgroup)
+                data = [v for i in range(25) for v in np.random.normal(10.0 + (i % 5) * 0.1, 0.3, 5)]
                 st.session_state.user_data = pd.DataFrame({'测量值': data})
                 st.success('已加载 125 个多子组样本 (25组 × 5)')
-        with col3:
+        with cols[2]:
             if st.button('⚙️ 含偏移样本', use_container_width=True):
                 np.random.seed(42)
-                data = list(np.random.normal(loc=10.0, scale=0.5, size=50))
-                data.extend(np.random.normal(loc=11.5, scale=0.5, size=30))
-                st.session_state.user_data = pd.DataFrame({'测量值': data})
+                d1 = list(np.random.normal(10.0, 0.5, 50))
+                d2 = list(np.random.normal(11.5, 0.5, 30))
+                st.session_state.user_data = pd.DataFrame({'测量值': d1 + d2})
                 st.success('已加载含过程偏移的样本')
 
         st.write('**计量型 Gage R&R 示例**')
         if st.button('🔬 加载 Gage R&R 示例数据', use_container_width=True):
             np.random.seed(123)
-            parts = []
-            operators = []
-            measurements = []
-            true_values = [10.0, 10.2, 10.5, 10.3, 10.8,
-                          11.0, 11.2, 10.9, 11.5, 11.8]
-            for p_id, true_val in enumerate(true_values, 1):
+            parts, operators, measurements = [], [], []
+            true_vals = [10.0, 10.2, 10.5, 10.3, 10.8, 11.0, 11.2, 10.9, 11.5, 11.8]
+            for p_id, tv in enumerate(true_vals, 1):
                 for op in [1, 2, 3]:
                     for _ in range(2):
-                        val = true_val + np.random.normal(0, 0.05) + np.random.normal(0, 0.02)
-                        parts.append(p_id)
-                        operators.append(op)
-                        measurements.append(val)
+                        parts.append(p_id); operators.append(op)
+                        measurements.append(tv + np.random.normal(0, 0.05) + np.random.normal(0, 0.02))
+            st.session_state.user_data = pd.DataFrame({'Part': parts, 'Operator': operators, 'Measurement': measurements})
+            st.success('已加载: 10部件 × 3操作员 × 2次试验')
+            st.rerun()
+
+        st.write('**DOE 示例数据**')
+        if st.button('🧪 加载 DOE 示例', use_container_width=True):
+            np.random.seed(99)
+            data = []
+            for A in [-1, 1]:
+                for B in [-1, 1]:
+                    for C in [-1, 1]:
+                        for _ in range(2):
+                            val = 25 + 3*A + 1.5*B - 1*C + 2*A*B + np.random.normal(0, 0.5)
+                            data.append({'A_温度': A, 'B_压力': B, 'C_速度': C, '响应': val})
+            st.session_state.user_data = pd.DataFrame(data)
+            st.success('已加载 2³ 全因子 DOE 数据 (16 次试验)')
+            st.rerun()
+
+        st.write('**FMEA 示例数据**')
+        if st.button('🛡️ 加载 FMEA 示例', use_container_width=True):
             st.session_state.user_data = pd.DataFrame({
-                'Part': parts, 'Operator': operators, 'Measurement': measurements
+                '模式': ['焊接虚焊', '尺寸超差', '表面划伤', '装配错位', '漏装零件'],
+                '严重度': [8, 6, 3, 5, 9],
+                '发生度': [4, 7, 8, 3, 2],
+                '探测度': [5, 3, 2, 4, 6],
             })
-            st.success('已加载 Gage R&R 数据: 10部件 × 3操作员 × 2次试验')
+            st.success('已加载 5 条 FMEA 记录')
+            st.rerun()
 
     with tab3:
-        st.write('**手动输入数据** (在表格中直接输入)')
-
-        # 初始化 session_state（空字符串，支持文字输入）
+        st.caption('💡 在表格中直接输入，Tab 跳格；支持自动扩展行')
         if 'manual_df' not in st.session_state:
             st.session_state.manual_df = pd.DataFrame({'测量值': [''] * 10})
 
-        # ===== 列名编辑区 =====
-        cols = list(st.session_state.manual_df.columns)
-        n_cols = len(cols)
+        df_cols = list(st.session_state.manual_df.columns)
 
-        with st.expander('📝 编辑列名 & 管理列', expanded=True):
+        with st.expander('📝 列设置', expanded=True):
             c1, c2 = st.columns([3, 1])
+            new_names = []
             with c1:
-                new_col_names = []
-                name_cols = st.columns(n_cols)
-                for i, col_name in enumerate(cols):
-                    with name_cols[i]:
-                        new_name = st.text_input(
-                            f'列{i+1}',
-                            value=col_name,
-                            key=f'col_name_{i}_{col_name}',
-                            label_visibility='collapsed',
-                            placeholder=f'列{i+1}'
-                        )
-                        new_col_names.append(new_name.strip() if new_name.strip() else f'列{i+1}')
+                nc = st.columns(len(df_cols)) if df_cols else [st]
+                for i, cn in enumerate(df_cols):
+                    with nc[i]:
+                        nn = st.text_input(f'列{i+1}', value=cn, key=f'mcol_{i}', label_visibility='collapsed')
+                        new_names.append(nn.strip() or f'列{i+1}')
             with c2:
-                st.write('')  # 对齐用
-                add_col_btn = st.button('➕ 添加列', use_container_width=True)
-                if n_cols > 1:
-                    del_col_btn = st.button('➖ 删除最后一列', use_container_width=True)
+                if st.button('➕ 添加列', use_container_width=True):
+                    st.session_state.manual_df[f'列{len(df_cols)+1}'] = [''] * len(st.session_state.manual_df)
+                    st.rerun()
+                if len(df_cols) > 1 and st.button('➖ 删列', use_container_width=True):
+                    st.session_state.manual_df = st.session_state.manual_df.iloc[:, :-1]
+                    st.rerun()
+
+        if new_names != df_cols:
+            tmp = st.session_state.manual_df.copy()
+            tmp.columns = new_names
+            st.session_state.manual_df = tmp
+            st.rerun()
+
+        edited = st.data_editor(st.session_state.manual_df, use_container_width=True,
+                                height=300, num_rows='dynamic', hide_index=True, key='manual_edit')
+
+        bc1, bc2, bc3 = st.columns([1.5, 1, 1])
+        with bc1:
+            if st.button('✅ 导入数据', use_container_width=True, type='primary'):
+                vd = edited.replace('', pd.NA).dropna(how='all').dropna(axis=1, how='all')
+                if vd.empty:
+                    st.error('表格为空')
                 else:
-                    del_col_btn = False
-
-        # 处理列名变更
-        if new_col_names != cols:
-            df = st.session_state.manual_df.copy()
-            df.columns = new_col_names
-            st.session_state.manual_df = df
-            st.rerun()
-
-        # 添加列
-        if add_col_btn:
-            new_col = f'列{n_cols + 1}'
-            st.session_state.manual_df[new_col] = [''] * len(st.session_state.manual_df)
-            st.rerun()
-
-        # 删除列
-        if del_col_btn and n_cols > 1:
-            st.session_state.manual_df = st.session_state.manual_df.iloc[:, :-1]
-            st.rerun()
-
-        # ===== 数据编辑表格 =====
-        st.caption('💡 单元格支持输入数字或文字，Tab 跳格；最后一行下方继续输入可自动扩展行')
-        edited_df = st.data_editor(
-            st.session_state.manual_df,
-            use_container_width=True,
-            height=350,
-            num_rows='dynamic',
-            key='manual_data_editor',
-            hide_index=True
-        )
-
-        # ===== 操作按钮 =====
-        btn_col1, btn_col2, btn_col3 = st.columns([1.5, 1, 1])
-        with btn_col1:
-            import_btn = st.button('✅ 导入表格数据', use_container_width=True, type='primary')
-        with btn_col2:
-            clear_btn = st.button('🗑️ 清空数据', use_container_width=True)
-        with btn_col3:
-            fill_demo_btn = st.button('📝 填充示例', use_container_width=True)
-
-        if import_btn:
-            # 过滤掉完全空白的行和列
-            valid_df = edited_df.replace('', pd.NA).dropna(how='all').dropna(axis=1, how='all')
-            if valid_df.empty:
-                st.error('表格为空，请先输入数据')
-            else:
-                # 智能类型转换：尝试转数值，失败则保留文字
-                for c in valid_df.columns:
-                    converted = pd.to_numeric(valid_df[c], errors='coerce')
-                    if converted.notna().sum() > 0:
-                        valid_df[c] = converted
-                st.session_state.user_data = valid_df.reset_index(drop=True)
-                st.success(f'已导入 {len(valid_df)} 行 × {valid_df.shape[1]} 列数据')
-
-        if clear_btn:
-            current_cols = edited_df.columns.tolist()
-            st.session_state.manual_df = pd.DataFrame(
-                {c: [''] * len(edited_df) for c in current_cols}
-            )
-            st.rerun()
-
-        if fill_demo_btn:
-            current_cols = edited_df.columns.tolist()
-            n_rows = len(edited_df) if len(edited_df) > 0 else 10
-            demo_data = {
-                c: np.round(np.random.normal(loc=10.0, scale=0.5, size=n_rows), 3)
-                for c in current_cols
-            }
-            st.session_state.manual_df = pd.DataFrame(demo_data)
-            st.rerun()
+                    for c in vd.columns:
+                        cv = pd.to_numeric(vd[c], errors='coerce')
+                        if cv.notna().sum() > 0:
+                            vd[c] = cv
+                    st.session_state.user_data = vd.reset_index(drop=True)
+                    st.success(f'已导入 {len(vd)} 行')
+        with bc2:
+            if st.button('🗑️ 清空', use_container_width=True):
+                st.session_state.manual_df = pd.DataFrame({c: [''] * len(edited) for c in edited.columns})
+                st.rerun()
+        with bc3:
+            if st.button('📝 填充示例', use_container_width=True):
+                nc = edited.columns.tolist()
+                nr = max(len(edited), 10)
+                st.session_state.manual_df = pd.DataFrame(
+                    {c: np.round(np.random.normal(10, 0.5, nr), 3) for c in nc}
+                )
+                st.rerun()
 
     with tab4:
-        st.write('**☁️ Supabase 云存储** — 将数据集保存到云端或从云端加载')
-        st.caption('数据持久化存储，刷新或关闭浏览器后不会丢失')
-
-        # ---- 保存当前数据到 Supabase ----
-        st.subheader('💾 保存到云端')
-        col_save1, col_save2 = st.columns([3, 1])
-        with col_save1:
-            save_name = st.text_input('数据集名称', placeholder='例如：2024Q1_产线A_测量数据',
-                                      key='supabase_save_name')
-        with col_save2:
-            if st.button('☁️ 保存', use_container_width=True, key='btn_save_to_supabase'):
-                if 'user_data' not in st.session_state or st.session_state.user_data is None:
-                    st.error('请先在「上传文件 / 示例数据 / 手动输入」中加载数据')
+        st.caption('☁️ 数据持久化到 Supabase，刷新不丢失')
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            save_name = st.text_input('数据集名称', placeholder='例: 2024Q1_产线A', key='supa_save')
+        with c2:
+            if st.button('☁️ 保存', use_container_width=True, key='supa_save_btn'):
+                if check_data() is None:
+                    st.error('请先加载数据')
                 elif not save_name.strip():
-                    st.error('请输入数据集名称')
+                    st.error('请输入名称')
                 else:
-                    result = supabase_helper.save_dataset(
-                        name=save_name.strip(),
-                        df=st.session_state.user_data,
-                        columns_info=list(st.session_state.user_data.columns),
-                    )
-                    if result:
-                        st.success(f'✅ 已保存 "{save_name.strip()}" 到 Supabase ({len(st.session_state.user_data)} 行)')
+                    r = supabase_helper.save_dataset(save_name.strip(), st.session_state.user_data,
+                                                     columns_info=list(st.session_state.user_data.columns))
+                    if r:
+                        st.success(f'✅ 已保存 "{save_name.strip()}"')
                         st.rerun()
 
         st.divider()
-
-        # ---- 从 Supabase 加载数据 ----
         st.subheader('📂 从云端加载')
-        if st.button('🔄 刷新列表', use_container_width=False, key='btn_refresh_list'):
+        if st.button('🔄 刷新', use_container_width=False):
             st.rerun()
-
         datasets = supabase_helper.list_datasets()
-
         if not datasets:
-            st.info('云端暂无已保存的数据集。加载数据后点击上方「保存」即可存储到云端。')
+            st.info('暂无已保存的数据集')
         else:
-            st.caption(f'共 {len(datasets)} 个数据集')
             for ds in datasets:
-                ds_id = ds['id']
-                ds_name = ds['name']
-                ds_rows = ds.get('row_count', '?')
-                ds_time = ds.get('created_at', '')[:19].replace('T', ' ')
-
-                col1, col2, col3 = st.columns([4, 2, 1])
-                with col1:
-                    st.write(f'**{ds_name}**')
-                    st.caption(f'{ds_rows} 行 · {ds_time}')
-                with col2:
-                    if st.button('📥 加载', key=f'load_{ds_id}', use_container_width=True):
-                        df = supabase_helper.load_dataset(ds_id)
+                c1, c2, c3 = st.columns([4, 2, 1])
+                with c1:
+                    st.write(f'**{ds["name"]}**')
+                    st.caption(f'{ds.get("row_count","?")} 行 · {str(ds.get("created_at",""))[:19]}')
+                with c2:
+                    if st.button('📥 加载', key=f'load_{ds["id"]}', use_container_width=True):
+                        df = supabase_helper.load_dataset(ds['id'])
                         if df is not None:
                             st.session_state.user_data = df
-                            st.success(f'✅ 已加载 "{ds_name}" ({len(df)} 行)')
+                            st.success(f'✅ 已加载 "{ds["name"]}"')
                             st.rerun()
-                with col3:
-                    if st.button('🗑️', key=f'del_{ds_id}', help='删除此数据集'):
-                        if supabase_helper.delete_dataset(ds_id):
-                            st.success(f'已删除 "{ds_name}"')
+                with c3:
+                    if st.button('🗑️', key=f'del_{ds["id"]}', help='删除'):
+                        if supabase_helper.delete_dataset(ds['id']):
+                            st.success(f'已删除')
                             st.rerun()
 
-    if 'user_data' in st.session_state and st.session_state.user_data is not None:
-        with st.expander('📋 查看当前数据', expanded=False):
-            st.dataframe(st.session_state.user_data, use_container_width=True)
-            st.caption(f'{st.session_state.user_data.shape[0]} 行 × {st.session_state.user_data.shape[1]} 列')
-            st.download_button('💾 下载当前数据 (CSV)',
-                               st.session_state.user_data.to_csv(index=False).encode('utf-8-sig'),
-                               'qms_data.csv', 'text/csv')
+    show_data_info()
 
 
-# ==================== SPC 控制图 ====================
-def spc_control_charts():
+# ==================== 2. SPC 控制图 ====================
+def page_spc():
     st.header('📈 SPC 控制图')
-    st.caption('休哈特控制图 — 支持计量型和计数型控制图')
-
-    if 'user_data' not in st.session_state or st.session_state.user_data is None:
+    df = check_data()
+    if df is None:
         st.warning('⚠️ 请先在「数据导入」中加载数据')
         return
 
-    df = st.session_state.user_data
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-
     if not numeric_cols:
         st.error('数据中没有数值列')
         return
 
-    chart_type = st.selectbox(
-        '选择控制图类型',
-        ['X-bar R (均值-极差图)',
-         'X-bar S (均值-标准差图)',
-         'I-MR (单值-移动极差图)',
-         'P 图 (不合格品率)',
-         'NP 图 (不合格品数)',
-         'C 图 (缺陷数)',
-         'U 图 (单位缺陷数)']
-    )
+    tab1, tab2, tab3, tab4 = st.tabs(['休哈特控制图', 'EWMA 控制图', 'CUSUM 控制图', '多变量 T²'])
 
-    col1, col2 = st.columns([1, 1])
+    # --- Tab1: 休哈特 ---
+    with tab1:
+        ct = st.selectbox('控制图类型', [
+            'X-bar R (均值-极差)', 'X-bar S (均值-标准差)', 'I-MR (单值-移动极差)',
+            'P 图 (不合格品率)', 'NP 图 (不合格品数)', 'C 图 (缺陷数)', 'U 图 (单位缺陷数)'
+        ], key='shewhart_type')
 
-    if chart_type in ['X-bar R (均值-极差图)', 'X-bar S (均值-标准差图)']:
-        with col1:
-            data_col = st.selectbox('选择数据列', numeric_cols, key='spc_data_col')
-        with col2:
-            subgroup_size = st.number_input('子组大小', min_value=2, max_value=10, value=5)
+        if ct in ['X-bar R (均值-极差)', 'X-bar S (均值-标准差)']:
+            c1, c2 = st.columns(2)
+            with c1:
+                dc = st.selectbox('数据列', numeric_cols, key='xbar_col')
+            with c2:
+                ss = st.number_input('子组大小', 2, 10, 5)
+            data = df[dc].dropna().values
+            if len(data) < ss * 2:
+                st.error(f'数据不足，需至少 {ss*2} 个点')
+            else:
+                r = spc_charts.xbar_r_chart(data, ss) if 'R' in ct else spc_charts.xbar_s_chart(data, ss)
+                st.plotly_chart(r['chart'], use_container_width=True)
+                with st.expander('📊 参数'):
+                    for k, v in r['stats'].items():
+                        st.metric(k, f'{v:.4f}')
 
-        data = df[data_col].dropna().values
-        if len(data) < subgroup_size * 2:
-            st.error(f'数据量不足，需要至少 {subgroup_size * 2} 个数据点')
-            return
+        elif ct == 'I-MR (单值-移动极差)':
+            dc = st.selectbox('数据列', numeric_cols, key='imr_col')
+            data = df[dc].dropna().values
+            if len(data) < 2:
+                st.error('需至少2个数据点')
+            else:
+                r = spc_charts.imr_chart(data)
+                st.plotly_chart(r['chart'], use_container_width=True)
 
-        if chart_type == 'X-bar R (均值-极差图)':
-            result = spc_charts.xbar_r_chart(data, subgroup_size)
+        elif ct == 'P 图 (不合格品率)':
+            c1, c2 = st.columns(2)
+            with c1:
+                dcol = st.selectbox('不合格品数列', numeric_cols, key='p_col')
+            with c2:
+                scol = st.selectbox('样本量列', numeric_cols, key='p_size')
+            d, s = df[dcol].dropna().values, df[scol].dropna().values
+            ml = min(len(d), len(s))
+            if ml >= 2:
+                r = spc_charts.p_chart(d[:ml], s[:ml])
+                st.plotly_chart(r['chart'], use_container_width=True)
+
+        elif ct == 'NP 图 (不合格品数)':
+            c1, c2 = st.columns(2)
+            with c1:
+                dcol = st.selectbox('不合格品数列', numeric_cols, key='np_col')
+            with c2:
+                sz = st.number_input('固定样本量', 1, 10000, 100)
+            d = df[dcol].dropna().values
+            if len(d) >= 2:
+                r = spc_charts.np_chart(d, sz)
+                st.plotly_chart(r['chart'], use_container_width=True)
+
+        elif ct in ['C 图 (缺陷数)', 'U 图 (单位缺陷数)']:
+            dcol = st.selectbox('缺陷数列', numeric_cols, key='cu_col')
+            d = df[dcol].dropna().values
+            if ct == 'C 图 (缺陷数)':
+                r = spc_charts.c_chart(d)
+            else:
+                scol = st.selectbox('单位数列', numeric_cols, key='u_size')
+                s = df[scol].dropna().values
+                ml = min(len(d), len(s))
+                r = spc_charts.u_chart(d[:ml], s[:ml])
+            st.plotly_chart(r['chart'], use_container_width=True)
+
+        st.info('🔴 判异准则：超 UCL/LCL 为异常；连续7点同侧、连续趋势也视为异常')
+
+    # --- Tab2: EWMA ---
+    with tab2:
+        dc = st.selectbox('数据列', numeric_cols, key='ewma_col')
+        c1, c2 = st.columns(2)
+        with c1:
+            lam = st.slider('平滑系数 λ', 0.05, 1.0, 0.2, 0.05)
+        with c2:
+            L = st.slider('控制限倍数 L', 2.0, 4.0, 2.7, 0.1)
+        data = df[dc].dropna().values
+        if len(data) >= 2:
+            r = spc_advanced.ewma_chart(data, lam, L)
+            if 'error' in r:
+                st.error(r['error'])
+            else:
+                st.plotly_chart(r['chart'], use_container_width=True)
+                with st.expander('📊 参数'):
+                    for k, v in r['stats'].items():
+                        st.metric(k, v)
         else:
-            result = spc_charts.xbar_s_chart(data, subgroup_size)
+            st.error('至少需要 2 个数据点')
 
-        st.plotly_chart(result['chart'], use_container_width=True)
-        with st.expander('📊 统计参数'):
-            for k, v in result['stats'].items():
-                st.metric(k, f'{v:.4f}')
-
-    elif chart_type == 'I-MR (单值-移动极差图)':
-        data_col = st.selectbox('选择数据列', numeric_cols, key='imr_col')
-        data = df[data_col].dropna().values
-
-        if len(data) < 2:
-            st.error('需要至少2个数据点')
-            return
-
-        result = spc_charts.imr_chart(data)
-        st.plotly_chart(result['chart'], use_container_width=True)
-        with st.expander('📊 统计参数'):
-            for k, v in result['stats'].items():
-                st.metric(k, f'{v:.4f}')
-
-    elif chart_type == 'P 图 (不合格品率)':
-        col1, col2 = st.columns(2)
-        with col1:
-            defect_col = st.selectbox('选择不合格品数列', numeric_cols, key='p_defect')
-        with col2:
-            size_col = st.selectbox('选择样本量列', numeric_cols, key='p_size')
-
-        defectives = df[defect_col].dropna().values
-        sample_sizes = df[size_col].dropna().values
-        min_len = min(len(defectives), len(sample_sizes))
-
-        if min_len < 2:
-            st.error('数据不足')
-            return
-
-        result = spc_charts.p_chart(defectives[:min_len], sample_sizes[:min_len])
-        st.plotly_chart(result['chart'], use_container_width=True)
-
-    elif chart_type == 'NP 图 (不合格品数)':
-        col1, col2 = st.columns(2)
-        with col1:
-            defect_col = st.selectbox('选择不合格品数列', numeric_cols, key='np_col')
-        with col2:
-            sample_size = st.number_input('固定样本量', min_value=1, value=100)
-
-        defectives = df[defect_col].dropna().values
-        result = spc_charts.np_chart(defectives, sample_size)
-        st.plotly_chart(result['chart'], use_container_width=True)
-
-    elif chart_type in ['C 图 (缺陷数)', 'U 图 (单位缺陷数)']:
-        data_col = st.selectbox('选择缺陷数列', numeric_cols, key='cu_col')
-        defects = df[data_col].dropna().values
-
-        if chart_type == 'C 图 (缺陷数)':
-            result = spc_charts.c_chart(defects)
+    # --- Tab3: CUSUM ---
+    with tab3:
+        dc = st.selectbox('数据列', numeric_cols, key='cusum_col')
+        c1, c2 = st.columns(2)
+        with c1:
+            k_val = st.slider('参考值 k (σ倍数)', 0.1, 2.0, 0.5, 0.1)
+        with c2:
+            h_val = st.slider('决策区间 h (σ倍数)', 2.0, 8.0, 4.0, 0.5)
+        data = df[dc].dropna().values
+        if len(data) >= 2:
+            r = spc_advanced.cusum_chart(data, k=k_val, h=h_val)
+            if 'error' in r:
+                st.error(r['error'])
+            else:
+                st.plotly_chart(r['chart'], use_container_width=True)
+                with st.expander('📊 参数'):
+                    for k, v in r['stats'].items():
+                        st.metric(k, v)
         else:
-            size_col = st.selectbox('选择单位数列', numeric_cols, key='u_size')
-            sizes = df[size_col].dropna().values
-            min_len = min(len(defects), len(sizes))
-            result = spc_charts.u_chart(defects[:min_len], sizes[:min_len])
+            st.error('至少需要 2 个数据点')
 
-        st.plotly_chart(result['chart'], use_container_width=True)
+    # --- Tab4: 多变量 T² ---
+    with tab4:
+        st.caption('对多列数值变量联合监控 — 自动使用所有数值列')
+        alpha = st.slider('显著性水平 α', 0.001, 0.05, 0.0027, 0.0001, key='t2_alpha',
+                          help='0.0027 ≈ 3σ 控制限')
+        r = spc_advanced.t2_chart(df, alpha)
+        if 'error' in r:
+            st.error(r['error'])
+        else:
+            st.plotly_chart(r['chart'], use_container_width=True)
+            with st.expander('📊 参数'):
+                for k, v in r['stats'].items():
+                    st.metric(k, v)
 
-    st.info('🔴 **判异准则**：超UCL/LCL即为异常；连续7点同侧、连续7点趋势上升/下降也视为异常')
+    show_data_info()
 
 
-# ==================== 过程能力分析 ====================
-def process_capability_analysis():
+# ==================== 3. 过程能力分析 ====================
+def page_capability():
     st.header('🎯 过程能力分析')
-    st.caption('计算 Cp, Cpk, Pp, Ppk 并评估过程能力水平')
-
-    if 'user_data' not in st.session_state or st.session_state.user_data is None:
-        st.warning('⚠️ 请先在「数据导入」中加载数据')
+    df = check_data()
+    if df is None:
+        st.warning('⚠️ 请先加载数据')
         return
 
-    df = st.session_state.user_data
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-
     if not numeric_cols:
-        st.error('数据中没有数值列')
+        st.error('无数值列')
         return
 
-    data_col = st.selectbox('选择数据列', numeric_cols, key='cpk_col')
-    data = df[data_col].dropna().values
+    tab1, tab2 = st.tabs(['Cp/Cpk/Pp/Ppk', 'Cg/Cgk 检具能力'])
 
-    if len(data) < 2:
-        st.error('需要至少2个数据点')
+    # --- Tab1: Cp/Cpk ---
+    with tab1:
+        dc = st.selectbox('数据列', numeric_cols, key='cpk_col')
+        data = df[dc].dropna().values
+        if len(data) < 2:
+            st.error('至少需要 2 个数据点')
+        else:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                usl = st.text_input('规格上限 USL', placeholder='留空=不设')
+            with c2:
+                lsl = st.text_input('规格下限 LSL', placeholder='留空=不设')
+            with c3:
+                tgt = st.text_input('目标值', placeholder='留空=不设')
+
+            usl = float(usl) if usl else None
+            lsl = float(lsl) if lsl else None
+            tgt = float(tgt) if tgt else None
+
+            if usl is None and lsl is None:
+                st.info('请至少输入一个规格限')
+            elif usl is not None and lsl is not None and usl <= lsl:
+                st.error('USL 必须大于 LSL')
+            else:
+                r = capability.process_capability(data, usl, lsl, tgt)
+                if 'error' in r:
+                    st.error(r['error'])
+                else:
+                    st.subheader('📊 能力指标')
+                    cs = st.columns(6)
+                    with cs[0]: st.metric('Cp (短期)', f'{r["Cp"]:.2f}' if r['Cp'] is not None else 'N/A')
+                    with cs[1]: st.metric('Cpk (短期)', f'{r["Cpk"]:.2f}' if r['Cpk'] is not None else 'N/A')
+                    with cs[2]: st.metric('Pp (长期)', f'{r["Pp"]:.2f}' if r['Pp'] is not None else 'N/A')
+                    with cs[3]: st.metric('Ppk (长期)', f'{r["Ppk"]:.2f}' if r['Ppk'] is not None else 'N/A')
+                    with cs[4]: st.metric('Cpk 评级', r.get('cpk_level', 'N/A'))
+                    with cs[5]: st.metric('预计 PPM', f'{r["ppm_total"]:,.0f}')
+
+                    cs2 = st.columns(4)
+                    with cs2[0]: st.metric('均值', f'{r["mean"]:.4f}')
+                    with cs2[1]: st.metric('整体 σ', f'{r["std_overall"]:.4f}')
+                    with cs2[2]: st.metric('组内 σ', f'{r["std_within"]:.4f}')
+                    with cs2[3]: st.metric('样本量', r['n'])
+
+                    st.plotly_chart(r['chart'], use_container_width=True)
+
+                    with st.expander('📋 评级标准'):
+                        st.table(pd.DataFrame({
+                            'Cpk': ['≥ 1.67', '1.33~1.67', '1.00~1.33', '0.67~1.00', '< 0.67'],
+                            '评级': ['优秀', '良好', '尚可', '不足', '差'],
+                            '建议': ['可放宽抽检', '维持现状', '加强控制', '需改进', '急需改进'],
+                        }))
+
+    # --- Tab2: Cg/Cgk ---
+    with tab2:
+        st.caption('MSA Type 1 — 检具能力指数评估')
+        dc = st.selectbox('重复测量列', numeric_cols, key='cg_col')
+        data = df[dc].dropna().values
+        c1, c2 = st.columns(2)
+        with c1:
+            tol = st.text_input('公差 T = USL - LSL', value='', key='cg_tol',
+                                placeholder='例: 0.1')
+        with c2:
+            ref_val = st.text_input('参考值 (标准值)', value='', key='cg_ref',
+                                    placeholder='留空=用数据均值')
+
+        if tol:
+            tolerance = float(tol)
+            ref = float(ref_val) if ref_val else None
+            r = msa_advanced.cg_cgk(data, tolerance, ref)
+            if 'error' in r:
+                st.error(r['error'])
+            else:
+                st.plotly_chart(r['chart'], use_container_width=True)
+                st.subheader('能力指数')
+                cs = st.columns(4)
+                with cs[0]: st.metric('Cg', r['stats']['Cg'])
+                with cs[1]: st.metric('Cgk', r['stats']['Cgk'])
+                with cs[2]: st.metric('Cg 评级', r['stats']['Cg 评级'])
+                with cs[3]: st.metric('Cgk 评级', r['stats']['Cgk 评级'])
+                with st.expander('📊 详细参数'):
+                    for k, v in r['details'].items():
+                        st.metric(k, v)
+
+    show_data_info()
+
+
+# ==================== 4. 质量图形工具 ====================
+def page_quality_tools():
+    st.header('📊 质量图形工具')
+    df = check_data()
+    if df is None:
+        st.warning('⚠️ 请先加载数据')
         return
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        usl_input = st.text_input('规格上限 (USL)', value='', placeholder='留空表示不设上限')
-    with col2:
-        lsl_input = st.text_input('规格下限 (LSL)', value='', placeholder='留空表示不设下限')
-    with col3:
-        target_input = st.text_input('目标值 (Target)', value='', placeholder='留空表示不设目标')
-
-    usl = float(usl_input) if usl_input else None
-    lsl = float(lsl_input) if lsl_input else None
-    target = float(target_input) if target_input else None
-
-    if usl is None and lsl is None:
-        st.info('请至少输入一个规格限')
-        return
-
-    if usl is not None and lsl is not None and usl <= lsl:
-        st.error('USL 必须大于 LSL')
-        return
-
-    result = capability.process_capability(data, usl, lsl, target)
-
-    if 'error' in result:
-        st.error(result['error'])
-        return
-
-    # 能力指标卡片
-    st.subheader('📊 能力指标')
-    cols = st.columns(6)
-    with cols[0]:
-        vals = [result.get('Cp'), result.get('Pp')]
-        cp_val = result.get('Cp')
-        st.metric('Cp (短期)', f'{cp_val:.2f}' if cp_val is not None else 'N/A',
-                  delta=None, delta_color='off')
-    with cols[1]:
-        st.metric('Cpk (短期)', f'{result["Cpk"]:.2f}' if result['Cpk'] is not None else 'N/A')
-    with cols[2]:
-        st.metric('Pp (长期)', f'{result["Pp"]:.2f}' if result['Pp'] is not None else 'N/A')
-    with cols[3]:
-        st.metric('Ppk (长期)', f'{result["Ppk"]:.2f}' if result['Ppk'] is not None else 'N/A')
-    with cols[4]:
-        st.metric('Cpk评级', result.get('cpk_level', 'N/A'))
-    with cols[5]:
-        st.metric('预计PPM', f'{result["ppm_total"]:,.0f}')
-
-    cols2 = st.columns(4)
-    with cols2[0]:
-        st.metric('均值', f'{result["mean"]:.4f}')
-    with cols2[1]:
-        st.metric('整体 σ', f'{result["std_overall"]:.4f}')
-    with cols2[2]:
-        st.metric('组内 σ', f'{result["std_within"]:.4f}')
-    with cols2[3]:
-        st.metric('样本量', result['n'])
-
-    # 能力图表
-    st.plotly_chart(result['chart'], use_container_width=True)
-
-    # 能力评级说明
-    with st.expander('📋 能力评级标准'):
-        rating_df = pd.DataFrame({
-            'Cpk 范围': ['≥ 1.67', '1.33 ~ 1.67', '1.00 ~ 1.33', '0.67 ~ 1.00', '< 0.67'],
-            '评级': ['优秀', '良好', '尚可', '不足', '差'],
-            '建议': ['可适当放宽抽检', '维持当前控制', '加强过程控制', '需进行过程改进', '急需根本性改进'],
-        })
-        st.table(rating_df)
-
-
-# ==================== 帕累托图 & 直方图 ====================
-def pareto_and_histogram():
-    st.header('📊 帕累托图 & 直方图')
-
-    if 'user_data' not in st.session_state or st.session_state.user_data is None:
-        st.warning('⚠️ 请先在「数据导入」中加载数据')
-        return
-
-    df = st.session_state.user_data
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     text_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
 
-    analysis_type = st.radio('选择图表类型',
-                             ['帕累托图 (Pareto)', '直方图 (Histogram)', '箱线图 (Box Plot)'],
-                             horizontal=True)
+    t1, t2, t3, t4, t5 = st.tabs(['帕累托图', '直方图', '箱线图', '运行图', '鱼骨图'])
 
-    if analysis_type == '帕累托图 (Pareto)':
-        col1, col2 = st.columns(2)
-        with col1:
-            if text_cols:
-                category_col = st.selectbox('类别列', text_cols, key='pareto_cat')
+    # --- 帕累托图 ---
+    with t1:
+        if not numeric_cols:
+            st.error('无数值列')
+        else:
+            c1, c2 = st.columns(2)
+            with c1:
+                cat_col = st.selectbox('类别列', text_cols + numeric_cols, key='pareto_cat')
+            with c2:
+                cnt_col = st.selectbox('频数列', numeric_cols, key='pareto_cnt')
+            r = pareto_histogram.pareto_chart(df[cat_col].astype(str).tolist(), df[cnt_col].values)
+            st.plotly_chart(r['chart'], use_container_width=True)
+            c1, c2 = st.columns(2)
+            with c1: st.metric('总计', r['total'])
+            with c2: st.dataframe(r['data'], use_container_width=True)
+
+    # --- 直方图 ---
+    with t2:
+        if not numeric_cols:
+            st.error('无数值列')
+        else:
+            dc = st.selectbox('数据列', numeric_cols, key='hist_col')
+            r = pareto_histogram.histogram_with_stats(df[dc].dropna().values)
+            if 'error' in r:
+                st.error(r['error'])
             else:
-                category_col = st.selectbox('类别列 (数值)', numeric_cols, key='pareto_cat_num')
-        with col2:
-            count_col = st.selectbox('频数列', numeric_cols, key='pareto_cnt')
+                st.plotly_chart(r['chart'], use_container_width=True)
+                cs = st.columns(len(r['stats']))
+                for i, (k, v) in enumerate(r['stats'].items()):
+                    cs[i].metric(k, v)
 
-        categories = df[category_col].astype(str).tolist()
-        counts = df[count_col].values
-
-        result = pareto_histogram.pareto_chart(categories, counts)
-
-        st.plotly_chart(result['chart'], use_container_width=True)
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric('总计', result['total'])
-        with col2:
-            st.dataframe(result['data'], use_container_width=True)
-
-    elif analysis_type == '直方图 (Histogram)':
-        data_col = st.selectbox('选择数据列', numeric_cols, key='hist_col')
-        data = df[data_col].dropna().values
-
-        result = pareto_histogram.histogram_with_stats(data)
-
-        if 'error' in result:
-            st.error(result['error'])
-            return
-
-        st.plotly_chart(result['chart'], use_container_width=True)
-
-        stats = result['stats']
-        cols = st.columns(len(stats))
-        for i, (k, v) in enumerate(stats.items()):
-            cols[i].metric(k, v)
-
-    elif analysis_type == '箱线图 (Box Plot)':
-        data_col = st.selectbox('选择数据列', numeric_cols, key='box_col')
-
-        group_col = st.selectbox('分组列 (可选)', ['无分组'] + text_cols + numeric_cols,
-                                 key='box_group')
-
-        if group_col == '无分组':
-            data = df[data_col].dropna().values
-            result = pareto_histogram.box_plot(data)
+    # --- 箱线图 ---
+    with t3:
+        if not numeric_cols:
+            st.error('无数值列')
         else:
-            groups = df.groupby(group_col)
-            data_groups = [g[data_col].dropna().values for _, g in groups]
-            result = pareto_histogram.box_plot(data_groups,
-                                               group_labels=[str(n) for n in df[group_col].unique()])
+            dc = st.selectbox('数据列', numeric_cols, key='box_col')
+            gc = st.selectbox('分组列 (可选)', ['无分组'] + text_cols + numeric_cols, key='box_group')
+            if gc == '无分组':
+                r = pareto_histogram.box_plot(df[dc].dropna().values)
+            else:
+                grps = df.groupby(gc)
+                r = pareto_histogram.box_plot(
+                    [g[dc].dropna().values for _, g in grps],
+                    group_labels=[str(n) for n in df[gc].unique()])
+            st.plotly_chart(r['chart'], use_container_width=True)
 
-        st.plotly_chart(result['chart'], use_container_width=True)
-
-
-# ==================== 量具 R&R 分析 ====================
-def gage_rr_analysis():
-    st.header('🔬 量具 R&R 分析 (Gage R&R)')
-    st.caption('交叉型 (Crossed) 量具重复性和再现性 — 平均值-极差法')
-
-    if 'user_data' not in st.session_state or st.session_state.user_data is None:
-        st.warning('⚠️ 请先在「数据导入」中加载数据，或使用示例数据')
-        if st.button('📥 加载内置示例数据'):
-            np.random.seed(123)
-            parts, operators, measurements = [], [], []
-            true_values = [10.0, 10.2, 10.5, 10.3, 10.8, 11.0, 11.2, 10.9, 11.5, 11.8]
-            for p_id, true_val in enumerate(true_values, 1):
-                for op in [1, 2, 3]:
-                    for _ in range(2):
-                        val = true_val + np.random.normal(0, 0.05) + np.random.normal(0, 0.02)
-                        parts.append(p_id)
-                        operators.append(op)
-                        measurements.append(val)
-            st.session_state.user_data = pd.DataFrame({
-                'Part': parts, 'Operator': operators, 'Measurement': measurements
-            })
-            st.rerun()
-        return
-
-    df = st.session_state.user_data
-
-    st.write('**请映射数据列：**')
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        part_col = st.selectbox('部件编号列', df.columns.tolist(), key='rr_part')
-    with col2:
-        operator_col = st.selectbox('操作员列', df.columns.tolist(), key='rr_op')
-    with col3:
-        measure_col = st.selectbox('测量值列', df.select_dtypes(include=[np.number]).columns.tolist(), key='rr_meas')
-
-    parts = df[part_col].values
-    operators = df[operator_col].values
-    measurements = df[measure_col].values
-
-    n_parts = len(np.unique(parts))
-    n_operators = len(np.unique(operators))
-
-    st.info(f'📋 数据概要: {n_parts} 个部件, {n_operators} 名操作员, {len(measurements)} 次测量')
-
-    if n_parts < 2 or n_operators < 2:
-        st.error('需要至少2个部件和2名操作员')
-        return
-
-    result = gage_rr.gage_rr_crossed(parts, operators, measurements)
-
-    # 方差分量卡片
-    st.subheader('📊 方差分量分析')
-    cols = st.columns(5)
-    with cols[0]:
-        st.metric('重复性 EV (σ)', result['stddev_contributions']['重复性 (EV)'])
-    with cols[1]:
-        st.metric('再现性 AV (σ)', result['stddev_contributions']['再现性 (AV)'])
-    with cols[2]:
-        st.metric('GRR (σ)', result['stddev_contributions']['GRR'])
-    with cols[3]:
-        st.metric('部件间 PV (σ)', result['stddev_contributions']['部件间 (PV)'])
-    with cols[4]:
-        ndc_val = result['ndc']
-        ndc_color = 'green' if ndc_val >= 5 else ('orange' if ndc_val >= 2 else 'red')
-        st.metric('区分数 ndc', ndc_val)
-
-    cols_pct = st.columns(4)
-    with cols_pct[0]:
-        grr_pct = float(result['percent_contributions']['GRR占比 %GRR'].replace('%', ''))
-    with cols_pct[1]:
-        st.metric('%GRR', f'{grr_pct:.1f}%')
-    with cols_pct[2]:
-        st.metric('评级', result['evaluation'])
-    with cols_pct[3]:
-        ev_pct = float(result['percent_contributions']['重复性占比 %EV'].replace('%', ''))
-        av_pct = float(result['percent_contributions']['再现性占比 %AV'].replace('%', ''))
-        pv_pct = float(result['percent_contributions']['部件间占比 %PV'].replace('%', ''))
-        if pv_pct > 80:
-            st.success('✓ 测量系统能力充足')
-        elif pv_pct > 50:
-            st.warning('⚠ 测量系统能力临界')
+    # --- 运行图 ---
+    with t4:
+        if not numeric_cols:
+            st.error('无数值列')
         else:
-            st.error('✗ 测量系统能力不足')
+            dc = st.selectbox('数据列', numeric_cols, key='run_col')
+            tgt = st.text_input('目标线 (可选)', placeholder='留空=不显示', key='run_tgt')
+            target = float(tgt) if tgt else None
+            r = quality_tools.run_chart(df[dc].dropna().values, target)
+            if 'error' in r:
+                st.error(r['error'])
+            else:
+                st.plotly_chart(r['chart'], use_container_width=True)
+                with st.expander('📊 运行图统计'):
+                    for k, v in r['stats'].items():
+                        st.metric(k, v)
 
-    st.plotly_chart(result['chart'], use_container_width=True)
+    # --- 鱼骨图 ---
+    with t5:
+        st.caption('根本原因分析 — 输入问题和大类原因')
+        prob = st.text_input('问题描述', value='产品合格率下降', key='fish_problem')
+        st.write('**原因分类** (每行一个大类，冒号后跟原因列表，逗号分隔)')
+        default_text = (
+            '人员: 操作技能不足, 疲劳作业, 培训不到位\n'
+            '机器: 设备老化, 维护不及时, 参数漂移\n'
+            '材料: 来料批次差异, 存储不当\n'
+            '方法: SOP 不清晰, 工艺参数不合理\n'
+            '环境: 温湿度波动, 洁净度不足\n'
+            '测量: 量具精度不够, 测量方法不当'
+        )
+        raw = st.text_area('输入格式: 大类: 原因1, 原因2, ...', value=default_text, height=200, key='fish_input')
 
-    with st.expander('📋 Gage R&R 评估标准'):
-        standards = pd.DataFrame({
-            '%GRR范围': ['< 10%', '10% ~ 30%', '> 30%'],
-            '评级': ['优秀', '临界', '不可接受'],
-            '说明': [
-                '测量系统能力充足，可用于过程控制',
-                '可接受但可能需要改进，取决于应用重要性',
-                '测量系统需要改进，查找并消除主要变异来源',
-            ],
-            'ndc要求': ['≥ 5', '2 ~ 4', '< 2'],
-        })
-        st.table(standards)
+        if st.button('🔄 生成鱼骨图', use_container_width=True):
+            cats = {}
+            for line in raw.strip().split('\n'):
+                if ':' in line:
+                    name, causes = line.split(':', 1)
+                    cats[name.strip()] = [c.strip() for c in causes.split(',') if c.strip()]
+            if cats:
+                r = quality_tools.fishbone_diagram(prob, cats)
+                st.plotly_chart(r['chart'], use_container_width=True)
+            else:
+                st.error('请按格式输入')
+
+    show_data_info()
 
 
-# ==================== 正态性检验 ====================
-def normality_test_page():
-    st.header('🔢 正态性检验')
-    st.caption('检验数据是否服从正态分布 (Shapiro-Wilk, Anderson-Darling, D\'Agostino)')
-
-    if 'user_data' not in st.session_state or st.session_state.user_data is None:
-        st.warning('⚠️ 请先在「数据导入」中加载数据')
+# ==================== 5. 测量系统分析 MSA ====================
+def page_msa():
+    st.header('🔬 测量系统分析 MSA')
+    df = check_data()
+    if df is None:
+        st.warning('⚠️ 请先加载数据')
         return
 
-    df = st.session_state.user_data
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    all_cols = df.columns.tolist()
 
-    if not numeric_cols:
-        st.error('数据中没有数值列')
+    t1, t2, t3 = st.tabs(['计量型 Gage R&R', '计数型 Gage R&R', '测量不确定度'])
+
+    # --- 计量型 GRR ---
+    with t1:
+        st.caption('交叉型 (Crossed) 平均值-极差法')
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            pc = st.selectbox('部件列', all_cols, key='grr_part')
+        with c2:
+            oc = st.selectbox('操作员列', all_cols, key='grr_op')
+        with c3:
+            mc = st.selectbox('测量值列', numeric_cols, key='grr_meas')
+
+        parts = df[pc].values
+        ops = df[oc].values
+        meas = df[mc].values
+        n_parts = len(np.unique(parts))
+        n_ops = len(np.unique(ops))
+        st.info(f'📋 {n_parts} 部件 × {n_ops} 操作员 × {len(meas)} 次测量')
+
+        if n_parts < 2 or n_ops < 2:
+            st.error('需至少 2 部件 2 操作员')
+        else:
+            r = gage_rr.gage_rr_crossed(parts, ops, meas)
+            st.subheader('📊 方差分量')
+            cs = st.columns(5)
+            with cs[0]: st.metric('EV 重复性 σ', r['stddev_contributions']['重复性 (EV)'])
+            with cs[1]: st.metric('AV 再现性 σ', r['stddev_contributions']['再现性 (AV)'])
+            with cs[2]: st.metric('GRR σ', r['stddev_contributions']['GRR'])
+            with cs[3]: st.metric('PV 部件 σ', r['stddev_contributions']['部件间 (PV)'])
+            with cs[4]: st.metric('ndc', r['ndc'])
+            cs2 = st.columns(2)
+            grr_pct = float(r['percent_contributions']['GRR占比 %GRR'].replace('%', ''))
+            with cs2[0]: st.metric('%GRR', f'{grr_pct:.1f}%')
+            with cs2[1]: st.metric('评级', r['evaluation'])
+            st.plotly_chart(r['chart'], use_container_width=True)
+            with st.expander('📋 评估标准'):
+                st.table(pd.DataFrame({
+                    '%GRR': ['< 10%', '10%~30%', '> 30%'],
+                    '评级': ['优秀', '临界', '不可接受'],
+                    '说明': ['测量系统能力充足', '可接受但可能需改进', '需要改进'],
+                    'ndc': ['≥ 5', '2~4', '< 2'],
+                }))
+
+    # --- 计数型 GRR ---
+    with t2:
+        st.caption('属性一致性分析 — Kappa 统计法')
+        st.write('**数据格式要求**: 参考列 (0/1) + 各操作员判定列 (0/1)')
+
+        if not numeric_cols:
+            st.error('无可用数值列')
+        else:
+            ref_col = st.selectbox('参考结果列', numeric_cols, key='attr_ref')
+            op_cols = st.multiselect('操作员判定列 (可多选)', [c for c in numeric_cols if c != ref_col],
+                                     key='attr_ops')
+            if op_cols and st.button('🔍 执行分析', use_container_width=True):
+                ref = df[ref_col].values
+                appraisers = {c: df[c].values for c in op_cols}
+                r = msa_advanced.attribute_gage_rr(ref, appraisers)
+                st.plotly_chart(r['chart'], use_container_width=True)
+                st.subheader('Kappa 汇总')
+                st.table(pd.DataFrame(r['kappa_summary']))
+                st.subheader('操作员间一致性')
+                st.metric('两两一致性均值', f'{r["between_operators_agreement"]:.1%}')
+
+    # --- 测量不确定度 ---
+    with t3:
+        st.caption('基于 GUM 法的测量不确定度评定')
+        if not numeric_cols:
+            st.error('无可用数值列')
+        else:
+            dc = st.selectbox('重复测量列', numeric_cols, key='unc_col')
+            data = df[dc].dropna().values
+            c1, c2 = st.columns(2)
+            with c1:
+                res = st.number_input('仪器分辨率', value=0.001, format='%.6f', key='unc_res')
+                cal = st.number_input('校准不确定度 (k=2)', value=0.0, format='%.6f', key='unc_cal')
+            with c2:
+                tr = st.number_input('温度波动范围 (°C)', value=0.0, step=0.5, key='unc_tr')
+                tc = st.number_input('温度系数 (/°C)', value=0.0, format='%.6f', key='unc_tc')
+            if st.button('📐 评定不确定度', use_container_width=True):
+                r = msa_advanced.measurement_uncertainty(data, res, cal, tr, tc)
+                if 'error' in r:
+                    st.error(r['error'])
+                else:
+                    st.plotly_chart(r['chart'], use_container_width=True)
+                    st.subheader('不确定度结果')
+                    for k, v in r['result'].items():
+                        st.metric(k, v)
+                    with st.expander('📊 不确定度预算'):
+                        for k, v in r['budget'].items():
+                            st.metric(k, v)
+
+    show_data_info()
+
+
+# ==================== 6. 统计推断 ====================
+def page_stats():
+    st.header('🔢 统计推断')
+    df = check_data()
+    if df is None:
+        st.warning('⚠️ 请先加载数据')
         return
 
-    data_col = st.selectbox('选择数据列', numeric_cols, key='norm_col')
-    data = df[data_col].dropna().values
-
-    if len(data) < 3:
-        st.error('需要至少3个数据点')
-        return
-
-    alpha = st.slider('显著性水平 α', 0.01, 0.10, 0.05, 0.01)
-
-    result = pareto_histogram.normality_test(data, alpha)
-
-    if 'error' in result:
-        st.error(result['error'])
-        return
-
-    # 显示检验结果
-    st.subheader('检验结果')
-
-    cols = st.columns(len(result))
-    for i, (test_name, test_result) in enumerate(result.items()):
-        with cols[i]:
-            is_normal = test_result['normal']
-            delta_color = 'normal' if is_normal else 'inverse'
-            st.metric(test_name,
-                      f'{"正态 ✓" if is_normal else "非正态 ✗"}',
-                      delta=f'p={test_result.get("p_value", "N/A"):.4f}' if 'p_value' in test_result else '',
-                      delta_color=delta_color)
-
-    # 同时显示直方图和Q-Q图
-    hist_result = pareto_histogram.histogram_with_stats(data, '数据分布与正态拟合')
-    if 'chart' in hist_result:
-        st.plotly_chart(hist_result['chart'], use_container_width=True)
-
-
-# ==================== 散点图 & 回归 ====================
-def scatter_and_regression():
-    st.header('📉 散点图 & 回归分析')
-    st.caption('探索两个变量之间的关系，拟合线性回归')
-
-    if 'user_data' not in st.session_state or st.session_state.user_data is None:
-        st.warning('⚠️ 请先在「数据导入」中加载数据')
-        return
-
-    df = st.session_state.user_data
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    text_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
 
-    if len(numeric_cols) < 2:
-        st.error('至少需要两个数值列')
+    t1, t2, t3, t4 = st.tabs(['正态性检验', '假设检验', '回归分析', '相关性矩阵'])
+
+    # --- 正态性检验 ---
+    with t1:
+        if not numeric_cols:
+            st.error('无数值列')
+        else:
+            dc = st.selectbox('数据列', numeric_cols, key='norm_col')
+            data = df[dc].dropna().values
+            if len(data) < 3:
+                st.error('至少 3 个数据点')
+            else:
+                alpha = st.slider('α', 0.01, 0.10, 0.05, 0.01, key='norm_alpha')
+                r = pareto_histogram.normality_test(data, alpha)
+                if 'error' in r:
+                    st.error(r['error'])
+                else:
+                    st.subheader('检验结果')
+                    cs = st.columns(len(r))
+                    for i, (tn, tr) in enumerate(r.items()):
+                        with cs[i]:
+                            is_n = tr['normal']
+                            st.metric(tn, '正态 ✓' if is_n else '非正态 ✗',
+                                      delta=f'p={tr.get("p_value", "N/A"):.4f}' if 'p_value' in tr else '',
+                                      delta_color='normal' if is_n else 'inverse')
+                    hist_r = pareto_histogram.histogram_with_stats(data, '数据分布与正态拟合')
+                    if 'chart' in hist_r:
+                        st.plotly_chart(hist_r['chart'], use_container_width=True)
+
+    # --- 假设检验 ---
+    with t2:
+        if not numeric_cols:
+            st.error('无数值列')
+        else:
+            test_type = st.selectbox('检验类型', [
+                '单样本 t 检验', '双样本 t 检验 (独立)', '双样本 t 检验 (配对)',
+                '单因素 ANOVA', '等方差检验'
+            ], key='ht_type')
+
+            if test_type == '单样本 t 检验':
+                dc = st.selectbox('数据列', numeric_cols, key='t1_col')
+                mu0 = st.number_input('原假设均值 μ₀', value=0.0, key='t1_mu')
+                if st.button('执行检验', use_container_width=True):
+                    r = stats_tools.t_test_one_sample(df[dc].dropna().values, mu0)
+                    if 'error' in r:
+                        st.error(r['error'])
+                    else:
+                        s = '显著 ✓ (拒绝 H₀)' if r['significant'] else '不显著 (保留 H₀)'
+                        st.subheader(s)
+                        cs = st.columns(5)
+                        with cs[0]: st.metric('t 统计量', f'{r["t_stat"]:.4f}')
+                        with cs[1]: st.metric('p 值', f'{r["p_val"]:.6f}')
+                        with cs[2]: st.metric('样本均值', f'{r["mean"]:.4f}')
+                        with cs[3]: st.metric('样本量', r['n'])
+                        with cs[4]: st.metric('95% CI', f'[{r["ci_95"][0]:.4f}, {r["ci_95"][1]:.4f}]')
+
+            elif test_type in ['双样本 t 检验 (独立)', '双样本 t 检验 (配对)']:
+                c1, c2 = st.columns(2)
+                with c1: dc1 = st.selectbox('样本 1 列', numeric_cols, key='t2a')
+                with c2: dc2 = st.selectbox('样本 2 列', numeric_cols, key='t2b')
+                paired = '配对' in test_type
+                if st.button('执行检验', use_container_width=True):
+                    r = stats_tools.t_test_two_sample(df[dc1].dropna().values, df[dc2].dropna().values, paired)
+                    if 'error' in r:
+                        st.error(r['error'])
+                    else:
+                        s = '显著 ✓ (两组有差异)' if r['significant'] else '不显著 (无显著差异)'
+                        st.subheader(s)
+                        cs = st.columns(6)
+                        with cs[0]: st.metric('t', f'{r["t_stat"]:.4f}')
+                        with cs[1]: st.metric('p', f'{r["p_val"]:.6f}')
+                        with cs[2]: st.metric('均值1', f'{r["mean1"]:.4f}')
+                        with cs[3]: st.metric('均值2', f'{r["mean2"]:.4f}')
+                        with cs[4]: st.metric('n1', r['n1'])
+                        with cs[5]: st.metric('n2', r['n2'])
+
+            elif test_type == '单因素 ANOVA':
+                st.write('**选择分组列 + 数值列**')
+                c1, c2 = st.columns(2)
+                with c1:
+                    gc = st.selectbox('分组列 (类别)', text_cols + numeric_cols, key='anova_g')
+                with c2:
+                    vc = st.selectbox('数值列', numeric_cols, key='anova_v')
+                if st.button('执行 ANOVA', use_container_width=True):
+                    groups = {str(n): g[vc].dropna().values for n, g in df.groupby(gc)}
+                    r = stats_tools.one_way_anova(groups)
+                    if 'error' in r:
+                        st.error(r['error'])
+                    else:
+                        sig = '显著 ✓ (组间有差异)' if r['significant'] else '不显著 (组间无差异)'
+                        st.subheader(sig)
+                        st.metric('F 值', f'{r["f_stat"]:.4f}')
+                        st.metric('p 值', f'{r["p_val"]:.6f}')
+                        st.table(pd.DataFrame(r['anova_table']))
+                        st.plotly_chart(r['chart'], use_container_width=True)
+
+            elif test_type == '等方差检验':
+                gc = st.selectbox('分组列', text_cols + numeric_cols, key='ev_g')
+                vc = st.selectbox('数值列', numeric_cols, key='ev_v')
+                if st.button('执行检验', use_container_width=True):
+                    groups = {str(n): g[vc].dropna().values for n, g in df.groupby(gc)}
+                    r = stats_tools.equal_variance_test(groups)
+                    if 'error' in r:
+                        st.error(r['error'])
+                    else:
+                        st.subheader('等方差检验结果')
+                        cs = st.columns(2)
+                        with cs[0]:
+                            lr = r['Levene']
+                            st.metric('Levene', '等方差 ✓' if lr['equal'] else '不相等 ✗',
+                                      delta=f'p={lr["p_value"]:.4f}')
+                        with cs[1]:
+                            br = r['Bartlett']
+                            st.metric('Bartlett', '等方差 ✓' if br['equal'] else '不相等 ✗',
+                                      delta=f'p={br["p_value"]:.4f}')
+                        st.write('**各组标准差**')
+                        for k, v in r['group_stds'].items():
+                            st.metric(k, v)
+
+    # --- 回归分析 ---
+    with t3:
+        if len(numeric_cols) < 2:
+            st.error('至少需要 2 个数值列')
+        else:
+            reg_type = st.radio('回归类型', ['一元线性回归', '多元线性回归'], horizontal=True, key='reg_type')
+            if reg_type == '一元线性回归':
+                c1, c2 = st.columns(2)
+                with c1: xc = st.selectbox('X 轴', numeric_cols, key='s_x')
+                with c2: yc = st.selectbox('Y 轴', numeric_cols, index=min(1, len(numeric_cols)-1), key='s_y')
+                x, y = df[xc].dropna().values, df[yc].dropna().values
+                ml = min(len(x), len(y))
+                if ml >= 3:
+                    r = pareto_histogram.scatter_plot(x[:ml], y[:ml], x_label=xc, y_label=yc)
+                    if 'error' in r:
+                        st.error(r['error'])
+                    else:
+                        st.plotly_chart(r['chart'], use_container_width=True)
+                        cs = st.columns(5)
+                        with cs[0]: st.metric('斜率', f'{r["slope"]:.4f}')
+                        with cs[1]: st.metric('截距', f'{r["intercept"]:.4f}')
+                        with cs[2]: st.metric('R²', f'{r["r_squared"]:.4f}')
+                        with cs[3]: st.metric('r', f'{r["r_value"]:.4f}')
+                        with cs[4]: st.metric('p', f'{r["p_value"]:.6f}')
+                        if r['p_value'] < 0.05:
+                            st.success('✓ 回归关系显著 (p < 0.05)')
+                        else:
+                            st.info('回归关系不显著 (p ≥ 0.05)')
+            else:
+                yc = st.selectbox('因变量 Y', numeric_cols, key='mr_y')
+                r = stats_tools.multiple_regression(df, yc)
+                if 'error' in r:
+                    st.error(r['error'])
+                else:
+                    st.plotly_chart(r['chart'], use_container_width=True)
+                    st.subheader('回归系数')
+                    st.dataframe(r['coef_df'], use_container_width=True)
+                    cs = st.columns(3)
+                    with cs[0]: st.metric('R²', f'{r["r_squared"]:.4f}')
+                    with cs[1]: st.metric('Adjust R²', f'{r["adj_r2"]:.4f}')
+                    with cs[2]: st.metric('样本量', r['n'])
+
+    # --- 相关性矩阵 ---
+    with t4:
+        if len(numeric_cols) < 2:
+            st.error('至少需要 2 个数值列')
+        else:
+            r = stats_tools.correlation_matrix(df)
+            if 'error' in r:
+                st.error(r['error'])
+            else:
+                st.plotly_chart(r['chart'], use_container_width=True)
+                st.caption(f'{r["n"]} 样本 · {r["n_cols"]} 变量')
+                with st.expander('📋 相关系数表'):
+                    st.dataframe(r['corr_df'].style.background_gradient(cmap='RdBu_r', vmin=-1, vmax=1))
+
+    show_data_info()
+
+
+# ==================== 7. 高级分析 ====================
+def page_advanced():
+    st.header('🧪 高级分析')
+    df = check_data()
+    if df is None:
+        st.warning('⚠️ 请先加载数据')
         return
 
-    col1, col2 = st.columns(2)
-    with col1:
-        x_col = st.selectbox('X 轴变量', numeric_cols, key='scatter_x')
-    with col2:
-        y_col = st.selectbox('Y 轴变量', numeric_cols, index=min(1, len(numeric_cols)-1), key='scatter_y')
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    all_cols = df.columns.tolist()
 
-    x = df[x_col].dropna().values
-    y = df[y_col].dropna().values
+    t1, t2, t3, t4 = st.tabs(['DOE 试验设计', 'Weibull 可靠性', '抽样方案', 'FMEA'])
 
-    min_len = min(len(x), len(y))
-    x, y = x[:min_len], y[:min_len]
+    # --- DOE ---
+    with t1:
+        st.caption('全因子 DOE — 因子列需为 2 水平')
+        if len(numeric_cols) < 2:
+            st.warning('需至少 2 列 (因子 + 响应)')
+        else:
+            rc = st.selectbox('响应变量列', numeric_cols, key='doe_resp')
+            r = advanced_analysis.doe_full_factorial(df, rc)
+            if 'error' in r:
+                st.error(r['error'])
+            else:
+                st.plotly_chart(r['chart'], use_container_width=True)
+                st.subheader('因子效应表')
+                st.dataframe(r['effects_table'], use_container_width=True)
+                st.caption(f'{r["total_runs"]} 次试验 · {r["factors"]} 个因子')
 
-    if min_len < 3:
-        st.error('需要至少3对有效数据')
-        return
+    # --- Weibull ---
+    with t2:
+        st.caption('可靠性分析 — 失效时间数据')
+        if not numeric_cols:
+            st.error('无数值列')
+        else:
+            dc = st.selectbox('失效时间列', numeric_cols, key='weibull_col')
+            r = advanced_analysis.weibull_analysis(df[dc].dropna().values)
+            if 'error' in r:
+                st.error(r['error'])
+            else:
+                st.plotly_chart(r['chart'], use_container_width=True)
+                cs = st.columns(len(r['params']))
+                for i, (k, v) in enumerate(r['params'].items()):
+                    cs[i].metric(k, v)
 
-    result = pareto_histogram.scatter_plot(x, y, x_label=x_col, y_label=y_col)
+    # --- 抽样方案 ---
+    with t3:
+        st.caption('OC 曲线分析 — 评估抽样方案效能')
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            N = st.number_input('批数量 N', 10, 100000, 1000, key='sp_N')
+        with c2:
+            n = st.number_input('样本量 n', 1, N, min(50, N // 5), key='sp_n')
+        with c3:
+            c_val = st.number_input('合格判定数 Ac', 0, 50, 0, key='sp_c')
+        with c4:
+            aql = st.number_input('AQL (%)', 0.01, 10.0, 1.0, step=0.1, key='sp_aql')
 
-    if 'error' in result:
-        st.error(result['error'])
-        return
+        if st.button('📊 生成 OC 曲线', use_container_width=True):
+            r = advanced_analysis.sampling_plan_oc_curve(N, n, c_val, aql)
+            if 'error' in r:
+                st.error(r['error'])
+            else:
+                st.plotly_chart(r['chart'], use_container_width=True)
+                with st.expander('📊 抽样参数'):
+                    for k, v in r['stats'].items():
+                        st.metric(k, v)
 
-    st.plotly_chart(result['chart'], use_container_width=True)
+    # --- FMEA ---
+    with t4:
+        st.caption('失效模式与影响分析 — RPN 风险评估')
+        st.write('**输入 FMEA 数据**')
 
-    # 回归摘要
-    cols = st.columns(5)
-    with cols[0]:
-        st.metric('斜率', f'{result["slope"]:.4f}')
-    with cols[1]:
-        st.metric('截距', f'{result["intercept"]:.4f}')
-    with cols[2]:
-        st.metric('R²', f'{result["r_squared"]:.4f}')
-    with cols[3]:
-        st.metric('相关系数 r', f'{result["r_value"]:.4f}')
-    with cols[4]:
-        st.metric('p 值', f'{result["p_value"]:.6f}')
+        # 检查当前数据是否已是 FMEA 格式
+        is_fmea_format = all(c in df.columns for c in ['模式', '严重度', '发生度', '探测度'])
 
-    if result['p_value'] < 0.05:
-        st.success('✓ 回归关系显著 (p < 0.05)')
-    else:
-        st.info('回归关系不显著 (p ≥ 0.05)')
+        if is_fmea_format:
+            st.success('✅ 检测到 FMEA 格式数据')
+            if st.button('🔍 分析当前数据', use_container_width=True, type='primary'):
+                fmea_data = df[['模式', '严重度', '发生度', '探测度']].to_dict('records')
+                r = advanced_analysis.fmea_analysis(fmea_data)
+                if 'error' in r:
+                    st.error(r['error'])
+                else:
+                    st.plotly_chart(r['chart'], use_container_width=True)
+                    st.subheader('风险评估汇总')
+                    cs = st.columns(4)
+                    with cs[0]: st.metric('总失效模式', r['summary']['总失效模式'])
+                    with cs[1]: st.metric('高风险', r['summary']['高风险 (RPN≥200)'], delta_color='inverse')
+                    with cs[2]: st.metric('中风险', r['summary']['中风险 (100≤RPN<200)'])
+                    with cs[3]: st.metric('低风险', r['summary']['低风险 (RPN<100)'])
+
+                    st.subheader('TOP 3 风险项')
+                    st.table(pd.DataFrame(r['top_risks']))
+                    st.dataframe(r['fmea_df'], use_container_width=True)
+        else:
+            st.info('💡 请在「数据导入」中加载 FMEA 示例数据，或手动输入以下格式：')
+            st.caption('列: 模式, 严重度, 发生度, 探测度')
+
+            # 手动输入
+            with st.form('fmea_form'):
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    mode = st.text_input('失效模式', key='fm_mode')
+                with c2:
+                    sev = st.number_input('严重度 S (1-10)', 1, 10, 5, key='fm_sev')
+                with c3:
+                    occ = st.number_input('发生度 O (1-10)', 1, 10, 5, key='fm_occ')
+                with c4:
+                    det = st.number_input('探测度 D (1-10)', 1, 10, 5, key='fm_det')
+                if st.form_submit_button('➕ 添加'):
+                    if 'fmea_records' not in st.session_state:
+                        st.session_state.fmea_records = []
+                    st.session_state.fmea_records.append({
+                        '模式': mode or f'模式{len(st.session_state.fmea_records)+1}',
+                        '严重度': sev, '发生度': occ, '探测度': det
+                    })
+                    st.success('已添加')
+                    st.rerun()
+
+            if 'fmea_records' in st.session_state and st.session_state.fmea_records:
+                st.write(f'已录入 {len(st.session_state.fmea_records)} 条记录')
+                st.dataframe(pd.DataFrame(st.session_state.fmea_records), use_container_width=True)
+                if st.button('🔍 执行 FMEA 分析', use_container_width=True, type='primary'):
+                    r = advanced_analysis.fmea_analysis(st.session_state.fmea_records)
+                    if 'error' in r:
+                        st.error(r['error'])
+                    else:
+                        st.plotly_chart(r['chart'], use_container_width=True)
+                        st.subheader('风险评估汇总')
+                        cs = st.columns(4)
+                        with cs[0]: st.metric('总模式', r['summary']['总失效模式'])
+                        with cs[1]: st.metric('高风险', r['summary']['高风险 (RPN≥200)'])
+                        with cs[2]: st.metric('中风险', r['summary']['中风险 (100≤RPN<200)'])
+                        with cs[3]: st.metric('低风险', r['summary']['低风险 (RPN<100)'])
+                        st.subheader('TOP 3 风险项')
+                        st.table(pd.DataFrame(r['top_risks']))
+                        st.dataframe(r['fmea_df'], use_container_width=True)
+
+                if st.button('🗑️ 清空 FMEA 记录'):
+                    st.session_state.fmea_records = []
+                    st.rerun()
+
+    show_data_info()
 
 
 # ==================== 主路由 ====================
 def main():
     if menu == '📁 数据导入':
-        load_data()
+        page_data_import()
     elif menu == '📈 SPC 控制图':
-        spc_control_charts()
+        page_spc()
     elif menu == '🎯 过程能力分析':
-        process_capability_analysis()
-    elif menu == '📊 帕累托图 & 直方图':
-        pareto_and_histogram()
-    elif menu == '🔬 量具 R&R 分析':
-        gage_rr_analysis()
-    elif menu == '🔢 正态性检验':
-        normality_test_page()
-    elif menu == '📉 散点图 & 回归':
-        scatter_and_regression()
+        page_capability()
+    elif menu == '📊 质量图形工具':
+        page_quality_tools()
+    elif menu == '🔬 测量系统分析 MSA':
+        page_msa()
+    elif menu == '🔢 统计推断':
+        page_stats()
+    elif menu == '🧪 高级分析':
+        page_advanced()
 
 
 if __name__ == '__main__':
