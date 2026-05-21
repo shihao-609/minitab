@@ -567,25 +567,67 @@ def page_quality_tools():
 
     # --- 鱼骨图 ---
     with t5:
-        st.caption('根本原因分析 — 输入问题和大类原因')
+        st.caption('根本原因分析 — 支持多级细分')
         prob = st.text_input('问题描述', value='产品合格率下降', key='fish_problem')
-        st.write('**原因分类** (每行一个大类，冒号后跟原因列表，逗号分隔)')
+        st.write('**输入格式说明**')
+        st.caption('• 每行一个大类，冒号后跟原因，逗号分隔\n'
+                   '• 一级原因直接写名称\n'
+                   '• 二级分类用 `{分类名: 子原因1, 子原因2}` 格式')
         default_text = (
-            '人员: 操作技能不足, 疲劳作业, 培训不到位\n'
-            '机器: 设备老化, 维护不及时, 参数漂移\n'
-            '材料: 来料批次差异, 存储不当\n'
-            '方法: SOP 不清晰, 工艺参数不合理\n'
-            '环境: 温湿度波动, 洁净度不足\n'
-            '测量: 量具精度不够, 测量方法不当'
+            '人员: 操作技能不足, {培训体系: 新员工多, 考核不严}, 疲劳作业, 质量意识淡薄\n'
+            '机器: 设备老化, {维护管理: 保养不及时, 备件短缺}, 参数漂移\n'
+            '材料: 来料批次差异, {供应商: 审核不严格, 变更未验证}, 存储不当\n'
+            '方法: SOP 不清晰, {工艺设计: 参数窗口过宽, 未做DOE验证}\n'
+            '环境: 温湿度波动, 洁净度不足, 照明不够\n'
+            '测量: 量具精度不够, {校准管理: 周期过长, 标准件失效}, 测量方法不当'
         )
-        raw = st.text_area('输入格式: 大类: 原因1, 原因2, ...', value=default_text, height=200, key='fish_input')
+        raw = st.text_area('输入原因', value=default_text, height=220, key='fish_input')
 
         if st.button('🔄 生成鱼骨图', use_container_width=True):
             cats = {}
             for line in raw.strip().split('\n'):
-                if ':' in line:
-                    name, causes = line.split(':', 1)
-                    cats[name.strip()] = [c.strip() for c in causes.split(',') if c.strip()]
+                if ':' not in line:
+                    continue
+                name, causes_str = line.split(':', 1)
+                name = name.strip()
+                cats[name] = []
+
+                # 解析原因列表，支持 {二级分类: 子原因} 嵌套
+                parts = []
+                depth = 0
+                current = ''
+                for ch in causes_str:
+                    if ch == '{':
+                        depth += 1
+                        if depth == 1:
+                            if current.strip():
+                                parts.append(current.strip())
+                            current = ''
+                        else:
+                            current += ch
+                    elif ch == '}':
+                        depth -= 1
+                        if depth == 0:
+                            # 解析二级分类
+                            inner = current.strip()
+                            if ':' in inner:
+                                sub_name, sub_causes = inner.split(':', 1)
+                                sub_list = [c.strip() for c in sub_causes.split(',') if c.strip()]
+                                parts.append({sub_name.strip(): sub_list})
+                            current = ''
+                        else:
+                            current += ch
+                    elif ch == ',' and depth == 0:
+                        if current.strip():
+                            parts.append(current.strip())
+                        current = ''
+                    else:
+                        current += ch
+                if current.strip():
+                    parts.append(current.strip())
+
+                cats[name] = parts
+
             if cats:
                 r = quality_tools.fishbone_diagram(prob, cats)
                 st.plotly_chart(r['chart'], use_container_width=True)
