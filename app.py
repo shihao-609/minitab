@@ -569,10 +569,10 @@ def page_quality_tools():
     with t5:
         st.caption('根本原因分析 — 支持多级细分')
         prob = st.text_input('问题描述', value='产品合格率下降', key='fish_problem')
-        st.write('**输入格式说明**')
-        st.caption('• 每行一个大类，冒号后跟原因，逗号分隔\n'
+        st.write('**输入格式说明**（中英文标点均可）')
+        st.caption('• 每行一个大类，冒号/：后跟原因，逗号/，分隔\n'
                    '• 一级原因直接写名称\n'
-                   '• 二级分类用 `{分类名: 子原因1, 子原因2}` 格式')
+                   '• 二级分类用 `{分类名: 子原因1, 子原因2}` 或 `｛分类名：子原因1，子原因2｝` 格式')
         default_text = (
             '人员: 操作技能不足, {培训体系: 新员工多, 考核不严}, 疲劳作业, 质量意识淡薄\n'
             '机器: 设备老化, {维护管理: 保养不及时, 备件短缺}, 参数漂移\n'
@@ -584,9 +584,18 @@ def page_quality_tools():
         raw = st.text_area('输入原因', value=default_text, height=220, key='fish_input')
 
         if st.button('🔄 生成鱼骨图', use_container_width=True):
+            # 自动转换中文标点为英文（冒号、逗号、大括号、分号）
+            raw_norm = (raw.strip()
+                        .replace('：', ':')
+                        .replace('，', ',')
+                        .replace('｛', '{')
+                        .replace('｝', '}')
+                        .replace('；', ';'))
+
             cats = {}
-            for line in raw.strip().split('\n'):
-                if ':' not in line:
+            for line in raw_norm.split('\n'):
+                line = line.strip()
+                if not line or ':' not in line:
                     continue
                 name, causes_str = line.split(':', 1)
                 name = name.strip()
@@ -608,7 +617,6 @@ def page_quality_tools():
                     elif ch == '}':
                         depth -= 1
                         if depth == 0:
-                            # 解析二级分类
                             inner = current.strip()
                             if ':' in inner:
                                 sub_name, sub_causes = inner.split(':', 1)
