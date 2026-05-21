@@ -95,71 +95,90 @@ def run_chart(data, target=None):
 
 def fishbone_diagram(problem, categories):
     """
-    鱼骨图 — 交互式石川图
+    鱼骨图 — 经典石川图（上下交替鱼骨样式）
     - problem: 问题描述
     - categories: dict, {大类: [原因1, 原因2, ...]}
     """
     fig = go.Figure()
 
-    # 主干线 (水平)
-    fig.add_shape(type='line', x0=-4.5, y0=0, x1=4.5, y1=0,
-                  line=dict(color='#333', width=3))
-
-    # 鱼头 (问题)
-    fig.add_trace(go.Scatter(x=[5], y=[0], mode='markers+text',
-                             marker=dict(size=30, color='#d62728', symbol='triangle-right'),
-                             text=[problem], textposition='middle right',
-                             textfont=dict(size=13, color='#d62728'),
-                             showlegend=False))
-
-    # 大骨 (分类)
     cat_names = list(categories.keys())
     n_cats = len(cat_names)
-    angles = np.linspace(60, 120, n_cats) * np.pi / 180  # 角度分布
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd', '#8c564b', '#e377c2',
+              '#bcbd22', '#17becf']
 
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd', '#8c564b', '#e377c2']
+    # 主干水平线
+    spine_start = -4.5
+    spine_end = 5.0
+    fig.add_shape(type='line', x0=spine_start, y0=0, x1=spine_end, y1=0,
+                  line=dict(color='#333', width=3))
+
+    # 鱼头（问题在右端）
+    fig.add_trace(go.Scatter(x=[spine_end], y=[0], mode='markers+text',
+                             marker=dict(size=28, color='#d62728', symbol='triangle-right'),
+                             text=[f'<b>{problem}</b>'], textposition='middle right',
+                             textfont=dict(size=14, color='#d62728'),
+                             showlegend=False))
+
+    # 大骨上下交替分布
+    spacing = (spine_end - spine_start - 1.0) / max(n_cats, 1)
+    bone_length = 2.2
+    cause_bone_length = 1.4
 
     for i, (cat_name, causes) in enumerate(categories.items()):
-        angle = angles[i]
-        # 大骨起点在主干上
-        spine_x = -2 + i * 6 / max(n_cats - 1, 1)  # 沿主干分布
-        dx = 2.5 * np.cos(angle)
-        dy = 2.5 * np.sin(angle)
+        col = colors[i % len(colors)]
+        is_upper = (i % 2 == 0)  # 偶数在上，奇数在下
+        direction = 1 if is_upper else -1
+
+        # 大骨起点（沿主干从左到右均匀分布）
+        sx = spine_start + 0.5 + i * spacing
+        # 大骨角度（上约55度，下约-55度）
+        angle = 55 if is_upper else -55
+        rad = np.radians(angle)
+        ex = sx + bone_length * np.cos(rad)
+        ey = 0 + bone_length * np.sin(rad)
 
         # 大骨线
-        fig.add_shape(type='line', x0=spine_x, y0=0,
-                      x1=spine_x + dx, y1=dy,
-                      line=dict(color=colors[i % len(colors)], width=2))
+        fig.add_shape(type='line', x0=sx, y0=0, x1=ex, y1=ey,
+                      line=dict(color=col, width=2.5))
 
-        # 分类标签
-        fig.add_annotation(x=spine_x + dx + 0.3 * np.cos(angle),
-                           y=dy + 0.3 * np.sin(angle),
+        # 分类标签（在大骨末端）
+        fig.add_annotation(x=ex + 0.35 * np.cos(rad),
+                           y=ey + 0.35 * np.sin(rad),
                            text=f'<b>{cat_name}</b>',
-                           showarrow=False, font=dict(size=12, color=colors[i % len(colors)]))
+                           showarrow=False,
+                           font=dict(size=12, color=col))
 
-        # 小骨 (原因)
-        for j, cause in enumerate(causes):
-            cx = spine_x + dx * (0.3 + 0.5 * j / max(len(causes), 1))
-            cy = dy * (0.3 + 0.5 * j / max(len(causes), 1))
-            small_dx = 0.6 * np.cos(angle + (-1)**j * 0.3)
-            small_dy = 0.6 * np.sin(angle + (-1)**j * 0.3)
+        # 小骨（原因）从大骨上延伸
+        n_causes = len(causes)
+        if n_causes > 0:
+            cause_step = bone_length / max(n_causes + 1, 2)
+            for j, cause in enumerate(causes):
+                # 小骨起点：沿大骨分布
+                ratio = (j + 1) / (n_causes + 1) if n_causes > 1 else 0.5
+                cx = sx + (ex - sx) * ratio
+                cy = 0 + (ey - 0) * ratio
 
-            fig.add_shape(type='line', x0=cx, y0=cy,
-                          x1=cx + small_dx, y1=cy + small_dy,
-                          line=dict(color=colors[i % len(colors)], width=1))
+                # 小骨角度（从大骨向外延伸，交替微调）
+                cause_angle = angle + (30 if j % 2 == 0 else -30) * (1 if is_upper else -1)
+                cause_rad = np.radians(cause_angle)
+                ce_x = cx + cause_bone_length * np.cos(cause_rad)
+                ce_y = cy + cause_bone_length * np.sin(cause_rad)
 
-            fig.add_annotation(x=cx + small_dx + 0.1,
-                               y=cy + small_dy + 0.05,
-                               text=cause, showarrow=False,
-                               font=dict(size=9, color='#555'))
+                fig.add_shape(type='line', x0=cx, y0=cy, x1=ce_x, y1=ce_y,
+                              line=dict(color=col, width=1.2))
+
+                fig.add_annotation(x=ce_x + 0.08 * np.cos(cause_rad),
+                                   y=ce_y + 0.08 * np.sin(cause_rad),
+                                   text=cause, showarrow=False,
+                                   font=dict(size=9, color='#555'))
 
     # 隐藏坐标轴
-    fig.update_xaxes(visible=False, range=[-6, 8])
-    fig.update_yaxes(visible=False, range=[-4, 4])
+    fig.update_xaxes(visible=False, range=[-6, 10])
+    fig.update_yaxes(visible=False, range=[-4.5, 4.5])
     fig.update_layout(
         title=f'鱼骨图 — {problem}',
         template='plotly_white',
-        height=500,
+        height=520,
         showlegend=False,
         plot_bgcolor='rgba(0,0,0,0)',
         paper_bgcolor='rgba(0,0,0,0)',
