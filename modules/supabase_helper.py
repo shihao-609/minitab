@@ -12,20 +12,36 @@ import streamlit as st
 
 # ==================== 初始化 Supabase 客户端 ====================
 
+def _get_supabase_url() -> str:
+    """支持 st.secrets（Streamlit Cloud）和 .env（本地）"""
+    try:
+        return st.secrets.get("SUPABASE_URL", "") or os.environ.get("SUPABASE_URL", "")
+    except Exception:
+        return os.environ.get("SUPABASE_URL", "")
+
+
+def _get_supabase_key() -> str:
+    """支持 st.secrets（Streamlit Cloud）和 .env（本地）"""
+    try:
+        return st.secrets.get("SUPABASE_ANON_KEY", "") or os.environ.get("SUPABASE_ANON_KEY", "")
+    except Exception:
+        return os.environ.get("SUPABASE_ANON_KEY", "")
+
+
 @st.cache_resource
 def get_supabase_client() -> Client:
     """创建并缓存 Supabase 客户端（单例模式）"""
-    url = os.environ.get("SUPABASE_URL", "")
-    key = os.environ.get("SUPABASE_ANON_KEY", "")
+    url = _get_supabase_url()
+    key = _get_supabase_key()
     return create_client(url, key)
 
 
 def _init_client() -> Client:
     """获取客户端（非缓存版本，用于内部调用）"""
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_ANON_KEY")
+    url = _get_supabase_url()
+    key = _get_supabase_key()
     if not url or not key:
-        raise ValueError("SUPABASE_URL 或 SUPABASE_ANON_KEY 未设置，请检查 .env 文件")
+        raise ValueError("SUPABASE_URL 或 SUPABASE_ANON_KEY 未设置，请检查 .env 文件或 Streamlit Secrets")
     return create_client(url, key)
 
 
