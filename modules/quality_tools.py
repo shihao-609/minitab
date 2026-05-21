@@ -93,31 +93,13 @@ def run_chart(data, target=None):
 
 # ==================== 鱼骨图 (石川图) ====================
 
-def _draw_bone(fig, x0, y0, angle_deg, length, color, width=2):
-    """画一根斜线骨，返回端点坐标"""
-    rad = np.radians(angle_deg)
-    x1 = x0 + length * np.cos(rad)
-    y1 = y0 + length * np.sin(rad)
-    fig.add_shape(type='line', x0=x0, y0=y0, x1=x1, y1=y1,
-                  line=dict(color=color, width=width))
-    return x1, y1
-
-
-def _draw_label(fig, x, y, text, color, font_size=10, align='left'):
-    """在指定位置添加文字标签"""
-    fig.add_annotation(x=x, y=y, text=text, showarrow=False,
-                       font=dict(size=font_size, color=color),
-                       align=align)
-
-
 def fishbone_diagram(problem, categories):
     """
-    鱼骨图 — 经典石川图（所有鱼刺指向鱼头/左侧）
+    鱼骨图 — 经典石川图（大骨约50°角，小骨平行于主干）
     - problem: 问题描述
     - categories: dict
         {大类: [原因1, 原因2, ...]}  或
         {大类: ['原因A', {'二级分类': ['子原因1', '子原因2']}, '原因B']}
-      支持 str（一级原因）和 dict（二级分类+子原因）混合
     """
     fig = go.Figure()
 
@@ -126,99 +108,109 @@ def fishbone_diagram(problem, categories):
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd', '#8c564b', '#e377c2',
               '#bcbd22', '#17becf']
 
-    # 主干水平线（从左到右指向鱼头）
-    spine_start = -5.5
-    spine_end = 6.5
+    # 主干
+    spine_start = -7.0
+    spine_end = 7.5
     fig.add_shape(type='line', x0=spine_start, y0=0, x1=spine_end, y1=0,
                   line=dict(color='#333', width=3))
 
-    # 鱼头（问题在右端）
+    # 鱼头
     fig.add_trace(go.Scatter(x=[spine_end], y=[0], mode='markers+text',
                              marker=dict(size=28, color='#d62728', symbol='triangle-right'),
                              text=[f'<b>{problem}</b>'], textposition='middle right',
                              textfont=dict(size=14, color='#d62728'),
                              showlegend=False))
 
-    # 大骨分布参数 — 沿主干从左到右，上下交替
+    # 分布参数
     usable = spine_end - spine_start - 2.0
     spacing = usable / max(n_cats, 1)
-    big_bone_len = 2.4
-    small_bone_len = 1.5
-    sub_bone_len = 1.1
-
-    # 大骨角度：都指向左（鱼头方向）
-    # 上侧 ~130°（向左上方），下侧 ~-130°（向左下方）
-    upper_big_angle = 130
-    lower_big_angle = -130
+    big_len = 3.2
+    small_len = 1.6
+    sub_len = 1.0
 
     for i, (cat_name, causes) in enumerate(categories.items()):
         col = colors[i % len(colors)]
         is_upper = (i % 2 == 0)
-        big_angle = upper_big_angle if is_upper else lower_big_angle
 
-        # 大骨起点（沿主干从左到右）
-        sx = spine_start + 1.0 + i * spacing
+        # 大骨终点在主干上
+        ex = spine_start + 1.0 + i * spacing
 
-        # 画大骨（向左上方或左下方）
-        ex, ey = _draw_bone(fig, sx, 0, big_angle, big_bone_len, col, width=2.5)
+        # 大骨起点：向左外侧延伸，约50°角（不陡）
+        angle = 50
+        rad = np.radians(angle)
+        dx = big_len * np.cos(rad)
+        dy = big_len * np.sin(rad)
 
-        # 大骨分类标签（放在大骨末端外侧）
-        label_dx = 0.45 * np.cos(np.radians(big_angle))
-        label_dy = 0.45 * np.sin(np.radians(big_angle))
-        _draw_label(fig, ex + label_dx, ey + label_dy,
-                    f'<b>{cat_name}</b>', col, font_size=12)
+        if is_upper:
+            sx, sy = ex - dx, dy
+        else:
+            sx, sy = ex - dx, -dy
 
-        # 画小骨（原因）— 都从大骨上向左（鱼头方向）延伸
+        # 画大骨
+        fig.add_shape(type='line', x0=sx, y0=sy, x1=ex, y1=0,
+                      line=dict(color=col, width=2.5))
+
+        # 分类标签（大骨起点外侧 = 最左侧）
+        lx = sx - 0.35 * np.cos(rad)
+        ly = sy + (0.35 * np.sin(rad) if is_upper else -0.35 * np.sin(rad))
+        fig.add_annotation(x=lx, y=ly, text=f'<b>{cat_name}</b>',
+                           showarrow=False, font=dict(size=12, color=col))
+
         if not causes:
             continue
 
         n = len(causes)
         for j, item in enumerate(causes):
-            # 小骨起点：沿大骨均匀分布（靠近大骨根部到末端）
-            ratio = 0.25 + 0.55 * (j / max(n - 1, 1)) if n > 1 else 0.45
+            # 小骨起点：沿大骨均匀分布
+            ratio = 0.2 + 0.6 * (j / max(n - 1, 1)) if n > 1 else 0.4
             bx = sx + (ex - sx) * ratio
-            by = 0 + (ey - 0) * ratio
+            by = sy + (0 - sy) * ratio
 
-            # 小骨角度：比大骨更平缓，更指向左
-            # 上侧 ~165°（更水平向左），下侧 ~-165°
-            small_angle = (165 if is_upper else -165) + (10 if j % 2 == 0 else -10)
-            sx2, sy2 = _draw_bone(fig, bx, by, small_angle, small_bone_len, col, width=1.5)
+            # 小骨水平向右延伸（平行于主干，指向鱼头）
+            s2x = bx + small_len
+            s2y = by
+
+            fig.add_shape(type='line', x0=bx, y0=by, x1=s2x, y1=s2y,
+                          line=dict(color=col, width=1.5))
+
+            # 标签上下交替偏移，避免重叠
+            label_dy = 0.14 if j % 2 == 0 else -0.14
 
             if isinstance(item, str):
-                # 简单原因 — 直接标注在小骨末端
-                _draw_label(fig, sx2 + 0.12, sy2 + 0.05, item, '#555', font_size=9)
+                fig.add_annotation(x=s2x + 0.1, y=s2y + label_dy, text=item,
+                                   showarrow=False, font=dict(size=9, color='#555'))
 
             elif isinstance(item, dict):
-                # 二级分类 — 小骨末端是分类名，再画子小骨
-                sub_cat_name = list(item.keys())[0]
-                sub_causes = item[sub_cat_name]
+                sub_name = list(item.keys())[0]
+                sub_causes = item[sub_name]
 
-                # 分类名标签（小骨末端）
-                _draw_label(fig, sx2 + 0.12, sy2 + 0.05,
-                            f'<b>{sub_cat_name}</b>', col, font_size=9)
+                fig.add_annotation(x=s2x + 0.1, y=s2y + label_dy,
+                                   text=f'<b>{sub_name}</b>',
+                                   showarrow=False, font=dict(size=9, color=col))
 
-                # 子小骨 — 从分类名位置继续向左细分
                 if sub_causes:
                     m = len(sub_causes)
-                    for k, sub_cause in enumerate(sub_causes):
-                        # 子小骨起点：沿小骨分布
+                    for k, sc in enumerate(sub_causes):
                         sub_ratio = 0.3 + 0.5 * (k / max(m - 1, 1)) if m > 1 else 0.5
-                        sbx = bx + (sx2 - bx) * sub_ratio
-                        sby = by + (sy2 - by) * sub_ratio
+                        sbx = bx + (s2x - bx) * sub_ratio
+                        sby = by
 
-                        # 子小骨角度更平缓
-                        sub_angle = (170 if is_upper else -170) + (8 if k % 2 == 0 else -8)
-                        ssx, ssy = _draw_bone(fig, sbx, sby, sub_angle, sub_bone_len, col, width=1.0)
+                        ssx = sbx + sub_len
+                        ssy = sby
 
-                        _draw_label(fig, ssx + 0.1, ssy + 0.03, sub_cause, '#777', font_size=8)
+                        fig.add_shape(type='line', x0=sbx, y0=sby, x1=ssx, y1=ssy,
+                                      line=dict(color=col, width=1.0))
+                        fig.add_annotation(x=ssx + 0.08, y=ssy + 0.03,
+                                           text=sc, showarrow=False,
+                                           font=dict(size=8, color='#777'))
 
     # 隐藏坐标轴
-    fig.update_xaxes(visible=False, range=[-9, 10])
+    fig.update_xaxes(visible=False, range=[-11, 10])
     fig.update_yaxes(visible=False, range=[-5.5, 5.5])
     fig.update_layout(
         title=f'鱼骨图 — {problem}',
         template='plotly_white',
-        height=560,
+        height=540,
         showlegend=False,
         plot_bgcolor='rgba(0,0,0,0)',
         paper_bgcolor='rgba(0,0,0,0)',
