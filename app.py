@@ -45,13 +45,6 @@ st.markdown("""
 [data-testid="stToolbar"] { display: none !important; }
 footer { visibility: hidden; }
 [data-testid="manage-app-button"] { display: none !important; }
-/* 全局：file_uploader 按钮文字改为中文 + 隐藏提示 */
-[data-testid="stFileUploader"] button { font-size: 0px !important; }
-[data-testid="stFileUploader"] button::before {
-    content: "上传文件" !important;
-    font-size: 14px !important;
-}
-[data-testid="stFileUploader"] small { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -154,6 +147,21 @@ def rename_column_dialog(df):
         if st.button('❌ 取消', use_container_width=True):
             st.rerun()
 
+@st.dialog('📤 上传文件')
+def upload_file_dialog():
+    """弹窗上传 CSV/Excel，上传后替换当前数据"""
+    uploaded_file = st.file_uploader('选择 CSV 或 Excel 文件', type=['csv', 'xlsx', 'xls'])
+    if uploaded_file:
+        try:
+            df = parse_uploaded_file(uploaded_file)
+            if df is not None:
+                set_new_data(df)
+                st.success(f'✅ 已替换数据: {df.shape[0]} 行 × {df.shape[1]} 列')
+                if st.button('确定', use_container_width=True, key='upload_dialog_ok'):
+                    st.rerun()
+        except Exception as e:
+            st.error(f'加载失败: {e}')
+
 
 def show_data_info():
     if 'user_data' in st.session_state and st.session_state.user_data is not None:
@@ -174,16 +182,14 @@ def show_data_info():
                     st.session_state.rename_dialog_open = True
                     st.rerun()
             with col_upload_btn:
-                uploaded_file = st.file_uploader('上传文件', type=['csv', 'xlsx', 'xls'],
-                                                 label_visibility='collapsed', key='preview_upload')
-                if uploaded_file:
-                    try:
-                        df = parse_uploaded_file(uploaded_file)
-                        if df is not None:
-                            set_new_data(df)
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f'加载失败: {e}')
+                if st.button('📤 上传文件', key='show_upload_dialog', use_container_width=True):
+                    st.session_state.upload_dialog_open = True
+                    st.rerun()
+
+            # ===== 上传文件弹窗 =====
+            if st.session_state.get('upload_dialog_open'):
+                upload_file_dialog()
+                st.session_state.upload_dialog_open = False
 
             # ===== 数据编辑器（可直接修改单元格） =====
             edited = st.data_editor(df, use_container_width=True,
