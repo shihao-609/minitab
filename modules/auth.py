@@ -225,10 +225,11 @@ def render_auth_page():
         initial_sidebar_state="collapsed",
     )
 
-    # 隐藏 sidebar
+    # 隐藏 sidebar + 隐藏右上角工具栏
     st.markdown("""
         <style>
         [data-testid="stSidebar"] { display: none; }
+        [data-testid="stToolbar"] { display: none !important; }
         </style>
     """, unsafe_allow_html=True)
 
