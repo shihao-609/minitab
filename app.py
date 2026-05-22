@@ -238,10 +238,28 @@ def page_data_import():
         uploaded_file = st.file_uploader('选择 CSV 或 Excel 文件', type=['csv', 'xlsx', 'xls'])
         if uploaded_file:
             try:
-                df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-                st.session_state.user_data = df
-                st.success(f'✅ 成功加载: {df.shape[0]} 行 × {df.shape[1]} 列')
-                st.dataframe(df.head(10), use_container_width=True)
+                if uploaded_file.name.endswith('.csv'):
+                    # 自动探测编码：先试 UTF-8，再试 GBK 系列（中文 Windows 常见）
+                    raw_bytes = uploaded_file.getvalue()
+                    df = None
+                    for enc in ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'gb18030', 'latin-1']:
+                        try:
+                            from io import BytesIO
+                            df = pd.read_csv(BytesIO(raw_bytes), encoding=enc)
+                            break
+                        except (UnicodeDecodeError, UnicodeError):
+                            continue
+                    if df is None:
+                        st.error('无法识别文件编码，请将文件另存为 UTF-8 格式')
+                    else:
+                        st.success(f'✅ 编码: {enc} · {df.shape[0]} 行 × {df.shape[1]} 列')
+                        st.session_state.user_data = df
+                        st.dataframe(df.head(10), use_container_width=True)
+                else:
+                    df = pd.read_excel(uploaded_file)
+                    st.session_state.user_data = df
+                    st.success(f'✅ 成功加载: {df.shape[0]} 行 × {df.shape[1]} 列')
+                    st.dataframe(df.head(10), use_container_width=True)
             except Exception as e:
                 st.error(f'加载失败: {e}')
 
