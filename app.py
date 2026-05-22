@@ -39,6 +39,13 @@ st.set_page_config(
     initial_sidebar_state='expanded',
 )
 
+# 隐藏右上角工具栏 (Share / 编辑代码等)
+st.markdown("""
+<style>
+[data-testid="stToolbar"] { display: none !important; }
+</style>
+""", unsafe_allow_html=True)
+
 # ==================== 侧边栏 ====================
 st.sidebar.title('📊 质量管理系统')
 st.sidebar.caption('Quality Management System v2.0')
