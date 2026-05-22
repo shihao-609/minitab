@@ -210,8 +210,7 @@ def page_data_import():
                     st.error('请输入名称')
                 else:
                     r = supabase_helper.save_dataset(save_name.strip(), st.session_state.user_data,
-                                                     columns_info=list(st.session_state.user_data.columns),
-                                                     fishbone_config=st.session_state.get('fishbone_saved_config'))
+                                                     columns_info=list(st.session_state.user_data.columns))
                     if r:
                         st.success(f'✅ 已保存 "{save_name.strip()}"')
                         st.rerun()
@@ -231,11 +230,9 @@ def page_data_import():
                     st.caption(f'{ds.get("row_count","?")} 行 · {str(ds.get("created_at",""))[:19]}')
                 with c2:
                     if st.button('📥 加载', key=f'load_{ds["id"]}', use_container_width=True):
-                        result = supabase_helper.load_dataset(ds['id'])
-                        if result is not None:
-                            st.session_state.user_data = result['df']
-                            if 'fishbone_config' in result and result['fishbone_config']:
-                                st.session_state.fishbone_saved_config = result['fishbone_config']
+                        df = supabase_helper.load_dataset(ds['id'])
+                        if df is not None:
+                            st.session_state.user_data = df
                             st.success(f'✅ 已加载 "{ds["name"]}"')
                             st.rerun()
                 with c3:
@@ -495,87 +492,88 @@ def page_capability():
 def page_quality_tools():
     st.header('📊 质量图形工具')
     df = check_data()
-    if df is None:
-        st.warning('⚠️ 请先加载数据')
-        return
-
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    text_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    show_data_required = df is None
 
     t1, t2, t3, t4, t5 = st.tabs(['帕累托图', '直方图', '箱线图', '运行图', '鱼骨图'])
 
-    # --- 帕累托图 ---
-    with t1:
-        if not numeric_cols:
-            st.error('无数值列')
-        else:
-            c1, c2 = st.columns(2)
-            with c1:
-                cat_col = st.selectbox('类别列', text_cols + numeric_cols, key='pareto_cat')
-            with c2:
-                cnt_col = st.selectbox('频数列', numeric_cols, key='pareto_cnt')
-            r = pareto_histogram.pareto_chart(df[cat_col].astype(str).tolist(), df[cnt_col].values)
-            st.plotly_chart(r['chart'], use_container_width=True)
-            c1, c2 = st.columns(2)
-            with c1: st.metric('总计', r['total'])
-            with c2: st.dataframe(r['data'], use_container_width=True)
+    # ===== 数据相关提示 =====
+    if show_data_required:
+        with t1: st.warning('⚠️ 请先在「数据导入」中加载数据')
+        with t2: st.warning('⚠️ 请先在「数据导入」中加载数据')
+        with t3: st.warning('⚠️ 请先在「数据导入」中加载数据')
+        with t4: st.warning('⚠️ 请先在「数据导入」中加载数据')
+    else:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        text_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
 
-    # --- 直方图 ---
-    with t2:
-        if not numeric_cols:
-            st.error('无数值列')
-        else:
-            dc = st.selectbox('数据列', numeric_cols, key='hist_col')
-            r = pareto_histogram.histogram_with_stats(df[dc].dropna().values)
-            if 'error' in r:
-                st.error(r['error'])
+        # --- 帕累托图 ---
+        with t1:
+            if not numeric_cols:
+                st.error('无数值列')
             else:
+                c1, c2 = st.columns(2)
+                with c1:
+                    cat_col = st.selectbox('类别列', text_cols + numeric_cols, key='pareto_cat')
+                with c2:
+                    cnt_col = st.selectbox('频数列', numeric_cols, key='pareto_cnt')
+                r = pareto_histogram.pareto_chart(df[cat_col].astype(str).tolist(), df[cnt_col].values)
                 st.plotly_chart(r['chart'], use_container_width=True)
-                cs = st.columns(len(r['stats']))
-                for i, (k, v) in enumerate(r['stats'].items()):
-                    cs[i].metric(k, v)
+                c1, c2 = st.columns(2)
+                with c1: st.metric('总计', r['total'])
+                with c2: st.dataframe(r['data'], use_container_width=True)
 
-    # --- 箱线图 ---
-    with t3:
-        if not numeric_cols:
-            st.error('无数值列')
-        else:
-            dc = st.selectbox('数据列', numeric_cols, key='box_col')
-            gc = st.selectbox('分组列 (可选)', ['无分组'] + text_cols + numeric_cols, key='box_group')
-            if gc == '无分组':
-                r = pareto_histogram.box_plot(df[dc].dropna().values)
+        # --- 直方图 ---
+        with t2:
+            if not numeric_cols:
+                st.error('无数值列')
             else:
-                grps = df.groupby(gc)
-                r = pareto_histogram.box_plot(
-                    [g[dc].dropna().values for _, g in grps],
-                    group_labels=[str(n) for n in df[gc].unique()])
-            st.plotly_chart(r['chart'], use_container_width=True)
+                dc = st.selectbox('数据列', numeric_cols, key='hist_col')
+                r = pareto_histogram.histogram_with_stats(df[dc].dropna().values)
+                if 'error' in r:
+                    st.error(r['error'])
+                else:
+                    st.plotly_chart(r['chart'], use_container_width=True)
+                    cs = st.columns(len(r['stats']))
+                    for i, (k, v) in enumerate(r['stats'].items()):
+                        cs[i].metric(k, v)
 
-    # --- 运行图 ---
-    with t4:
-        if not numeric_cols:
-            st.error('无数值列')
-        else:
-            dc = st.selectbox('数据列', numeric_cols, key='run_col')
-            tgt = st.text_input('目标线 (可选)', placeholder='留空=不显示', key='run_tgt')
-            target = float(tgt) if tgt else None
-            r = quality_tools.run_chart(df[dc].dropna().values, target)
-            if 'error' in r:
-                st.error(r['error'])
+        # --- 箱线图 ---
+        with t3:
+            if not numeric_cols:
+                st.error('无数值列')
             else:
+                dc = st.selectbox('数据列', numeric_cols, key='box_col')
+                gc = st.selectbox('分组列 (可选)', ['无分组'] + text_cols + numeric_cols, key='box_group')
+                if gc == '无分组':
+                    r = pareto_histogram.box_plot(df[dc].dropna().values)
+                else:
+                    grps = df.groupby(gc)
+                    r = pareto_histogram.box_plot(
+                        [g[dc].dropna().values for _, g in grps],
+                        group_labels=[str(n) for n in df[gc].unique()])
                 st.plotly_chart(r['chart'], use_container_width=True)
-                with st.expander('📊 运行图统计'):
-                    for k, v in r['stats'].items():
-                        st.metric(k, v)
 
-    # --- 鱼骨图 ---
+        # --- 运行图 ---
+        with t4:
+            if not numeric_cols:
+                st.error('无数值列')
+            else:
+                dc = st.selectbox('数据列', numeric_cols, key='run_col')
+                tgt = st.text_input('目标线 (可选)', placeholder='留空=不显示', key='run_tgt')
+                target = float(tgt) if tgt else None
+                r = quality_tools.run_chart(df[dc].dropna().values, target)
+                if 'error' in r:
+                    st.error(r['error'])
+                else:
+                    st.plotly_chart(r['chart'], use_container_width=True)
+                    with st.expander('📊 运行图统计'):
+                        for k, v in r['stats'].items():
+                            st.metric(k, v)
+
+    # ===== 鱼骨图 (独立运行，无需数据) =====
     with t5:
         st.caption('根本原因分析 — 支持多级细分')
 
-        # 从已保存的配置恢复默认值
-        saved_cfg = st.session_state.get('fishbone_saved_config', {})
-        default_prob = saved_cfg.get('problem', '产品合格率下降') if saved_cfg else '产品合格率下降'
-        default_raw = saved_cfg.get('raw_input', '') if saved_cfg else ''
         default_text_template = (
             '人员: 操作技能不足, {培训体系: 新员工多, 考核不严}, 疲劳作业, 质量意识淡薄\n'
             '机器: 设备老化, {维护管理: 保养不及时, 备件短缺}, 参数漂移\n'
@@ -585,102 +583,150 @@ def page_quality_tools():
             '测量: 量具精度不够, {校准管理: 周期过长, 标准件失效}, 测量方法不当'
         )
 
-        prob = st.text_input('问题描述', value=default_prob, key='fish_problem')
-
-        # 保存/加载鱼骨图配置按钮行
-        fb_btn1, fb_btn2, fb_btn3 = st.columns([1, 1, 4])
-        with fb_btn1:
-            if st.button('💾 保存鱼骨图配置', use_container_width=True, key='fb_save'):
-                raw_val = st.session_state.get('fish_input', '')
-                st.session_state.fishbone_saved_config = {
-                    'problem': prob,
-                    'raw_input': raw_val,
-                }
-                # 如果有已关联的 Supabase 数据集 ID，也同步到云端
-                st.session_state.fishbone_just_saved = True
-                st.success('✅ 鱼骨图配置已保存（加载数据时自动恢复）')
+        # ---- 加载已有配置区域 ----
+        with st.expander('📂 加载已保存的鱼骨图配置', expanded=False):
+            if st.button('🔄 刷新列表', key='fb_reload_list'):
                 st.rerun()
-        with fb_btn2:
-            if st.button('🗑️ 清除保存的配置', use_container_width=True, key='fb_clear'):
-                if 'fishbone_saved_config' in st.session_state:
-                    del st.session_state.fishbone_saved_config
-                st.success('已清除')
-                st.rerun()
-        with fb_btn3:
-            if saved_cfg and not st.session_state.get('fishbone_just_saved'):
-                st.info(f'💡 已加载保存的配置（问题描述: "{saved_cfg.get("problem", "")}"）')
+            configs = supabase_helper.list_fishbone_configs()
+            if not configs:
+                st.info('暂无已保存的鱼骨图配置')
+            else:
+                for cfg in configs:
+                    c1, c2, c3 = st.columns([4, 1, 1])
+                    with c1:
+                        st.write(f'**{cfg["name"]}**')
+                        st.caption(f'问题: {cfg.get("problem","")} · {str(cfg.get("created_at",""))[:19]}')
+                    with c2:
+                        if st.button('📥 加载', key=f'fb_load_{cfg["id"]}', use_container_width=True):
+                            st.session_state.fishbone_load_problem = cfg.get('problem', '')
+                            st.session_state.fishbone_load_raw = cfg.get('raw_input', '')
+                            st.rerun()
+                    with c3:
+                        if st.button('🗑️', key=f'fb_del_{cfg["id"]}', help='删除此配置'):
+                            if supabase_helper.delete_fishbone_config(cfg['id']):
+                                st.success('已删除')
+                                st.rerun()
 
-        if st.session_state.get('fishbone_just_saved'):
-            st.session_state.fishbone_just_saved = False
+        # ---- 问题描述 ----
+        load_prob = st.session_state.get('fishbone_load_problem', '')
+        prob = st.text_input('问题描述',
+                            value=load_prob if load_prob else '产品合格率下降',
+                            key='fish_problem')
 
         st.write('**输入格式说明**（中英文标点均可）')
         st.caption('• 每行一个大类，冒号/：后跟原因，逗号/，分隔\n'
                    '• 一级原因直接写名称\n'
                    '• 二级分类用 `{分类名: 子原因1, 子原因2}` 或 `｛分类名：子原因1，子原因2｝` 格式')
+
+        load_raw = st.session_state.get('fishbone_load_raw', '')
         raw = st.text_area('输入原因',
-                           value=default_raw if default_raw else default_text_template,
+                           value=load_raw if load_raw else default_text_template,
                            height=220, key='fish_input')
 
-        if st.button('🔄 生成鱼骨图', use_container_width=True):
-            # 自动转换中文标点为英文（冒号、逗号、大括号、分号）
-            raw_norm = (raw.strip()
-                        .replace('：', ':')
-                        .replace('，', ',')
-                        .replace('｛', '{')
-                        .replace('｝', '}')
-                        .replace('；', ';'))
+        # ---- 操作按钮 ----
+        c_gen, c_save = st.columns([3, 1])
+        with c_gen:
+            if st.button('🔄 生成鱼骨图', use_container_width=True):
+                # 自动转换中文标点为英文（冒号、逗号、大括号、分号）
+                raw_norm = (raw.strip()
+                            .replace('：', ':')
+                            .replace('，', ',')
+                            .replace('｛', '{')
+                            .replace('｝', '}')
+                            .replace('；', ';'))
 
-            cats = {}
-            for line in raw_norm.split('\n'):
-                line = line.strip()
-                if not line or ':' not in line:
-                    continue
-                name, causes_str = line.split(':', 1)
-                name = name.strip()
-                cats[name] = []
+                cats = {}
+                for line in raw_norm.split('\n'):
+                    line = line.strip()
+                    if not line or ':' not in line:
+                        continue
+                    name, causes_str = line.split(':', 1)
+                    name = name.strip()
+                    cats[name] = []
 
-                # 解析原因列表，支持 {二级分类: 子原因} 嵌套
-                parts = []
-                depth = 0
-                current = ''
-                for ch in causes_str:
-                    if ch == '{':
-                        depth += 1
-                        if depth == 1:
+                    # 解析原因列表，支持 {二级分类: 子原因} 嵌套
+                    parts = []
+                    depth = 0
+                    current = ''
+                    for ch in causes_str:
+                        if ch == '{':
+                            depth += 1
+                            if depth == 1:
+                                if current.strip():
+                                    parts.append(current.strip())
+                                current = ''
+                            else:
+                                current += ch
+                        elif ch == '}':
+                            depth -= 1
+                            if depth == 0:
+                                inner = current.strip()
+                                if ':' in inner:
+                                    sub_name, sub_causes = inner.split(':', 1)
+                                    sub_list = [c.strip() for c in sub_causes.split(',') if c.strip()]
+                                    parts.append({sub_name.strip(): sub_list})
+                                current = ''
+                            else:
+                                current += ch
+                        elif ch == ',' and depth == 0:
                             if current.strip():
                                 parts.append(current.strip())
                             current = ''
                         else:
                             current += ch
-                    elif ch == '}':
-                        depth -= 1
-                        if depth == 0:
-                            inner = current.strip()
-                            if ':' in inner:
-                                sub_name, sub_causes = inner.split(':', 1)
-                                sub_list = [c.strip() for c in sub_causes.split(',') if c.strip()]
-                                parts.append({sub_name.strip(): sub_list})
-                            current = ''
-                        else:
-                            current += ch
-                    elif ch == ',' and depth == 0:
-                        if current.strip():
-                            parts.append(current.strip())
-                        current = ''
+                    if current.strip():
+                        parts.append(current.strip())
+
+                    cats[name] = parts
+
+                if cats:
+                    r = quality_tools.fishbone_diagram(prob, cats)
+                    st.plotly_chart(r['chart'], use_container_width=True)
+                else:
+                    st.error('请按格式输入')
+
+        with c_save:
+            if st.button('💾 保存到云端', use_container_width=True, key='fb_save_cloud',
+                         type='primary'):
+                raw_val = st.session_state.get('fish_input', '')
+                if not raw_val.strip():
+                    st.error('请先输入原因')
+                else:
+                    # 弹出命名输入框
+                    st.session_state.fb_show_name_input = True
+                    st.rerun()
+
+        # ---- 保存命名对话框 ----
+        if st.session_state.get('fb_show_name_input'):
+            nc1, nc2 = st.columns([3, 1])
+            with nc1:
+                cfg_name = st.text_input('配置名称',
+                                        placeholder='例: 2024Q1产线A异常分析',
+                                        key='fb_cfg_name')
+            with nc2:
+                if st.button('✅ 确认保存', use_container_width=True, key='fb_confirm_save'):
+                    if not cfg_name.strip():
+                        st.error('请输入名称')
                     else:
-                        current += ch
-                if current.strip():
-                    parts.append(current.strip())
+                        r = supabase_helper.save_fishbone(
+                            cfg_name.strip(),
+                            prob,
+                            st.session_state.get('fish_input', '')
+                        )
+                        if r:
+                            st.success(f'✅ 已保存 "{cfg_name.strip()}"')
+                            st.session_state.fb_show_name_input = False
+                            st.session_state.fishbone_load_problem = ''
+                            st.session_state.fishbone_load_raw = ''
+                            st.rerun()
 
-                cats[name] = parts
+        # ---- 清理加载标记 ----
+        if load_prob or load_raw:
+            st.session_state.fishbone_load_problem = ''
+            st.session_state.fishbone_load_raw = ''
 
-            if cats:
-                r = quality_tools.fishbone_diagram(prob, cats)
-                st.plotly_chart(r['chart'], use_container_width=True)
-            else:
-                st.error('请按格式输入')
-
-    show_data_info()
+    if not show_data_required:
+        show_data_info()
 
 
 # ==================== 5. 测量系统分析 MSA ====================

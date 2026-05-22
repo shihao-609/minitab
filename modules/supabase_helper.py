@@ -47,8 +47,7 @@ def _init_client() -> Client:
 
 # ==================== 数据集 CRUD ====================
 
-def save_dataset(name: str, df: pd.DataFrame, columns_info: dict = None,
-                 fishbone_config: dict = None) -> dict | None:
+def save_dataset(name: str, df: pd.DataFrame, columns_info: dict = None) -> dict | None:
     """
     将 DataFrame 保存到 Supabase 数据集表
 
@@ -56,7 +55,6 @@ def save_dataset(name: str, df: pd.DataFrame, columns_info: dict = None,
         name: 数据集名称
         df: 要保存的 DataFrame
         columns_info: 可选的列信息
-        fishbone_config: 可选的鱼骨图配置 {'problem': str, 'raw_input': str}
 
     Returns:
         保存的记录，或 None（失败时）
@@ -68,7 +66,6 @@ def save_dataset(name: str, df: pd.DataFrame, columns_info: dict = None,
             "data": json.loads(df.to_json(orient="records", force_ascii=False)),
             "columns_info": columns_info or list(df.columns),
             "row_count": len(df),
-            "fishbone_config": fishbone_config,
         }
         result = client.table("datasets").insert(data).execute()
         return result.data[0] if result.data else None
@@ -77,7 +74,7 @@ def save_dataset(name: str, df: pd.DataFrame, columns_info: dict = None,
         return None
 
 
-def load_dataset(dataset_id: str) -> dict | None:
+def load_dataset(dataset_id: str) -> pd.DataFrame | None:
     """
     从 Supabase 加载指定的数据集
 
@@ -85,7 +82,7 @@ def load_dataset(dataset_id: str) -> dict | None:
         dataset_id: 数据集 UUID
 
     Returns:
-        包含 'df'(DataFrame) 和可选的 'fishbone_config' 字典，或 None（失败时）
+        DataFrame，或 None（失败时）
     """
     try:
         client = _init_client()
@@ -93,33 +90,92 @@ def load_dataset(dataset_id: str) -> dict | None:
         if result.data:
             record = result.data[0]
             df = pd.DataFrame(record["data"])
-            ret = {"df": df}
-            if record.get("fishbone_config"):
-                ret["fishbone_config"] = record["fishbone_config"]
-            return ret
+            return df
         return None
     except Exception as e:
         st.error(f"加载数据集失败: {e}")
         return None
 
 
-def save_fishbone_config(dataset_id: str, fishbone_config: dict) -> bool:
+# ==================== 鱼骨图配置独立 CRUD ====================
+
+def save_fishbone(name: str, problem: str, raw_input: str) -> dict | None:
     """
-    单独更新数据集关联的鱼骨图配置
+    将鱼骨图配置保存到独立的 fishbone_configs 表
 
     Args:
-        dataset_id: 数据集 UUID
-        fishbone_config: 鱼骨图配置 {'problem': str, 'raw_input': str}
+        name: 配置名称（用户自定义，便于识别）
+        problem: 问题描述
+        raw_input: 原因输入原文
+
+    Returns:
+        保存的记录，或 None（失败时）
+    """
+    try:
+        client = _init_client()
+        data = {
+            "name": name,
+            "problem": problem,
+            "raw_input": raw_input,
+        }
+        result = client.table("fishbone_configs").insert(data).execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        st.error(f"保存鱼骨图配置失败: {e}")
+        return None
+
+
+def list_fishbone_configs() -> list[dict]:
+    """
+    列出所有已保存的鱼骨图配置
+
+    Returns:
+        配置列表（按创建时间倒序）
+    """
+    try:
+        client = _init_client()
+        result = client.table("fishbone_configs").select("*").order("created_at", desc=True).execute()
+        return result.data
+    except Exception as e:
+        st.error(f"获取鱼骨图配置列表失败: {e}")
+        return []
+
+
+def load_fishbone_config(config_id: str) -> dict | None:
+    """
+    加载指定鱼骨图配置
+
+    Args:
+        config_id: 配置 UUID
+
+    Returns:
+        配置字典 {'name', 'problem', 'raw_input', ...}，或 None
+    """
+    try:
+        client = _init_client()
+        result = client.table("fishbone_configs").select("*").eq("id", config_id).execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        st.error(f"加载鱼骨图配置失败: {e}")
+        return None
+
+
+def delete_fishbone_config(config_id: str) -> bool:
+    """
+    删除指定的鱼骨图配置
+
+    Args:
+        config_id: 配置 UUID
 
     Returns:
         是否成功
     """
     try:
         client = _init_client()
-        client.table("datasets").update({"fishbone_config": fishbone_config}).eq("id", dataset_id).execute()
+        client.table("fishbone_configs").delete().eq("id", config_id).execute()
         return True
     except Exception as e:
-        st.error(f"保存鱼骨图配置失败: {e}")
+        st.error(f"删除鱼骨图配置失败: {e}")
         return False
 
 
