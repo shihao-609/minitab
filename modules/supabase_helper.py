@@ -1,6 +1,12 @@
 """
-Supabase 数据库操作辅助模块
-提供数据集的 CRUD 操作，实现质量数据的持久化存储
+Supabase 数据库操作辅助模块 (v2 — 支持用户隔离)
+=================================================
+提供数据集的 CRUD 操作，实现质量数据的持久化存储。
+
+v2 关键变更（应对"增加账号密码"的影响）：
+  1. 所有写操作自动注入 user_id，插入时携带当前用户身份
+  2. 读取操作优先使用用户 JWT 客户端，Supabase RLS 策略自动过滤数据
+  3. 兼容旧版 anon key 客户端（非认证模式，用于注册/登录阶段）
 """
 
 import os
@@ -10,10 +16,10 @@ import pandas as pd
 import json
 import streamlit as st
 
-# ==================== 初始化 Supabase 客户端 ====================
+
+# ==================== 客户端初始化 ====================
 
 def _get_supabase_url() -> str:
-    """支持 st.secrets（Streamlit Cloud）和 .env（本地）"""
     try:
         return st.secrets.get("SUPABASE_URL", "") or os.environ.get("SUPABASE_URL", "")
     except Exception:
@@ -21,28 +27,60 @@ def _get_supabase_url() -> str:
 
 
 def _get_supabase_key() -> str:
-    """支持 st.secrets（Streamlit Cloud）和 .env（本地）"""
     try:
         return st.secrets.get("SUPABASE_ANON_KEY", "") or os.environ.get("SUPABASE_ANON_KEY", "")
     except Exception:
         return os.environ.get("SUPABASE_ANON_KEY", "")
 
 
-@st.cache_resource
-def get_supabase_client() -> Client:
-    """创建并缓存 Supabase 客户端（单例模式）"""
-    url = _get_supabase_url()
-    key = _get_supabase_key()
-    return create_client(url, key)
+def _get_user_id() -> str | None:
+    """从 session 获取当前用户 ID"""
+    if st.session_state.get("authenticated") and st.session_state.get("user"):
+        return st.session_state.user.id
+    return None
 
 
-def _init_client() -> Client:
-    """获取客户端（非缓存版本，用于内部调用）"""
+def _get_client() -> Client | None:
+    """
+    获取 Supabase 客户端（自动选择认证模式）
+
+    优先级：
+      1. 已登录 → 用 anon key 创建后注入 session，SDK 自动将 JWT 附加到请求头
+      2. 未登录 → 使用 anon key（匿名访问，RLS 策略下只能读公开数据）
+
+    这是解决"额外注意项②"的关键设计：
+      - 不能用 `create_client(url, raw_jwt)` —— 原始 JWT 方式不会自动刷新
+      - 必须用 `client.auth.set_session(access_token, refresh_token)` 注入 session
+      - 注入后 supabase-py SDK 会自动在每次请求附加 Authorization: Bearer <jwt>
+      - JWT 默认有效期 1 小时，SDK 通过 refresh_token 自动续期
+
+    Supabase RLS 通过 JWT 中的 auth.uid() 识别用户身份，确保数据隔离。
+    """
     url = _get_supabase_url()
     key = _get_supabase_key()
     if not url or not key:
+        return None
+
+    client = create_client(url, key)
+
+    # 已登录：注入用户 session（SDK 自动附加 JWT + 自动刷新）
+    if st.session_state.get("authenticated") and st.session_state.get("session"):
+        session = st.session_state.session
+        try:
+            client.auth.set_session(
+                session.access_token,
+                session.refresh_token
+            )
+        except Exception:
+            pass  # session 可能已过期，降级为匿名访问
+
+    return client
+
+
+def _check_client(client: Client | None):
+    """检查客户端是否可用，不可用时抛出异常"""
+    if client is None:
         raise ValueError("SUPABASE_URL 或 SUPABASE_ANON_KEY 未设置，请检查 .env 文件或 Streamlit Secrets")
-    return create_client(url, key)
 
 
 # ==================== 数据集 CRUD ====================
@@ -50,6 +88,10 @@ def _init_client() -> Client:
 def save_dataset(name: str, df: pd.DataFrame, columns_info: dict = None) -> dict | None:
     """
     将 DataFrame 保存到 Supabase 数据集表
+
+    v2 变更：
+      - 自动注入 user_id（登录状态下）
+      - 使用 JWT 客户端调用（RLS 策略确保数据隔离）
 
     Args:
         name: 数据集名称
@@ -60,13 +102,19 @@ def save_dataset(name: str, df: pd.DataFrame, columns_info: dict = None) -> dict
         保存的记录，或 None（失败时）
     """
     try:
-        client = _init_client()
+        client = _get_client()
+        _check_client(client)
         data = {
             "name": name,
             "data": json.loads(df.to_json(orient="records", force_ascii=False)),
             "columns_info": columns_info or list(df.columns),
             "row_count": len(df),
         }
+        # 注入用户 ID
+        uid = _get_user_id()
+        if uid:
+            data["user_id"] = uid
+
         result = client.table("datasets").insert(data).execute()
         return result.data[0] if result.data else None
     except Exception as e:
@@ -78,6 +126,10 @@ def load_dataset(dataset_id: str) -> pd.DataFrame | None:
     """
     从 Supabase 加载指定的数据集
 
+    v2 变更：
+      - 使用 JWT 客户端调用，RLS 自动限制只能读取自己的数据
+      - 即使 RLS 未配置，也会回退到手动 user_id 过滤
+
     Args:
         dataset_id: 数据集 UUID
 
@@ -85,10 +137,17 @@ def load_dataset(dataset_id: str) -> pd.DataFrame | None:
         DataFrame，或 None（失败时）
     """
     try:
-        client = _init_client()
+        client = _get_client()
+        _check_client(client)
         result = client.table("datasets").select("*").eq("id", dataset_id).execute()
         if result.data:
             record = result.data[0]
+            # RLS 回退：如果记录有 user_id 且与当前用户不匹配，拒绝访问
+            rid = record.get("user_id")
+            uid = _get_user_id()
+            if uid and rid and rid != uid:
+                st.error("无权访问此数据集")
+                return None
             df = pd.DataFrame(record["data"])
             return df
         return None
@@ -97,98 +156,28 @@ def load_dataset(dataset_id: str) -> pd.DataFrame | None:
         return None
 
 
-# ==================== 鱼骨图配置独立 CRUD ====================
-
-def save_fishbone(name: str, problem: str, raw_input: str) -> dict | None:
-    """
-    将鱼骨图配置保存到独立的 fishbone_configs 表
-
-    Args:
-        name: 配置名称（用户自定义，便于识别）
-        problem: 问题描述
-        raw_input: 原因输入原文
-
-    Returns:
-        保存的记录，或 None（失败时）
-    """
-    try:
-        client = _init_client()
-        data = {
-            "name": name,
-            "problem": problem,
-            "raw_input": raw_input,
-        }
-        result = client.table("fishbone_configs").insert(data).execute()
-        return result.data[0] if result.data else None
-    except Exception as e:
-        st.error(f"保存鱼骨图配置失败: {e}")
-        return None
-
-
-def list_fishbone_configs() -> list[dict]:
-    """
-    列出所有已保存的鱼骨图配置
-
-    Returns:
-        配置列表（按创建时间倒序）
-    """
-    try:
-        client = _init_client()
-        result = client.table("fishbone_configs").select("*").order("created_at", desc=True).execute()
-        return result.data
-    except Exception as e:
-        st.error(f"获取鱼骨图配置列表失败: {e}")
-        return []
-
-
-def load_fishbone_config(config_id: str) -> dict | None:
-    """
-    加载指定鱼骨图配置
-
-    Args:
-        config_id: 配置 UUID
-
-    Returns:
-        配置字典 {'name', 'problem', 'raw_input', ...}，或 None
-    """
-    try:
-        client = _init_client()
-        result = client.table("fishbone_configs").select("*").eq("id", config_id).execute()
-        return result.data[0] if result.data else None
-    except Exception as e:
-        st.error(f"加载鱼骨图配置失败: {e}")
-        return None
-
-
-def delete_fishbone_config(config_id: str) -> bool:
-    """
-    删除指定的鱼骨图配置
-
-    Args:
-        config_id: 配置 UUID
-
-    Returns:
-        是否成功
-    """
-    try:
-        client = _init_client()
-        client.table("fishbone_configs").delete().eq("id", config_id).execute()
-        return True
-    except Exception as e:
-        st.error(f"删除鱼骨图配置失败: {e}")
-        return False
-
-
 def list_datasets() -> list[dict]:
     """
-    列出所有已保存的数据集
+    列出当前用户的所有数据集
+
+    v2 变更：
+      - RLS 策略自动按 user_id 过滤
+      - 如果未配置 RLS，客户端 fallback 手动过滤
 
     Returns:
         数据集列表（按创建时间倒序）
     """
     try:
-        client = _init_client()
+        client = _get_client()
+        _check_client(client)
         result = client.table("datasets").select("*").order("created_at", desc=True).execute()
+
+        uid = _get_user_id()
+        if uid and result.data:
+            # RLS 回退过滤：只返回属于当前用户的记录
+            # （如果 RLS 正确配置，这一步是冗余的但无害）
+            result.data = [r for r in result.data if r.get("user_id") == uid]
+
         return result.data
     except Exception as e:
         st.error(f"获取数据集列表失败: {e}")
@@ -199,16 +188,11 @@ def update_dataset(dataset_id: str, name: str = None, df: pd.DataFrame = None) -
     """
     更新数据集
 
-    Args:
-        dataset_id: 数据集 UUID
-        name: 新名称（可选）
-        df: 新数据（可选）
-
-    Returns:
-        是否成功
+    v2 变更：使用 JWT 客户端，确保只能更新自己的数据
     """
     try:
-        client = _init_client()
+        client = _get_client()
+        _check_client(client)
         update_data = {"updated_at": datetime.utcnow().isoformat()}
         if name:
             update_data["name"] = name
@@ -227,16 +211,97 @@ def delete_dataset(dataset_id: str) -> bool:
     """
     删除数据集
 
-    Args:
-        dataset_id: 数据集 UUID
-
-    Returns:
-        是否成功
+    v2 变更：使用 JWT 客户端，RLS 确保只能删除自己的数据
     """
     try:
-        client = _init_client()
+        client = _get_client()
+        _check_client(client)
         client.table("datasets").delete().eq("id", dataset_id).execute()
         return True
     except Exception as e:
         st.error(f"删除数据集失败: {e}")
+        return False
+
+
+# ==================== 鱼骨图配置 CRUD ====================
+
+def save_fishbone(name: str, problem: str, raw_input: str) -> dict | None:
+    """
+    将鱼骨图配置保存到独立的 fishbone_configs 表
+
+    v2 变更：自动注入 user_id
+    """
+    try:
+        client = _get_client()
+        _check_client(client)
+        data = {
+            "name": name,
+            "problem": problem,
+            "raw_input": raw_input,
+        }
+        uid = _get_user_id()
+        if uid:
+            data["user_id"] = uid
+
+        result = client.table("fishbone_configs").insert(data).execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        st.error(f"保存鱼骨图配置失败: {e}")
+        return None
+
+
+def list_fishbone_configs() -> list[dict]:
+    """
+    列出当前用户的所有鱼骨图配置
+
+    v2 变更：RLS + fallback 过滤
+    """
+    try:
+        client = _get_client()
+        _check_client(client)
+        result = client.table("fishbone_configs").select("*").order("created_at", desc=True).execute()
+
+        uid = _get_user_id()
+        if uid and result.data:
+            result.data = [r for r in result.data if r.get("user_id") == uid]
+
+        return result.data
+    except Exception as e:
+        st.error(f"获取鱼骨图配置列表失败: {e}")
+        return []
+
+
+def load_fishbone_config(config_id: str) -> dict | None:
+    """
+    加载指定鱼骨图配置
+    """
+    try:
+        client = _get_client()
+        _check_client(client)
+        result = client.table("fishbone_configs").select("*").eq("id", config_id).execute()
+        if result.data:
+            record = result.data[0]
+            rid = record.get("user_id")
+            uid = _get_user_id()
+            if uid and rid and rid != uid:
+                st.error("无权访问此配置")
+                return None
+            return record
+        return None
+    except Exception as e:
+        st.error(f"加载鱼骨图配置失败: {e}")
+        return None
+
+
+def delete_fishbone_config(config_id: str) -> bool:
+    """
+    删除指定的鱼骨图配置
+    """
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("fishbone_configs").delete().eq("id", config_id).execute()
+        return True
+    except Exception as e:
+        st.error(f"删除鱼骨图配置失败: {e}")
         return False

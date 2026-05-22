@@ -18,8 +18,19 @@ from dotenv import load_dotenv
 
 from modules import spc_charts, capability, pareto_histogram, gage_rr, supabase_helper
 from modules import spc_advanced, msa_advanced, stats_tools, quality_tools, advanced_analysis
+from modules import auth
 
 load_dotenv()
+
+# ==================== 登录守卫 ====================
+# 这是解决"额外注意项①"的关键：
+#   Streamlit 没有内置路由/中间件，必须在每个页面渲染前检查登录状态。
+#   未登录时，auth.login_required() 会渲染登录页并返回 False，
+#   调用方直接 return 阻止后续页面渲染。
+if not auth.login_required():
+    st.stop()
+
+# ---- 以下代码仅在已登录状态下执行 ----
 
 st.set_page_config(
     page_title='质量管理系统 QMS',
@@ -44,6 +55,9 @@ menu = st.sidebar.radio(
 )
 st.sidebar.divider()
 st.sidebar.caption('支持 CSV / Excel · 支持 Supabase 云存储')
+
+# 用户信息栏 + 登出按钮
+auth.render_user_bar()
 
 
 # ==================== 工具函数 ====================
