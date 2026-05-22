@@ -598,8 +598,9 @@ def page_quality_tools():
                         st.caption(f'问题: {cfg.get("problem","")} · {str(cfg.get("created_at",""))[:19]}')
                     with c2:
                         if st.button('📥 加载', key=f'fb_load_{cfg["id"]}', use_container_width=True):
-                            st.session_state.fishbone_load_problem = cfg.get('problem', '')
-                            st.session_state.fishbone_load_raw = cfg.get('raw_input', '')
+                            # 直接写入 text_input/text_area 对应的 session_state key
+                            st.session_state.fish_problem = cfg.get('problem', '产品合格率下降')
+                            st.session_state.fish_input = cfg.get('raw_input', '')
                             st.rerun()
                     with c3:
                         if st.button('🗑️', key=f'fb_del_{cfg["id"]}', help='删除此配置'):
@@ -608,19 +609,15 @@ def page_quality_tools():
                                 st.rerun()
 
         # ---- 问题描述 ----
-        load_prob = st.session_state.get('fishbone_load_problem', '')
-        prob = st.text_input('问题描述',
-                            value=load_prob if load_prob else '产品合格率下降',
-                            key='fish_problem')
+        prob = st.text_input('问题描述', value='产品合格率下降', key='fish_problem')
 
         st.write('**输入格式说明**（中英文标点均可）')
         st.caption('• 每行一个大类，冒号/：后跟原因，逗号/，分隔\n'
                    '• 一级原因直接写名称\n'
                    '• 二级分类用 `{分类名: 子原因1, 子原因2}` 或 `｛分类名：子原因1，子原因2｝` 格式')
 
-        load_raw = st.session_state.get('fishbone_load_raw', '')
         raw = st.text_area('输入原因',
-                           value=load_raw if load_raw else default_text_template,
+                           value=default_text_template,
                            height=220, key='fish_input')
 
         # ---- 操作按钮 ----
@@ -716,14 +713,7 @@ def page_quality_tools():
                         if r:
                             st.success(f'✅ 已保存 "{cfg_name.strip()}"')
                             st.session_state.fb_show_name_input = False
-                            st.session_state.fishbone_load_problem = ''
-                            st.session_state.fishbone_load_raw = ''
                             st.rerun()
-
-        # ---- 清理加载标记 ----
-        if load_prob or load_raw:
-            st.session_state.fishbone_load_problem = ''
-            st.session_state.fishbone_load_raw = ''
 
     if not show_data_required:
         show_data_info()
