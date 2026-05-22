@@ -45,6 +45,13 @@ st.markdown("""
 [data-testid="stToolbar"] { display: none !important; }
 footer { visibility: hidden; }
 [data-testid="manage-app-button"] { display: none !important; }
+/* 全局：file_uploader 按钮文字改为中文 + 隐藏提示 */
+[data-testid="stFileUploader"] button { font-size: 0px !important; }
+[data-testid="stFileUploader"] button::before {
+    content: "上传文件" !important;
+    font-size: 14px !important;
+}
+[data-testid="stFileUploader"] small { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -167,36 +174,6 @@ def show_data_info():
                     st.session_state.rename_dialog_open = True
                     st.rerun()
             with col_upload_btn:
-                # 自定义 file_uploader：改按钮文字为中文 + 隐藏默认提示
-                st.markdown("""
-                <style>
-                /* 隐藏默认提示文字（50MB per file...） */
-                [data-testid="stFileUploader"] small,
-                [data-testid="stFileUploader"] .st-emotion-cache-1l4firl,
-                [data-testid="stFileUploader"] [data-testid="stWidgetLabel"] ~ div small {
-                    display: none !important;
-                }
-                /* 隐藏按钮原有文字和图标，用伪元素显示中文 */
-                [data-testid="stFileUploader"] button {
-                    position: relative;
-                    color: transparent !important;
-                }
-                [data-testid="stFileUploader"] button svg,
-                [data-testid="stFileUploader"] button img {
-                    display: none !important;
-                }
-                [data-testid="stFileUploader"] button::after {
-                    content: "上传文件";
-                    color: rgb(49, 51, 63);
-                    position: absolute;
-                    left: 50%;
-                    top: 50%;
-                    transform: translate(-50%, -50%);
-                    font-size: 14px;
-                    white-space: nowrap;
-                }
-                </style>
-                """, unsafe_allow_html=True)
                 uploaded_file = st.file_uploader('上传文件', type=['csv', 'xlsx', 'xls'],
                                                  label_visibility='collapsed', key='preview_upload')
                 if uploaded_file:
