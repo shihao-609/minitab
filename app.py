@@ -224,8 +224,11 @@ def page_data_import():
         st.caption('☁️ 数据持久化到 Supabase，刷新不丢失')
         c1, c2 = st.columns([3, 1])
         with c1:
-            save_name = st.text_input('数据集名称', placeholder='例: 2024Q1_产线A', key='supa_save')
+            st.write('**数据集名称**')
+            save_name = st.text_input('', placeholder='例: 2024Q1_产线A', key='supa_save',
+                                      label_visibility='collapsed')
         with c2:
+            st.write('&nbsp;')
             if st.button('☁️ 保存', use_container_width=True, key='supa_save_btn'):
                 if check_data() is None:
                     st.error('请先加载数据')
@@ -734,10 +737,12 @@ def page_quality_tools():
         if st.session_state.get('fb_show_name_input'):
             nc1, nc2 = st.columns([3, 1])
             with nc1:
-                cfg_name = st.text_input('配置名称',
+                st.write('**配置名称**')
+                cfg_name = st.text_input('',
                                         placeholder='例: 2024Q1产线A异常分析',
-                                        key='fb_cfg_name')
+                                        key='fb_cfg_name', label_visibility='collapsed')
             with nc2:
+                st.write('&nbsp;')
                 if st.button('✅ 确认保存', use_container_width=True, key='fb_confirm_save'):
                     if not cfg_name.strip():
                         st.error('请输入名称')
