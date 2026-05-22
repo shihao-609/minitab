@@ -391,7 +391,7 @@ def page_data_import():
 
         # ---- 🔬 测量系统分析 MSA ----
         st.subheader('🔬 测量系统分析 MSA')
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         with c1:
             if st.button('🔬 Gage R&R 示例', use_container_width=True, key='ex_grr'):
                 np.random.seed(123)
@@ -420,6 +420,15 @@ def page_data_import():
                     '操作员C': op3,
                 }))
                 st.success('已加载计数型 GRR 示例 (20件 × 3操作员)')
+                st.rerun()
+        with c3:
+            if st.button('📐 测量不确定度示例', use_container_width=True, key='ex_unc'):
+                np.random.seed(19)
+                # 对标称值 50.000mm 的量块重复测量 30 次
+                set_new_data(pd.DataFrame({'重复测量': np.round(
+                    np.random.normal(50.000, 0.003, 30), 4
+                )}))
+                st.success('已加载测量不确定度示例 (30次重复测量)')
                 st.rerun()
 
         # ---- 🔢 统计推断 / 回归 ----
