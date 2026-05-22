@@ -61,6 +61,10 @@ st.markdown("""
         max-height: 85vh !important;
         overflow-y: auto !important;
     }
+    /* 弹窗遮罩层：更浅的半透明背景 */
+    [data-testid="stDialog"]::backdrop {
+        background-color: rgba(0,0,0,0.15) !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
