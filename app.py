@@ -333,64 +333,165 @@ def page_data_import():
                 st.error(f'加载失败: {e}')
 
     with tab2:
-        cols = st.columns(3)
-        with cols[0]:
-            if st.button('📐 正态分布样本', use_container_width=True):
+        # ---- 📈 SPC 控制图 ----
+        st.subheader('📈 SPC 控制图')
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if st.button('📐 正态分布样本', use_container_width=True, key='ex_norm'):
                 np.random.seed(42)
                 set_new_data(pd.DataFrame({'测量值': np.random.normal(10.0, 0.5, 100)}))
                 st.success('已加载 100 个正态分布样本')
-        with cols[1]:
-            if st.button('📏 SPC 多子组样本', use_container_width=True):
+                st.rerun()
+        with c2:
+            if st.button('📏 SPC 多子组样本', use_container_width=True, key='ex_spc'):
                 np.random.seed(42)
                 data = [v for i in range(25) for v in np.random.normal(10.0 + (i % 5) * 0.1, 0.3, 5)]
                 set_new_data(pd.DataFrame({'测量值': data}))
                 st.success('已加载 125 个多子组样本 (25组 × 5)')
-        with cols[2]:
-            if st.button('⚙️ 含偏移样本', use_container_width=True):
+                st.rerun()
+        with c3:
+            if st.button('⚙️ 含偏移样本', use_container_width=True, key='ex_shift'):
                 np.random.seed(42)
                 d1 = list(np.random.normal(10.0, 0.5, 50))
                 d2 = list(np.random.normal(11.5, 0.5, 30))
                 set_new_data(pd.DataFrame({'测量值': d1 + d2}))
                 st.success('已加载含过程偏移的样本')
+                st.rerun()
 
-        st.write('**计量型 Gage R&R 示例**')
-        if st.button('🔬 加载 Gage R&R 示例数据', use_container_width=True):
-            np.random.seed(123)
-            parts, operators, measurements = [], [], []
-            true_vals = [10.0, 10.2, 10.5, 10.3, 10.8, 11.0, 11.2, 10.9, 11.5, 11.8]
-            for p_id, tv in enumerate(true_vals, 1):
-                for op in [1, 2, 3]:
-                    for _ in range(2):
-                        parts.append(p_id); operators.append(op)
-                        measurements.append(tv + np.random.normal(0, 0.05) + np.random.normal(0, 0.02))
-            set_new_data(pd.DataFrame({'Part': parts, 'Operator': operators, 'Measurement': measurements}))
-            st.success('已加载: 10部件 × 3操作员 × 2次试验')
-            st.rerun()
+        # ---- 🎯 过程能力 / 质量图形 ----
+        st.subheader('🎯 过程能力 / 质量图形')
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if st.button('📊 帕累托图示例', use_container_width=True, key='ex_pareto'):
+                set_new_data(pd.DataFrame({
+                    '不良类型': ['外观磕碰', '屏幕黑点', '白平衡不良', '频闪', '无画面', '画面倾斜', '黑屏', '收边不良'],
+                    '数量': [83, 19, 14, 21, 8, 13, 6, 5],
+                }))
+                st.success('已加载帕累托图示例')
+                st.rerun()
+        with c2:
+            if st.button('📦 箱线图分组示例', use_container_width=True, key='ex_box'):
+                np.random.seed(42)
+                groups = ['A线'] * 30 + ['B线'] * 30 + ['C线'] * 30
+                vals = list(np.random.normal(10.0, 0.4, 30)) + \
+                       list(np.random.normal(10.5, 0.6, 30)) + \
+                       list(np.random.normal(9.8, 0.3, 30))
+                set_new_data(pd.DataFrame({'产线': groups, '测量值': vals}))
+                st.success('已加载分组箱线图示例')
+                st.rerun()
+        with c3:
+            if st.button('📈 运行图示例', use_container_width=True, key='ex_run'):
+                np.random.seed(7)
+                set_new_data(pd.DataFrame({
+                    '序号': list(range(1, 51)),
+                    '测量值': np.random.normal(10.0, 0.5, 50) + np.linspace(0, 1.5, 50),
+                }))
+                st.success('已加载运行图示例')
+                st.rerun()
 
-        st.write('**DOE 示例数据**')
-        if st.button('🧪 加载 DOE 示例', use_container_width=True):
-            np.random.seed(99)
-            data = []
-            for A in [-1, 1]:
-                for B in [-1, 1]:
-                    for C in [-1, 1]:
+        # ---- 🔬 测量系统分析 MSA ----
+        st.subheader('🔬 测量系统分析 MSA')
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button('🔬 Gage R&R 示例', use_container_width=True, key='ex_grr'):
+                np.random.seed(123)
+                parts, operators, measurements = [], [], []
+                true_vals = [10.0, 10.2, 10.5, 10.3, 10.8, 11.0, 11.2, 10.9, 11.5, 11.8]
+                for p_id, tv in enumerate(true_vals, 1):
+                    for op in [1, 2, 3]:
                         for _ in range(2):
-                            val = 25 + 3*A + 1.5*B - 1*C + 2*A*B + np.random.normal(0, 0.5)
-                            data.append({'A_温度': A, 'B_压力': B, 'C_速度': C, '响应': val})
-            set_new_data(pd.DataFrame(data))
-            st.success('已加载 2³ 全因子 DOE 数据 (16 次试验)')
-            st.rerun()
+                            parts.append(p_id)
+                            operators.append(op)
+                            measurements.append(tv + np.random.normal(0, 0.05) + np.random.normal(0, 0.02))
+                set_new_data(pd.DataFrame({'Part': parts, 'Operator': operators, 'Measurement': measurements}))
+                st.success('已加载: 10部件 × 3操作员 × 2次试验')
+                st.rerun()
+        with c2:
+            if st.button('🧮 计数型 GRR 示例', use_container_width=True, key='ex_attr'):
+                np.random.seed(1)
+                ref = [1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1]
+                op1 = [r if np.random.rand() > 0.1 else 1 - r for r in ref]
+                op2 = [r if np.random.rand() > 0.15 else 1 - r for r in ref]
+                op3 = [r if np.random.rand() > 0.1 else 1 - r for r in ref]
+                set_new_data(pd.DataFrame({
+                    '参考结果': ref,
+                    '操作员A': op1,
+                    '操作员B': op2,
+                    '操作员C': op3,
+                }))
+                st.success('已加载计数型 GRR 示例 (20件 × 3操作员)')
+                st.rerun()
 
-        st.write('**FMEA 示例数据**')
-        if st.button('🛡️ 加载 FMEA 示例', use_container_width=True):
-            set_new_data(pd.DataFrame({
-                '模式': ['焊接虚焊', '尺寸超差', '表面划伤', '装配错位', '漏装零件'],
-                '严重度': [8, 6, 3, 5, 9],
-                '发生度': [4, 7, 8, 3, 2],
-                '探测度': [5, 3, 2, 4, 6],
-            }))
-            st.success('已加载 5 条 FMEA 记录')
-            st.rerun()
+        # ---- 🔢 统计推断 / 回归 ----
+        st.subheader('🔢 统计推断 / 回归')
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if st.button('🔀 双样本 t 检验示例', use_container_width=True, key='ex_ttest'):
+                np.random.seed(5)
+                set_new_data(pd.DataFrame({
+                    '样本A': np.random.normal(10.0, 0.5, 40),
+                    '样本B': np.random.normal(11.0, 0.6, 40),
+                }))
+                st.success('已加载双样本 t 检验示例')
+                st.rerun()
+        with c2:
+            if st.button('🔗 相关性矩阵示例', use_container_width=True, key='ex_corr'):
+                np.random.seed(8)
+                n = 80
+                x1 = np.random.normal(50, 5, n)
+                x2 = x1 * 0.8 + np.random.normal(0, 3, n)
+                x3 = x1 * -0.6 + np.random.normal(0, 4, n)
+                x4 = np.random.normal(30, 4, n)
+                set_new_data(pd.DataFrame({
+                    '温度': x1, '压力': x2, '速度': x3, '湿度': x4,
+                }))
+                st.success('已加载相关性矩阵示例')
+                st.rerun()
+        with c3:
+            if st.button('📉 回归分析示例', use_container_width=True, key='ex_reg'):
+                np.random.seed(9)
+                n = 60
+                x = np.random.normal(25, 3, n)
+                y = 2.5 * x + 10 + np.random.normal(0, 5, n)
+                set_new_data(pd.DataFrame({'温度': x, '产量': y}))
+                st.success('已加载一元回归示例')
+                st.rerun()
+
+        # ---- 🧪 高级分析 ----
+        st.subheader('🧪 高级分析')
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            if st.button('🧪 DOE 示例', use_container_width=True, key='ex_doe'):
+                np.random.seed(99)
+                data = []
+                for A in [-1, 1]:
+                    for B in [-1, 1]:
+                        for C in [-1, 1]:
+                            for _ in range(2):
+                                val = 25 + 3 * A + 1.5 * B - 1 * C + 2 * A * B + np.random.normal(0, 0.5)
+                                data.append({'A_温度': A, 'B_压力': B, 'C_速度': C, '响应': val})
+                set_new_data(pd.DataFrame(data))
+                st.success('已加载 2³ 全因子 DOE 数据 (16 次试验)')
+                st.rerun()
+        with c2:
+            if st.button('⏱️ Weibull 可靠性示例', use_container_width=True, key='ex_weibull'):
+                np.random.seed(11)
+                # Weibull(shape=2, scale=1000) 的随机样本
+                from numpy.random import weibull
+                times = 1000 * weibull(2, 50)
+                set_new_data(pd.DataFrame({'失效时间': np.round(times, 1)}))
+                st.success('已加载 Weibull 可靠性示例 (50 条失效时间)')
+                st.rerun()
+        with c3:
+            if st.button('🛡️ FMEA 示例', use_container_width=True, key='ex_fmea'):
+                set_new_data(pd.DataFrame({
+                    '模式': ['焊接虚焊', '尺寸超差', '表面划伤', '装配错位', '漏装零件'],
+                    '严重度': [8, 6, 3, 5, 9],
+                    '发生度': [4, 7, 8, 3, 2],
+                    '探测度': [5, 3, 2, 4, 6],
+                }))
+                st.success('已加载 5 条 FMEA 记录')
+                st.rerun()
 
     with tab3:
         st.caption('💡 在表格中直接输入，Tab 跳格；支持自动扩展行')
