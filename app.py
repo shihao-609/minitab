@@ -167,7 +167,13 @@ def show_data_info():
                     st.session_state.rename_dialog_open = True
                     st.rerun()
             with col_upload_btn:
-                uploaded_file = st.file_uploader('📤 上传文件', type=['csv', 'xlsx', 'xls'],
+                # 隐藏 file_uploader 默认的提示文字（文件大小/类型说明）
+                st.markdown("""
+                <style>
+                [data-testid="stFileUploader"] small { display: none !important; }
+                </style>
+                """, unsafe_allow_html=True)
+                uploaded_file = st.file_uploader('上传文件', type=['csv', 'xlsx', 'xls'],
                                                  label_visibility='collapsed', key='preview_upload')
                 if uploaded_file:
                     try:
