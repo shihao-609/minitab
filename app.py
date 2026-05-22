@@ -210,7 +210,8 @@ def page_data_import():
                     st.error('请输入名称')
                 else:
                     r = supabase_helper.save_dataset(save_name.strip(), st.session_state.user_data,
-                                                     columns_info=list(st.session_state.user_data.columns))
+                                                     columns_info=list(st.session_state.user_data.columns),
+                                                     fishbone_config=st.session_state.get('fishbone_saved_config'))
                     if r:
                         st.success(f'✅ 已保存 "{save_name.strip()}"')
                         st.rerun()
@@ -230,9 +231,11 @@ def page_data_import():
                     st.caption(f'{ds.get("row_count","?")} 行 · {str(ds.get("created_at",""))[:19]}')
                 with c2:
                     if st.button('📥 加载', key=f'load_{ds["id"]}', use_container_width=True):
-                        df = supabase_helper.load_dataset(ds['id'])
-                        if df is not None:
-                            st.session_state.user_data = df
+                        result = supabase_helper.load_dataset(ds['id'])
+                        if result is not None:
+                            st.session_state.user_data = result['df']
+                            if 'fishbone_config' in result and result['fishbone_config']:
+                                st.session_state.fishbone_saved_config = result['fishbone_config']
                             st.success(f'✅ 已加载 "{ds["name"]}"')
                             st.rerun()
                 with c3:
@@ -568,12 +571,12 @@ def page_quality_tools():
     # --- 鱼骨图 ---
     with t5:
         st.caption('根本原因分析 — 支持多级细分')
-        prob = st.text_input('问题描述', value='产品合格率下降', key='fish_problem')
-        st.write('**输入格式说明**（中英文标点均可）')
-        st.caption('• 每行一个大类，冒号/：后跟原因，逗号/，分隔\n'
-                   '• 一级原因直接写名称\n'
-                   '• 二级分类用 `{分类名: 子原因1, 子原因2}` 或 `｛分类名：子原因1，子原因2｝` 格式')
-        default_text = (
+
+        # 从已保存的配置恢复默认值
+        saved_cfg = st.session_state.get('fishbone_saved_config', {})
+        default_prob = saved_cfg.get('problem', '产品合格率下降') if saved_cfg else '产品合格率下降'
+        default_raw = saved_cfg.get('raw_input', '') if saved_cfg else ''
+        default_text_template = (
             '人员: 操作技能不足, {培训体系: 新员工多, 考核不严}, 疲劳作业, 质量意识淡薄\n'
             '机器: 设备老化, {维护管理: 保养不及时, 备件短缺}, 参数漂移\n'
             '材料: 来料批次差异, {供应商: 审核不严格, 变更未验证}, 存储不当\n'
@@ -581,7 +584,42 @@ def page_quality_tools():
             '环境: 温湿度波动, 洁净度不足, 照明不够\n'
             '测量: 量具精度不够, {校准管理: 周期过长, 标准件失效}, 测量方法不当'
         )
-        raw = st.text_area('输入原因', value=default_text, height=220, key='fish_input')
+
+        prob = st.text_input('问题描述', value=default_prob, key='fish_problem')
+
+        # 保存/加载鱼骨图配置按钮行
+        fb_btn1, fb_btn2, fb_btn3 = st.columns([1, 1, 4])
+        with fb_btn1:
+            if st.button('💾 保存鱼骨图配置', use_container_width=True, key='fb_save'):
+                raw_val = st.session_state.get('fish_input', '')
+                st.session_state.fishbone_saved_config = {
+                    'problem': prob,
+                    'raw_input': raw_val,
+                }
+                # 如果有已关联的 Supabase 数据集 ID，也同步到云端
+                st.session_state.fishbone_just_saved = True
+                st.success('✅ 鱼骨图配置已保存（加载数据时自动恢复）')
+                st.rerun()
+        with fb_btn2:
+            if st.button('🗑️ 清除保存的配置', use_container_width=True, key='fb_clear'):
+                if 'fishbone_saved_config' in st.session_state:
+                    del st.session_state.fishbone_saved_config
+                st.success('已清除')
+                st.rerun()
+        with fb_btn3:
+            if saved_cfg and not st.session_state.get('fishbone_just_saved'):
+                st.info(f'💡 已加载保存的配置（问题描述: "{saved_cfg.get("problem", "")}"）')
+
+        if st.session_state.get('fishbone_just_saved'):
+            st.session_state.fishbone_just_saved = False
+
+        st.write('**输入格式说明**（中英文标点均可）')
+        st.caption('• 每行一个大类，冒号/：后跟原因，逗号/，分隔\n'
+                   '• 一级原因直接写名称\n'
+                   '• 二级分类用 `{分类名: 子原因1, 子原因2}` 或 `｛分类名：子原因1，子原因2｝` 格式')
+        raw = st.text_area('输入原因',
+                           value=default_raw if default_raw else default_text_template,
+                           height=220, key='fish_input')
 
         if st.button('🔄 生成鱼骨图', use_container_width=True):
             # 自动转换中文标点为英文（冒号、逗号、大括号、分号）
