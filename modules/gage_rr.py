@@ -27,7 +27,12 @@ def gage_rr_crossed(parts, operators, measurements):
 
     n_parts = df['Part'].nunique()
     n_operators = df['Operator'].nunique()
-    n_trials = df.groupby(['Part', 'Operator']).size().iloc[0]
+
+    # 校验数据平衡性：所有 Part-Operator 组合的试验次数必须一致
+    trial_counts = df.groupby(['Part', 'Operator']).size()
+    if trial_counts.nunique() > 1:
+        return {'error': '数据不平衡：不同 Part-Operator 组合的试验次数不一致，请检查数据'}
+    n_trials = trial_counts.iloc[0]
 
     # 计算每个部件-操作员组合的平均值和极差
     summary = df.groupby(['Part', 'Operator']).agg(

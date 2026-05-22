@@ -43,7 +43,7 @@ def run_chart(data, target=None):
         z_runs = (n_runs - exp_runs) / std_runs if std_runs > 0 else 0
         run_test_sig = abs(z_runs) > 1.96  # 0.05 显著性
     else:
-        exp_runs, std_runs, z_runs, run_test_sig = 0, 0, 0, False
+        exp_runs, std_runs, z_runs, run_test_sig = 0, 0, 0, True  # True 表示全相同值，视为非随机模式
 
     # 判断趋势
     from scipy import stats
@@ -85,7 +85,7 @@ def run_chart(data, target=None):
             '游程数': n_runs,
             '期望游程': f'{exp_runs:.1f}',
             'z 值': f'{z_runs:.3f}',
-            '游程检验': '非随机 (可能存在模式)' if run_test_sig else '随机 (无异常模式)',
+            '游程检验': '数据全相等 (无法检验)' if (n1 == 0 or n2 == 0) else ('非随机 (可能存在模式)' if run_test_sig else '随机 (无异常模式)'),
             '趋势检验': f'显著趋势 (p={p_val:.4f})' if has_trend else '无显著趋势',
         }
     }

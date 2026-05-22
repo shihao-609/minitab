@@ -33,12 +33,15 @@ def process_capability(data, usl=None, lsl=None, target=None):
         return raw_results
 
     # 计算 Cp/Cpk (使用组内标准差)
-    if usl and lsl:
+    has_usl = usl is not None
+    has_lsl = lsl is not None
+
+    if has_usl and has_lsl:
         Cp = (usl - lsl) / (6 * std_within) if std_within > 0 else np.inf
         Cpl = (mean - lsl) / (3 * std_within) if std_within > 0 else np.inf
         Cpu = (usl - mean) / (3 * std_within) if std_within > 0 else np.inf
         Cpk = min(Cpl, Cpu)
-    elif lsl:
+    elif has_lsl:
         Cp = None
         Cpl = (mean - lsl) / (3 * std_within) if std_within > 0 else np.inf
         Cpu = None
@@ -50,12 +53,12 @@ def process_capability(data, usl=None, lsl=None, target=None):
         Cpk = Cpu
 
     # 计算 Pp/Ppk (使用整体标准差)
-    if usl and lsl:
+    if has_usl and has_lsl:
         Pp = (usl - lsl) / (6 * std_overall) if std_overall > 0 else np.inf
         Ppl = (mean - lsl) / (3 * std_overall) if std_overall > 0 else np.inf
         Ppu = (usl - mean) / (3 * std_overall) if std_overall > 0 else np.inf
         Ppk = min(Ppl, Ppu)
-    elif lsl:
+    elif has_lsl:
         Pp = None
         Ppl = (mean - lsl) / (3 * std_overall) if std_overall > 0 else np.inf
         Ppu = None

@@ -643,7 +643,7 @@ def page_spc():
             if len(data) < ss * 2:
                 st.error(f'数据不足，需至少 {ss*2} 个点')
             else:
-                r = spc_charts.xbar_r_chart(data, ss) if 'R' in ct else spc_charts.xbar_s_chart(data, ss)
+                r = spc_charts.xbar_r_chart(data, ss) if ct == 'X-bar R (均值-极差)' else spc_charts.xbar_s_chart(data, ss)
                 st.plotly_chart(r['chart'], use_container_width=True)
                 with st.expander('📊 参数'):
                     for k, v in r['stats'].items():

@@ -20,15 +20,15 @@ def ewma_chart(data, lam=0.2, L=2.7):
     if n < 2:
         return {'error': '至少需要 2 个数据点'}
 
-    # 计算 EWMA 值
-    z = np.zeros(n)
-    z[0] = data[0]
-    for i in range(1, n):
-        z[i] = lam * data[i] + (1 - lam) * z[i - 1]
-
     # 整体均值和标准差
     mu = np.mean(data)
     sigma = np.std(data, ddof=1)
+
+    # 计算 EWMA 值（初始值用总体均值 mu 而非第一个数据点）
+    z = np.zeros(n)
+    z[0] = mu
+    for i in range(1, n):
+        z[i] = lam * data[i] + (1 - lam) * z[i - 1]
 
     # EWMA 控制限（稳态）
     # Var(z_i) = sigma² * (λ/(2-λ)) * [1 - (1-λ)^(2i)]

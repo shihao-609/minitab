@@ -106,10 +106,11 @@ def attribute_gage_rr(reference, appraisers, n_trials=2):
     """
     ref = np.array(reference)
     n_parts = len(ref)
-    detected_trials = 1
 
     results = {}
     kappa_summary = []
+    all_trials = []  # 收集所有操作员的试验次数
+    aligned_decisions_dict = {}  # 存储对齐后的判定数据
 
     for op_name, decisions in appraisers.items():
         dec = np.array(decisions)
@@ -120,6 +121,7 @@ def attribute_gage_rr(reference, appraisers, n_trials=2):
             continue
         ref_aligned = ref[:min_len]
         dec_aligned = dec[:min_len]
+        aligned_decisions_dict[op_name] = dec_aligned
 
         # 与参考值对比
         match = (dec_aligned == ref_aligned)
@@ -128,7 +130,7 @@ def attribute_gage_rr(reference, appraisers, n_trials=2):
         # 自动检测实际试验次数
         actual_trials = min_len // n_parts if n_parts > 0 and min_len >= n_parts else 1
         actual_n_parts = min_len // actual_trials if actual_trials > 0 else min_len
-        detected_trials = actual_trials  # 记录最后一次检测到的次数
+        all_trials.append(actual_trials)
 
         # 自身一致性（各次试验之间，仅当有多次试验时）
         if actual_trials > 1 and actual_n_parts * actual_trials <= len(dec_aligned):
@@ -178,11 +180,20 @@ def attribute_gage_rr(reference, appraisers, n_trials=2):
     if not results:
         return {'error': '数据量不足，无法进行计数型 GRR 分析'}
 
-    # 全体操作员间一致性
-    all_decisions = np.array([appraisers[op] for op in results.keys()])
-    n_ops = len(results)
+    # 检查各操作员试验次数是否一致
+    unique_trials = set(all_trials)
+    trials_consistent = len(unique_trials) == 1
+    detected_trials = all_trials[0] if trials_consistent else max(all_trials)
+
+    # 全体操作员间一致性（使用对齐后的数据）
+    op_names_in_results = list(results.keys())
+    all_decisions = np.array([aligned_decisions_dict[op] for op in op_names_in_results])
+    n_ops = len(op_names_in_results)
     if n_ops > 1:
-        ops_match = np.mean([np.mean(all_decisions[i] == all_decisions[j])
+        # 确保所有数据长度一致
+        min_op_len = min(len(ad) for ad in all_decisions)
+        aligned_for_compare = np.array([ad[:min_op_len] for ad in all_decisions])
+        ops_match = np.mean([np.mean(aligned_for_compare[i] == aligned_for_compare[j])
                             for i in range(n_ops) for j in range(i+1, n_ops)])
     else:
         ops_match = 1.0
@@ -220,6 +231,7 @@ def attribute_gage_rr(reference, appraisers, n_trials=2):
             '零件数': n_parts,
             '操作员数': n_ops,
             '重复次数': detected_trials,
+            '试验次数一致性': '一致' if trials_consistent else f'不一致 (检测到: {sorted(unique_trials)})',
             '操作员间一致性': f'{ops_match:.1%}',
         }
     }
