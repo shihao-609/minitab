@@ -570,10 +570,10 @@ def page_quality_tools():
                 if gc == '无分组':
                     r = pareto_histogram.box_plot(df[dc].dropna().values)
                 else:
-                    grps = df.groupby(gc)
+                    grps = df.groupby(gc, sort=True)
                     r = pareto_histogram.box_plot(
                         [g[dc].dropna().values for _, g in grps],
-                        group_labels=[str(n) for n in df[gc].unique()])
+                        group_labels=[str(n) for n in sorted(df[gc].unique())])
                 st.plotly_chart(r['chart'], use_container_width=True)
 
         # --- 运行图 ---

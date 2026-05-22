@@ -10,11 +10,12 @@ v2 关键变更（应对"增加账号密码"的影响）：
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from supabase import create_client, Client
 import pandas as pd
 import json
 import streamlit as st
+from typing import Optional, List
 
 
 # ==================== 客户端初始化 ====================
@@ -33,14 +34,14 @@ def _get_supabase_key() -> str:
         return os.environ.get("SUPABASE_ANON_KEY", "")
 
 
-def _get_user_id() -> str | None:
+def _get_user_id() -> Optional[str]:
     """从 session 获取当前用户 ID"""
     if st.session_state.get("authenticated") and st.session_state.get("user"):
         return st.session_state.user.id
     return None
 
 
-def _get_client() -> Client | None:
+def _get_client() -> Optional[Client]:
     """
     获取 Supabase 客户端（自动选择认证模式）
 
@@ -77,7 +78,7 @@ def _get_client() -> Client | None:
     return client
 
 
-def _check_client(client: Client | None):
+def _check_client(client: Optional[Client]):
     """检查客户端是否可用，不可用时抛出异常"""
     if client is None:
         raise ValueError("SUPABASE_URL 或 SUPABASE_ANON_KEY 未设置，请检查 .env 文件或 Streamlit Secrets")
@@ -85,7 +86,7 @@ def _check_client(client: Client | None):
 
 # ==================== 数据集 CRUD ====================
 
-def save_dataset(name: str, df: pd.DataFrame, columns_info: dict = None) -> dict | None:
+def save_dataset(name: str, df: pd.DataFrame, columns_info: dict = None) -> Optional[dict]:
     """
     将 DataFrame 保存到 Supabase 数据集表
 
@@ -122,7 +123,7 @@ def save_dataset(name: str, df: pd.DataFrame, columns_info: dict = None) -> dict
         return None
 
 
-def load_dataset(dataset_id: str) -> pd.DataFrame | None:
+def load_dataset(dataset_id: str) -> Optional[pd.DataFrame]:
     """
     从 Supabase 加载指定的数据集
 
@@ -156,7 +157,7 @@ def load_dataset(dataset_id: str) -> pd.DataFrame | None:
         return None
 
 
-def list_datasets() -> list[dict]:
+def list_datasets() -> list:
     """
     列出当前用户的所有数据集
 
@@ -193,7 +194,7 @@ def update_dataset(dataset_id: str, name: str = None, df: pd.DataFrame = None) -
     try:
         client = _get_client()
         _check_client(client)
-        update_data = {"updated_at": datetime.utcnow().isoformat()}
+        update_data = {"updated_at": datetime.now(timezone.utc).isoformat()}
         if name:
             update_data["name"] = name
         if df is not None:
@@ -225,7 +226,7 @@ def delete_dataset(dataset_id: str) -> bool:
 
 # ==================== 鱼骨图配置 CRUD ====================
 
-def save_fishbone(name: str, problem: str, raw_input: str) -> dict | None:
+def save_fishbone(name: str, problem: str, raw_input: str) -> Optional[dict]:
     """
     将鱼骨图配置保存到独立的 fishbone_configs 表
 
@@ -250,7 +251,7 @@ def save_fishbone(name: str, problem: str, raw_input: str) -> dict | None:
         return None
 
 
-def list_fishbone_configs() -> list[dict]:
+def list_fishbone_configs() -> list:
     """
     列出当前用户的所有鱼骨图配置
 
@@ -271,7 +272,7 @@ def list_fishbone_configs() -> list[dict]:
         return []
 
 
-def load_fishbone_config(config_id: str) -> dict | None:
+def load_fishbone_config(config_id: str) -> Optional[dict]:
     """
     加载指定鱼骨图配置
     """

@@ -81,9 +81,9 @@ def histogram_with_stats(data, title='直方图'):
     # 添加正态拟合曲线
     if std_v > 0:
         x_range = np.linspace(min_v - std_v, max_v + std_v, 200)
-        y_normal = stats.norm.pdf(x_range, mean_v, std_v) * n * (x_range[1] - x_range[0]) * num_bins / (
-            (max_v + std_v) - (min_v - std_v)) * (max_v - min_v) / num_bins
-        scale_factor = n * (max_v - min_v) / num_bins
+        # 将 PDF 缩放到与直方图频数相同的量级: n * bin_width
+        bin_width = (max_v - min_v) / num_bins
+        scale_factor = n * bin_width
         y_normal = stats.norm.pdf(x_range, mean_v, std_v) * scale_factor
         fig.add_trace(go.Scatter(x=x_range, y=y_normal, mode='lines',
                                  name=f'正态拟合 (μ={mean_v:.3f})',

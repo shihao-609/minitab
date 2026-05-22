@@ -15,6 +15,7 @@
 """
 
 import streamlit as st
+import os
 from supabase import create_client, Client
 from typing import Optional
 
@@ -25,22 +26,14 @@ def _get_supabase_url() -> str:
     try:
         return st.secrets.get("SUPABASE_URL", "") or os.environ.get("SUPABASE_URL", "")
     except Exception:
-        try:
-            import os
-            return os.environ.get("SUPABASE_URL", "")
-        except Exception:
-            return ""
+        return os.environ.get("SUPABASE_URL", "")
 
 
 def _get_supabase_anon_key() -> str:
     try:
         return st.secrets.get("SUPABASE_ANON_KEY", "") or os.environ.get("SUPABASE_ANON_KEY", "")
     except Exception:
-        try:
-            import os
-            return os.environ.get("SUPABASE_ANON_KEY", "")
-        except Exception:
-            return ""
+        return os.environ.get("SUPABASE_ANON_KEY", "")
 
 
 def get_anon_client() -> Optional[Client]:
@@ -216,8 +209,6 @@ def render_auth_page():
     所有需要认证的页面调用前，先由 login_required 装饰器检查，
     未登录时跳转到此页面。
     """
-    import os
-
     st.set_page_config(
         page_title="QMS 登录",
         page_icon="🔐",

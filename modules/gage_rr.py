@@ -96,7 +96,8 @@ def gage_rr_crossed(parts, operators, measurements):
             return '不可接受 (需要改进)'
 
     # 图表
-    chart = gage_rr_chart(df, summary, n_parts, n_operators, n_trials)
+    chart = gage_rr_chart(df, summary, n_parts, n_operators, n_trials,
+                          pct_EV=pct_EV, pct_AV=pct_AV, pct_PV=pct_PV)
 
     results = {
         'chart': chart,
@@ -124,7 +125,8 @@ def gage_rr_crossed(parts, operators, measurements):
     return results
 
 
-def gage_rr_chart(df, summary, n_parts, n_operators, n_trials):
+def gage_rr_chart(df, summary, n_parts, n_operators, n_trials,
+                  pct_EV=0, pct_AV=0, pct_PV=0):
     """生成 Gage R&R 分析图表"""
     fig = make_subplots(
         rows=2, cols=2,
@@ -170,11 +172,14 @@ def gage_rr_chart(df, summary, n_parts, n_operators, n_trials):
                          text=[f'{m:.4f}' for m in op_means], textposition='outside'),
                   row=2, col=1)
 
-    # 图表4: 方差分量占比扇形图
-    ev_val = df.groupby(['Part', 'Operator']).size().iloc[0]
+    # 图表4: 方差分量占比扇形图（使用实际计算值）
+    pie_values = [pct_EV, pct_AV, pct_PV]
+    # 如果全部为零则使用等分占位
+    if sum(pie_values) <= 0:
+        pie_values = [1, 1, 1]
     fig.add_trace(go.Pie(
         labels=['重复性(EV)', '再现性(AV)', '部件间(PV)'],
-        values=[30, 15, 55],  # 占位值，将在app.py中更新
+        values=pie_values,
         marker=dict(colors=['#3498db', '#e74c3c', '#2ecc71']),
         textinfo='label+percent', hole=0.3
     ), row=2, col=2)

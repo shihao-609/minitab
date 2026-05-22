@@ -80,7 +80,7 @@ def xbar_r_chart(data, subgroup_size=5):
     results = {
         'chart': fig,
         'stats': {
-            'X\bar_bar': xbar_bar, 'R_bar': R_bar,
+            'X_bar_bar': xbar_bar, 'R_bar': R_bar,
             'X_bar_UCL': xbar_ucl, 'X_bar_LCL': xbar_lcl,
             'R_UCL': R_ucl, 'R_LCL': R_lcl,
         }
