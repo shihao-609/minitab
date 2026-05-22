@@ -39,10 +39,12 @@ st.set_page_config(
     initial_sidebar_state='expanded',
 )
 
-# 隐藏右上角工具栏 (Share / 编辑代码等)
+# 隐藏右上角工具栏 (Share / 编辑代码等) + 隐藏右下角 Made with Streamlit
 st.markdown("""
 <style>
 [data-testid="stToolbar"] { display: none !important; }
+footer { visibility: hidden; }
+[data-testid="manage-app-button"] { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
