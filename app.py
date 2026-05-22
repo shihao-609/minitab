@@ -79,10 +79,154 @@ def show_data_info():
     if 'user_data' in st.session_state and st.session_state.user_data is not None:
         df = st.session_state.user_data
         with st.expander('📋 当前数据预览', expanded=False):
-            st.dataframe(df.head(20), use_container_width=True)
-            st.caption(f'{df.shape[0]} 行 × {df.shape[1]} 列')
-            st.download_button('💾 下载 (CSV)', df.to_csv(index=False).encode('utf-8-sig'),
-                               'qms_data.csv', 'text/csv')
+            # ===== 数据编辑器（可直接修改单元格） =====
+            edited = st.data_editor(df, use_container_width=True,
+                                    num_rows='dynamic', hide_index=True,
+                                    key='live_data_edit')
+
+            st.caption(f'{edited.shape[0]} 行 × {edited.shape[1]} 列')
+
+            # ===== 操作按钮行 =====
+            btn1, btn2, btn3, btn4, btn5, btn6 = st.columns([1, 1, 1, 1, 1, 1])
+
+            with btn1:
+                if st.button('✅ 保存修改', key='save_live_edit', type='primary',
+                             use_container_width=True):
+                    st.session_state.user_data = edited.reset_index(drop=True)
+                    st.success('✅ 数据已更新')
+                    st.rerun()
+
+            with btn2:
+                if st.button('🔄 恢复原样', key='reset_data', use_container_width=True):
+                    st.session_state.user_data = df
+                    st.success('已恢复')
+                    st.rerun()
+
+            with btn3:
+                download_csv = edited.to_csv(index=False).encode('utf-8-sig')
+                st.download_button('💾 下载', download_csv,
+                                   'qms_data.csv', 'text/csv',
+                                   use_container_width=True)
+
+            with btn4:
+                if st.button('🗑️ 删行', key='del_rows_btn', use_container_width=True):
+                    st.session_state.show_del_rows = True
+            with btn5:
+                if st.button('🗑️ 删列', key='del_cols_btn', use_container_width=True):
+                    st.session_state.show_del_cols = True
+            with btn6:
+                if st.button('➕ 加列', key='add_col_btn', use_container_width=True):
+                    st.session_state.show_add_col = True
+
+            # ===== 添加列功能 =====
+            if st.session_state.get('show_add_col'):
+                st.divider()
+                st.caption('**➕ 添加新列** — 新列会以空值填充所有行')
+                c1, c2, c3 = st.columns([3, 1.5, 1])
+                with c1:
+                    new_col_name = st.text_input('新列名称', placeholder='例: 新指标',
+                                                 key='new_col_name')
+                with c2:
+                    default_val = st.text_input('默认填充值', placeholder='留空=空值',
+                                                value='', key='new_col_default')
+                with c3:
+                    st.write('&nbsp;')
+                    if st.button('✅ 确认添加', key='confirm_add_col',
+                                 use_container_width=True):
+                        if not new_col_name.strip():
+                            st.error('请输入列名')
+                        elif new_col_name.strip() in edited.columns:
+                            st.error('列名已存在')
+                        else:
+                            fill_val = default_val.strip() or None
+                            edited_copy = edited.copy()
+                            edited_copy[new_col_name.strip()] = fill_val
+                            st.session_state.user_data = edited_copy.reset_index(drop=True)
+                            st.session_state.show_add_col = False
+                            st.success(f'已添加列: {new_col_name.strip()}')
+                            st.rerun()
+                if st.button('❌ 取消添加', key='cancel_add_col'):
+                    st.session_state.show_add_col = False
+                    st.rerun()
+
+            # ===== 重命名列功能 =====
+            st.divider()
+            c1, c2, c3 = st.columns([2, 2.5, 1])
+            with c1:
+                rename_sel = st.selectbox('选择要重命名的列',
+                                          ['— 不选'] + list(edited.columns),
+                                          key='rename_sel')
+            with c2:
+                rename_new = st.text_input('新列名', placeholder='输入新名称',
+                                           key='rename_new')
+            with c3:
+                st.write('&nbsp;')
+                if st.button('✏️ 确认重命名', key='confirm_rename',
+                             use_container_width=True):
+                    if rename_sel == '— 不选':
+                        st.error('请选择要重命名的列')
+                    elif not rename_new.strip():
+                        st.error('请输入新列名')
+                    elif rename_new.strip() in edited.columns and rename_new.strip() != rename_sel:
+                        st.error('新列名已存在')
+                    else:
+                        cols = list(edited.columns)
+                        new_cols = [rename_new.strip() if c == rename_sel else c for c in cols]
+                        edited_copy = edited.copy()
+                        edited_copy.columns = new_cols
+                        st.session_state.user_data = edited_copy.reset_index(drop=True)
+                        st.success(f'已重命名: {rename_sel} → {rename_new.strip()}')
+                        st.rerun()
+
+            # ===== 删除行功能 =====
+            if st.session_state.get('show_del_rows'):
+                st.divider()
+                all_row_indices = list(range(len(edited)))
+                del_rows = st.multiselect(
+                    '选择要删除的行（行号从0开始）',
+                    options=all_row_indices,
+                    default=[],
+                    format_func=lambda i: f'第 {i+1} 行: {str(edited.iloc[i].tolist())[:50]}...',
+                    key='row_selector'
+                )
+                c1, c2 = st.columns([1.5, 1])
+                with c1:
+                    if del_rows and st.button('确认删除所选行', key='confirm_del_rows',
+                                              use_container_width=True):
+                        keep_mask = [i not in del_rows for i in range(len(edited))]
+                        st.session_state.user_data = edited.loc[keep_mask].reset_index(drop=True)
+                        st.session_state.show_del_rows = False
+                        st.success(f'已删除 {len(del_rows)} 行')
+                        st.rerun()
+                with c2:
+                    if st.button('❌ 取消', key='cancel_del_rows',
+                                 use_container_width=True):
+                        st.session_state.show_del_rows = False
+                        st.rerun()
+
+            # ===== 删除列功能 =====
+            if st.session_state.get('show_del_cols'):
+                st.divider()
+                del_cols = st.multiselect(
+                    '选择要删除的列',
+                    options=list(edited.columns),
+                    default=[],
+                    key='col_selector'
+                )
+                c1, c2 = st.columns([1.5, 1])
+                with c1:
+                    if del_cols and st.button('确认删除所选列', key='confirm_del_cols',
+                                              use_container_width=True):
+                        cols_to_keep = [c for c in edited.columns if c not in del_cols]
+                        st.session_state.user_data = edited[cols_to_keep].copy()
+                        st.session_state.show_del_cols = False
+                        st.success(f'已删除列: {", ".join(del_cols)}')
+                        st.rerun()
+                with c2:
+                    if st.button('❌ 取消', key='cancel_del_cols',
+                                 use_container_width=True):
+                        st.session_state.show_del_cols = False
+                        st.rerun()
 
 
 # ==================== 1. 数据导入 ====================
