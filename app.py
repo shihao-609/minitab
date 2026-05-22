@@ -148,12 +148,12 @@ def show_data_info():
             st.caption(f'{edited.shape[0]} 行 × {edited.shape[1]} 列')
 
             # ===== 操作按钮行 =====
-            btn1, btn2, btn3, btn4, btn5, btn6 = st.columns([1.2, 1.2, 1, 1, 1, 1])
+            btn1, btn2, btn3, btn4, btn5, btn6 = st.columns([1.1, 1.1, 0.9, 0.9, 0.9, 0.9])
 
             with btn1:
                 if st.button('💾 保存修改', key='save_data', use_container_width=True):
                     st.session_state.saved_data = st.session_state.user_data.copy()
-                    st.success('✅ 已保存，所有模块将基于此数据更新')
+                    st.toast('✅ 已保存')
 
             with btn2:
                 if st.button('🔄 恢复原样', key='reset_data', use_container_width=True):
@@ -164,19 +164,19 @@ def show_data_info():
                         st.warning('没有可恢复的基线数据')
                     st.rerun()
 
-            with btn2:
+            with btn3:
                 download_csv = edited.to_csv(index=False).encode('utf-8-sig')
                 st.download_button('💾 下载', download_csv,
                                    'qms_data.csv', 'text/csv',
                                    use_container_width=True)
 
-            with btn3:
+            with btn4:
                 if st.button('🗑️ 删行', key='del_rows_btn', use_container_width=True):
                     st.session_state.show_del_rows = True
-            with btn4:
+            with btn5:
                 if st.button('🗑️ 删列', key='del_cols_btn', use_container_width=True):
                     st.session_state.show_del_cols = True
-            with btn5:
+            with btn6:
                 if st.button('➕ 加列', key='add_col_btn', use_container_width=True):
                     st.session_state.show_add_col = True
 
