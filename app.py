@@ -48,7 +48,7 @@ footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
-# ===== 弹窗居中样式 =====
+# ===== 弹窗居中样式 + 遮罩透明 =====
 st.markdown("""
 <style>
     [data-testid="stDialog"] {
@@ -61,9 +61,13 @@ st.markdown("""
         max-height: 85vh !important;
         overflow-y: auto !important;
     }
-    /* 弹窗遮罩层：更浅的半透明背景 */
-    [data-testid="stDialog"]::backdrop {
-        background-color: rgba(0,0,0,0.15) !important;
+    /* 遮罩层完全透明：用 :has() 命中包含 stDialog 的 overlay 父容器 */
+    div:has(> [data-testid="stDialog"]) {
+        background: transparent !important;
+        backdrop-filter: none !important;
+    }
+    div:has(div:has(> [data-testid="stDialog"])) {
+        background: transparent !important;
     }
 </style>
 """, unsafe_allow_html=True)
