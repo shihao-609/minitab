@@ -104,6 +104,28 @@ def set_new_data(df):
     st.session_state.user_data = df
     st.session_state.saved_data = None  # 重置基线，show_data_info 会自动重新初始化
 
+def parse_uploaded_file(uploaded_file):
+    """解析上传的 CSV/Excel 文件，返回 DataFrame 或 None"""
+    if uploaded_file.name.endswith('.csv'):
+        raw_bytes = uploaded_file.getvalue()
+        df = None
+        for enc in ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'gb18030', 'latin-1']:
+            try:
+                from io import BytesIO
+                df = pd.read_csv(BytesIO(raw_bytes), encoding=enc)
+                break
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        if df is None:
+            st.error('无法识别文件编码，请将文件另存为 UTF-8 格式')
+            return None
+        st.success(f'✅ 编码: {enc} · {df.shape[0]} 行 × {df.shape[1]} 列')
+        return df
+    else:
+        df = pd.read_excel(uploaded_file)
+        st.success(f'✅ 成功加载: {df.shape[0]} 行 × {df.shape[1]} 列')
+        return df
+
 @st.dialog('✏️ 修改列名')
 def rename_column_dialog(df):
     cols = list(df.columns)
@@ -139,11 +161,22 @@ def show_data_info():
                 rename_column_dialog(df)
                 st.session_state.rename_dialog_open = False
 
-            col_edit_btn, _ = st.columns([2, 10])
+            col_edit_btn, col_upload_btn, _ = st.columns([2, 2, 8])
             with col_edit_btn:
                 if st.button('✏️ 修改列名', key='show_rename_dialog', use_container_width=True):
                     st.session_state.rename_dialog_open = True
                     st.rerun()
+            with col_upload_btn:
+                uploaded_file = st.file_uploader('📤 上传文件', type=['csv', 'xlsx', 'xls'],
+                                                 label_visibility='collapsed', key='preview_upload')
+                if uploaded_file:
+                    try:
+                        df = parse_uploaded_file(uploaded_file)
+                        if df is not None:
+                            set_new_data(df)
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f'加载失败: {e}')
 
             # ===== 数据编辑器（可直接修改单元格） =====
             edited = st.data_editor(df, use_container_width=True,
@@ -279,27 +312,9 @@ def page_data_import():
         uploaded_file = st.file_uploader('选择 CSV 或 Excel 文件', type=['csv', 'xlsx', 'xls'])
         if uploaded_file:
             try:
-                if uploaded_file.name.endswith('.csv'):
-                    # 自动探测编码：先试 UTF-8，再试 GBK 系列（中文 Windows 常见）
-                    raw_bytes = uploaded_file.getvalue()
-                    df = None
-                    for enc in ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'gb18030', 'latin-1']:
-                        try:
-                            from io import BytesIO
-                            df = pd.read_csv(BytesIO(raw_bytes), encoding=enc)
-                            break
-                        except (UnicodeDecodeError, UnicodeError):
-                            continue
-                    if df is None:
-                        st.error('无法识别文件编码，请将文件另存为 UTF-8 格式')
-                    else:
-                        st.success(f'✅ 编码: {enc} · {df.shape[0]} 行 × {df.shape[1]} 列')
-                        set_new_data(df)
-                        st.dataframe(df.head(10), use_container_width=True)
-                else:
-                    df = pd.read_excel(uploaded_file)
+                df = parse_uploaded_file(uploaded_file)
+                if df is not None:
                     set_new_data(df)
-                    st.success(f'✅ 成功加载: {df.shape[0]} 行 × {df.shape[1]} 列')
                     st.dataframe(df.head(10), use_container_width=True)
             except Exception as e:
                 st.error(f'加载失败: {e}')
