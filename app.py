@@ -79,42 +79,75 @@ def show_data_info():
     if 'user_data' in st.session_state and st.session_state.user_data is not None:
         df = st.session_state.user_data
         with st.expander('📋 当前数据预览', expanded=False):
+            # ===== 列名编辑行（点击即可改列名） =====
+            st.caption('💡 **改列名**：直接在下方输入框中修改，按回车确认')
+            cols = list(df.columns)
+            n_cols = len(cols)
+            # 用 st.columns 布局，每行最多 6 个输入框
+            per_row = 6
+            renamed_cols = []
+            for start in range(0, n_cols, per_row):
+                chunk = cols[start:start + per_row]
+                row_cols = st.columns(len(chunk))
+                for j, cn in enumerate(chunk):
+                    with row_cols[j]:
+                        new_nm = st.text_input(
+                            '', value=cn,
+                            key=f'rename_col_{start+j}',
+                            label_visibility='collapsed',
+                            placeholder=f'列{start+j+1}'
+                        )
+                        renamed_cols.append(new_nm.strip())
+
+            # 若列名有变化，重命名 df
+            if renamed_cols and renamed_cols != [c.strip() for c in cols]:
+                clean_names = []
+                name_counts = {}
+                for nm in renamed_cols:
+                    base = nm or '列'
+                    if base in name_counts:
+                        name_counts[base] += 1
+                        clean_names.append(f'{base}_{name_counts[base]}')
+                    else:
+                        name_counts[base] = 1
+                        clean_names.append(base)
+                df = df.copy()
+                df.columns = clean_names
+                st.session_state.user_data = df
+                st.rerun()
+
             # ===== 数据编辑器（可直接修改单元格） =====
             edited = st.data_editor(df, use_container_width=True,
                                     num_rows='dynamic', hide_index=True,
                                     key='live_data_edit')
 
+            # ★ 关键：自动同步编辑器修改到 session，各分析模块实时生效
+            st.session_state.user_data = edited.reset_index(drop=True)
+
             st.caption(f'{edited.shape[0]} 行 × {edited.shape[1]} 列')
 
             # ===== 操作按钮行 =====
-            btn1, btn2, btn3, btn4, btn5, btn6 = st.columns([1, 1, 1, 1, 1, 1])
+            btn1, btn2, btn3, btn4, btn5 = st.columns([1, 1, 1, 1, 1])
 
             with btn1:
-                if st.button('✅ 保存修改', key='save_live_edit', type='primary',
-                             use_container_width=True):
-                    st.session_state.user_data = edited.reset_index(drop=True)
-                    st.success('✅ 数据已更新')
-                    st.rerun()
-
-            with btn2:
                 if st.button('🔄 恢复原样', key='reset_data', use_container_width=True):
                     st.session_state.user_data = df
                     st.success('已恢复')
                     st.rerun()
 
-            with btn3:
+            with btn2:
                 download_csv = edited.to_csv(index=False).encode('utf-8-sig')
                 st.download_button('💾 下载', download_csv,
                                    'qms_data.csv', 'text/csv',
                                    use_container_width=True)
 
-            with btn4:
+            with btn3:
                 if st.button('🗑️ 删行', key='del_rows_btn', use_container_width=True):
                     st.session_state.show_del_rows = True
-            with btn5:
+            with btn4:
                 if st.button('🗑️ 删列', key='del_cols_btn', use_container_width=True):
                     st.session_state.show_del_cols = True
-            with btn6:
+            with btn5:
                 if st.button('➕ 加列', key='add_col_btn', use_container_width=True):
                     st.session_state.show_add_col = True
 
@@ -148,35 +181,6 @@ def show_data_info():
                 if st.button('❌ 取消添加', key='cancel_add_col'):
                     st.session_state.show_add_col = False
                     st.rerun()
-
-            # ===== 重命名列功能 =====
-            st.divider()
-            c1, c2, c3 = st.columns([2, 2.5, 1])
-            with c1:
-                rename_sel = st.selectbox('选择要重命名的列',
-                                          ['— 不选'] + list(edited.columns),
-                                          key='rename_sel')
-            with c2:
-                rename_new = st.text_input('新列名', placeholder='输入新名称',
-                                           key='rename_new')
-            with c3:
-                st.write('&nbsp;')
-                if st.button('✏️ 确认重命名', key='confirm_rename',
-                             use_container_width=True):
-                    if rename_sel == '— 不选':
-                        st.error('请选择要重命名的列')
-                    elif not rename_new.strip():
-                        st.error('请输入新列名')
-                    elif rename_new.strip() in edited.columns and rename_new.strip() != rename_sel:
-                        st.error('新列名已存在')
-                    else:
-                        cols = list(edited.columns)
-                        new_cols = [rename_new.strip() if c == rename_sel else c for c in cols]
-                        edited_copy = edited.copy()
-                        edited_copy.columns = new_cols
-                        st.session_state.user_data = edited_copy.reset_index(drop=True)
-                        st.success(f'已重命名: {rename_sel} → {rename_new.strip()}')
-                        st.rerun()
 
             # ===== 删除行功能 =====
             if st.session_state.get('show_del_rows'):
