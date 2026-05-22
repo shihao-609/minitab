@@ -75,46 +75,42 @@ def check_data():
         return None
     return st.session_state.user_data
 
+@st.dialog('✏️ 修改列名')
+def rename_column_dialog(df):
+    cols = list(df.columns)
+    col_to_rename = st.selectbox('选择要修改的列', cols, key='rename_col_select')
+    new_name = st.text_input('新列名', value=col_to_rename, key='rename_col_input')
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        if st.button('✅ 确认', use_container_width=True):
+            if new_name.strip() and new_name.strip() != col_to_rename:
+                if new_name.strip() in [c for c in cols if c != col_to_rename]:
+                    st.error('列名已存在，请换一个')
+                else:
+                    rename_map = {col_to_rename: new_name.strip()}
+                    st.session_state.user_data = st.session_state.user_data.rename(columns=rename_map)
+                    st.rerun()
+            else:
+                st.rerun()
+    with c2:
+        if st.button('❌ 取消', use_container_width=True):
+            st.rerun()
+
+
 def show_data_info():
     if 'user_data' in st.session_state and st.session_state.user_data is not None:
         df = st.session_state.user_data
         with st.expander('📋 当前数据预览', expanded=False):
-            # ===== 列名编辑行（点击即可改列名） =====
-            st.caption('💡 **改列名**：直接在下方输入框中修改，按回车确认')
-            cols = list(df.columns)
-            n_cols = len(cols)
-            # 用 st.columns 布局，每行最多 6 个输入框
-            per_row = 6
-            renamed_cols = []
-            for start in range(0, n_cols, per_row):
-                chunk = cols[start:start + per_row]
-                row_cols = st.columns(len(chunk))
-                for j, cn in enumerate(chunk):
-                    with row_cols[j]:
-                        new_nm = st.text_input(
-                            '', value=cn,
-                            key=f'rename_col_{start+j}',
-                            label_visibility='collapsed',
-                            placeholder=f'列{start+j+1}'
-                        )
-                        renamed_cols.append(new_nm.strip())
+            # ===== 列名编辑 + 弹窗 =====
+            if st.session_state.get('rename_dialog_open'):
+                rename_column_dialog(df)
+                st.session_state.rename_dialog_open = False
 
-            # 若列名有变化，重命名 df
-            if renamed_cols and renamed_cols != [c.strip() for c in cols]:
-                clean_names = []
-                name_counts = {}
-                for nm in renamed_cols:
-                    base = nm or '列'
-                    if base in name_counts:
-                        name_counts[base] += 1
-                        clean_names.append(f'{base}_{name_counts[base]}')
-                    else:
-                        name_counts[base] = 1
-                        clean_names.append(base)
-                df = df.copy()
-                df.columns = clean_names
-                st.session_state.user_data = df
-                st.rerun()
+            col_edit_btn, _ = st.columns([2, 10])
+            with col_edit_btn:
+                if st.button('✏️ 修改列名', key='show_rename_dialog', use_container_width=True):
+                    st.session_state.rename_dialog_open = True
+                    st.rerun()
 
             # ===== 数据编辑器（可直接修改单元格） =====
             edited = st.data_editor(df, use_container_width=True,
