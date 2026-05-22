@@ -195,7 +195,7 @@ def logout():
     st.session_state.auth_error = None
     
     # 清除与用户相关的数据
-    keys_to_clear = ["user_data"]
+    keys_to_clear = ["user_data", "saved_data"]
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]

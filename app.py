@@ -48,6 +48,22 @@ footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
+# ===== 弹窗居中样式 =====
+st.markdown("""
+<style>
+    [data-testid="stDialog"] {
+        position: fixed !important;
+        top: 50% !important;
+        left: 50% !important;
+        transform: translate(-50%, -50%) !important;
+    }
+    [data-testid="stDialog"] > div:first-child {
+        max-height: 85vh !important;
+        overflow-y: auto !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # ==================== 侧边栏 ====================
 st.sidebar.title('📊 质量管理系统')
 st.sidebar.caption('Quality Management System v2.0')
@@ -75,6 +91,11 @@ def check_data():
         return None
     return st.session_state.user_data
 
+# 新数据加载（上传/示例/云端）时调用，重置保存基线
+def set_new_data(df):
+    st.session_state.user_data = df
+    st.session_state.saved_data = None  # 重置基线，show_data_info 会自动重新初始化
+
 @st.dialog('✏️ 修改列名')
 def rename_column_dialog(df):
     cols = list(df.columns)
@@ -99,6 +120,10 @@ def rename_column_dialog(df):
 
 def show_data_info():
     if 'user_data' in st.session_state and st.session_state.user_data is not None:
+        # 首次加载时初始化 saved_data（基线）
+        if 'saved_data' not in st.session_state or st.session_state.saved_data is None:
+            st.session_state.saved_data = st.session_state.user_data.copy()
+
         df = st.session_state.user_data
         with st.expander('📋 当前数据预览', expanded=False):
             # ===== 列名编辑 + 弹窗 =====
@@ -123,12 +148,20 @@ def show_data_info():
             st.caption(f'{edited.shape[0]} 行 × {edited.shape[1]} 列')
 
             # ===== 操作按钮行 =====
-            btn1, btn2, btn3, btn4, btn5 = st.columns([1, 1, 1, 1, 1])
+            btn1, btn2, btn3, btn4, btn5, btn6 = st.columns([1.2, 1.2, 1, 1, 1, 1])
 
             with btn1:
+                if st.button('💾 保存修改', key='save_data', use_container_width=True):
+                    st.session_state.saved_data = st.session_state.user_data.copy()
+                    st.success('✅ 已保存，所有模块将基于此数据更新')
+
+            with btn2:
                 if st.button('🔄 恢复原样', key='reset_data', use_container_width=True):
-                    st.session_state.user_data = df
-                    st.success('已恢复')
+                    if 'saved_data' in st.session_state and st.session_state.saved_data is not None:
+                        st.session_state.user_data = st.session_state.saved_data.copy()
+                        st.success('已恢复到上次保存的状态')
+                    else:
+                        st.warning('没有可恢复的基线数据')
                     st.rerun()
 
             with btn2:
@@ -253,11 +286,11 @@ def page_data_import():
                         st.error('无法识别文件编码，请将文件另存为 UTF-8 格式')
                     else:
                         st.success(f'✅ 编码: {enc} · {df.shape[0]} 行 × {df.shape[1]} 列')
-                        st.session_state.user_data = df
+                        set_new_data(df)
                         st.dataframe(df.head(10), use_container_width=True)
                 else:
                     df = pd.read_excel(uploaded_file)
-                    st.session_state.user_data = df
+                    set_new_data(df)
                     st.success(f'✅ 成功加载: {df.shape[0]} 行 × {df.shape[1]} 列')
                     st.dataframe(df.head(10), use_container_width=True)
             except Exception as e:
@@ -268,20 +301,20 @@ def page_data_import():
         with cols[0]:
             if st.button('📐 正态分布样本', use_container_width=True):
                 np.random.seed(42)
-                st.session_state.user_data = pd.DataFrame({'测量值': np.random.normal(10.0, 0.5, 100)})
+                set_new_data(pd.DataFrame({'测量值': np.random.normal(10.0, 0.5, 100)}))
                 st.success('已加载 100 个正态分布样本')
         with cols[1]:
             if st.button('📏 SPC 多子组样本', use_container_width=True):
                 np.random.seed(42)
                 data = [v for i in range(25) for v in np.random.normal(10.0 + (i % 5) * 0.1, 0.3, 5)]
-                st.session_state.user_data = pd.DataFrame({'测量值': data})
+                set_new_data(pd.DataFrame({'测量值': data}))
                 st.success('已加载 125 个多子组样本 (25组 × 5)')
         with cols[2]:
             if st.button('⚙️ 含偏移样本', use_container_width=True):
                 np.random.seed(42)
                 d1 = list(np.random.normal(10.0, 0.5, 50))
                 d2 = list(np.random.normal(11.5, 0.5, 30))
-                st.session_state.user_data = pd.DataFrame({'测量值': d1 + d2})
+                set_new_data(pd.DataFrame({'测量值': d1 + d2}))
                 st.success('已加载含过程偏移的样本')
 
         st.write('**计量型 Gage R&R 示例**')
@@ -294,7 +327,7 @@ def page_data_import():
                     for _ in range(2):
                         parts.append(p_id); operators.append(op)
                         measurements.append(tv + np.random.normal(0, 0.05) + np.random.normal(0, 0.02))
-            st.session_state.user_data = pd.DataFrame({'Part': parts, 'Operator': operators, 'Measurement': measurements})
+            set_new_data(pd.DataFrame({'Part': parts, 'Operator': operators, 'Measurement': measurements}))
             st.success('已加载: 10部件 × 3操作员 × 2次试验')
             st.rerun()
 
@@ -308,13 +341,13 @@ def page_data_import():
                         for _ in range(2):
                             val = 25 + 3*A + 1.5*B - 1*C + 2*A*B + np.random.normal(0, 0.5)
                             data.append({'A_温度': A, 'B_压力': B, 'C_速度': C, '响应': val})
-            st.session_state.user_data = pd.DataFrame(data)
+            set_new_data(pd.DataFrame(data))
             st.success('已加载 2³ 全因子 DOE 数据 (16 次试验)')
             st.rerun()
 
         st.write('**FMEA 示例数据**')
         if st.button('🛡️ 加载 FMEA 示例', use_container_width=True):
-            st.session_state.user_data = pd.DataFrame({
+            set_new_data(pd.DataFrame({
                 '模式': ['焊接虚焊', '尺寸超差', '表面划伤', '装配错位', '漏装零件'],
                 '严重度': [8, 6, 3, 5, 9],
                 '发生度': [4, 7, 8, 3, 2],
@@ -367,7 +400,7 @@ def page_data_import():
                         cv = pd.to_numeric(vd[c], errors='coerce')
                         if cv.notna().sum() > 0:
                             vd[c] = cv
-                    st.session_state.user_data = vd.reset_index(drop=True)
+                    set_new_data(vd.reset_index(drop=True))
                     st.success(f'已导入 {len(vd)} 行')
         with bc2:
             if st.button('🗑️ 清空', use_container_width=True):
@@ -420,7 +453,7 @@ def page_data_import():
                     if st.button('📥 加载', key=f'load_{ds["id"]}', use_container_width=True):
                         df = supabase_helper.load_dataset(ds['id'])
                         if df is not None:
-                            st.session_state.user_data = df
+                            set_new_data(df)
                             st.success(f'✅ 已加载 "{ds["name"]}"')
                             st.rerun()
                 with c3:
