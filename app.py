@@ -601,12 +601,26 @@ def page_quality_tools():
                             # 直接写入 text_input/text_area 对应的 session_state key
                             st.session_state.fish_problem = cfg.get('problem', '产品合格率下降')
                             st.session_state.fish_input = cfg.get('raw_input', '')
+                            st.session_state.fb_loaded_name = cfg['name']
+                            st.session_state.fb_loaded_time = 0  # 本轮渲染计数
                             st.rerun()
                     with c3:
                         if st.button('🗑️', key=f'fb_del_{cfg["id"]}', help='删除此配置'):
                             if supabase_helper.delete_fishbone_config(cfg['id']):
                                 st.success('已删除')
                                 st.rerun()
+
+        # ---- 已加载提示（约10秒自动消失）----
+        if 'fb_loaded_name' in st.session_state and st.session_state.get('fb_loaded_time') is not None:
+            loaded_name = st.session_state.fb_loaded_name
+            count = st.session_state.get('fb_loaded_time', 0)
+            if count < 12:  # 约显示10-12秒
+                st.success(f'✅ 已加载 "{loaded_name}"')
+            else:
+                del st.session_state.fb_loaded_name
+                del st.session_state.fb_loaded_time
+            # 每次渲染递增计数（Streamlit 自动 rerun 约1s/次）
+            st.session_state.fb_loaded_time = count + 1
 
         # ---- 问题描述 ----
         prob = st.text_input('问题描述', value='产品合格率下降', key='fish_problem')
