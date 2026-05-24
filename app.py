@@ -1344,7 +1344,8 @@ def page_stats():
         if len(numeric_cols) < 2:
             st.error('至少需要 2 个数值列')
         else:
-            reg_type = st.radio('回归类型', ['一元线性回归', '多元线性回归'], horizontal=True, key='reg_type')
+            reg_type = st.radio('回归类型', ['一元线性回归', '多元线性回归', '多Y-X批量对比'],
+                                horizontal=True, key='reg_type')
             if reg_type == '一元线性回归':
                 c1, c2 = st.columns(2)
                 with c1: xc = st.selectbox('X 轴', numeric_cols, key='s_x')
@@ -1367,7 +1368,7 @@ def page_stats():
                             st.success('✓ 回归关系显著 (p < 0.05)')
                         else:
                             st.info('回归关系不显著 (p ≥ 0.05)')
-            else:
+            elif reg_type == '多元线性回归':
                 yc = st.selectbox('因变量 Y', numeric_cols, key='mr_y')
                 r = stats_tools.multiple_regression(df, yc)
                 if 'error' in r:
@@ -1380,6 +1381,65 @@ def page_stats():
                     with cs[0]: st.metric('R²', f'{r["r_squared"]:.4f}')
                     with cs[1]: st.metric('Adjust R²', f'{r["adj_r2"]:.4f}')
                     with cs[2]: st.metric('样本量', r['n'])
+            else:
+                # 多 Y-X 批量对比
+                st.caption('选择多个 Y 和多个 X，批量对比每对 (Y, X) 的一元回归关系')
+                c1, c2 = st.columns(2)
+                with c1:
+                    y_selected = st.multiselect(
+                        'Y 变量（因变量）', numeric_cols,
+                        default=[numeric_cols[0]] if numeric_cols else [],
+                        key='yx_y'
+                    )
+                with c2:
+                    x_candidates = [c for c in numeric_cols if c not in y_selected]
+                    x_selected = st.multiselect(
+                        'X 变量（自变量）', x_candidates if x_candidates else numeric_cols,
+                        default=x_candidates[:min(3, len(x_candidates))] if x_candidates else [],
+                        key='yx_x'
+                    )
+
+                if y_selected and x_selected:
+                    show_grid = st.checkbox('📊 显示散点图矩阵', value=False, key='yx_grid')
+                    if st.button('🔍 执行批量对比', use_container_width=True, key='yx_btn'):
+                        with st.spinner('正在计算...'):
+                            r = stats_tools.yx_pair_analysis(df, y_selected, x_selected,
+                                                             show_scatter_grid=show_grid)
+                        if 'error' in r:
+                            st.error(r['error'])
+                        else:
+                            total = r['n_pairs']
+                            sig = r['n_significant']
+                            st.success(f'共 {total} 对 Y-X 关系中，{sig} 对显著 (p < 0.05)')
+
+                            st.subheader('📈 R² 热力图')
+                            st.plotly_chart(r['heatmap'], use_container_width=True)
+
+                            st.subheader('📋 回归结果汇总')
+                            summary = r['summary_df'].copy()
+                            def highlight_sig(row):
+                                if row['显著性'] == '✓ 显著':
+                                    return ['background-color: #e6ffe6'] * len(row)
+                                return [''] * len(row)
+                            st.dataframe(
+                                summary.style.apply(highlight_sig, axis=1)
+                                .format({'R²': '{:.4f}', '调整R²': '{:.4f}',
+                                         'Pearson r': '{:.4f}', '斜率': '{:.4f}',
+                                         '截距': '{:.4f}', 'p值': '{:.6f}'}),
+                                use_container_width=True, height=35 * (len(summary) + 1) + 3
+                            )
+
+                            csv = summary.to_csv(index=False).encode('utf-8-sig')
+                            st.download_button(
+                                '📥 导出结果 (CSV)', csv, 'yx_pair_analysis.csv',
+                                'text/csv', key='yx_dl'
+                            )
+
+                            if show_grid and 'scatter_grid' in r:
+                                st.subheader('📊 散点图矩阵')
+                                st.plotly_chart(r['scatter_grid'], use_container_width=True)
+                else:
+                    st.info('👆 请至少选择 1 个 Y 变量和 1 个 X 变量')
 
     # --- 相关性矩阵 ---
     with t4:

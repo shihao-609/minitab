@@ -222,6 +222,175 @@ def multiple_regression(df, y_col):
         return {'error': f'回归失败: {str(e)}'}
 
 
+# ==================== 多 Y-X 批量回归对比 ====================
+
+def yx_pair_analysis(df, y_cols, x_cols, show_scatter_grid=False):
+    """
+    多 Y vs 多 X 批量回归对比分析
+
+    对每一对 (Y, X) 做一元线性回归，汇总 R² / p值 / 斜率 / 截距，
+    同时输出 R² 热力图和可选的散点图网格。
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        数据
+    y_cols : list[str]
+        因变量列名列表
+    x_cols : list[str]
+        自变量列名列表
+    show_scatter_grid : bool
+        是否生成散点图网格
+
+    Returns
+    -------
+    dict:
+        - summary_df : 汇总表 DataFrame（行 = Y-X 对）
+        - heatmap : R² 热力图 Plotly Figure（行=Y, 列=X）
+        - scatter_grid : 散点图网格（仅 show_scatter_grid=True 时返回）
+        - error : 错误信息（如有）
+    """
+    if not y_cols or not x_cols:
+        return {'error': '请选择至少一个 Y 变量和一个 X 变量'}
+
+    # 验证列名存在于 DataFrame 中
+    missing_y = [c for c in y_cols if c not in df.columns]
+    missing_x = [c for c in x_cols if c not in df.columns]
+    if missing_y:
+        return {'error': f'Y 变量不存在: {", ".join(missing_y)}'}
+    if missing_x:
+        return {'error': f'X 变量不存在: {", ".join(missing_x)}'}
+
+    rows = []
+    for yc in y_cols:
+        for xc in x_cols:
+            # 提取有效数据对
+            x_vals = df[xc].values
+            y_vals = df[yc].values
+            mask = ~(np.isnan(x_vals) | np.isnan(y_vals))
+            x_clean = x_vals[mask]
+            y_clean = y_vals[mask]
+            n_valid = len(x_clean)
+
+            if n_valid < 3:
+                rows.append({
+                    'Y': yc, 'X': xc, 'n': n_valid,
+                    'R²': None, '调整R²': None, 'Pearson r': None,
+                    '斜率': None, '截距': None,
+                    'p值': None, '显著性': '数据不足',
+                })
+                continue
+
+            slope, intercept, r_value, p_value, std_err = stats.linregress(x_clean, y_clean)
+            r_squared = r_value ** 2
+            adj_r2 = 1 - (1 - r_squared) * (n_valid - 1) / max(n_valid - 2, 1)
+            significance = '✓ 显著' if p_value < 0.05 else '不显著'
+
+            rows.append({
+                'Y': yc,
+                'X': xc,
+                'n': n_valid,
+                'R²': round(r_squared, 4),
+                '调整R²': round(adj_r2, 4),
+                'Pearson r': round(r_value, 4),
+                '斜率': round(slope, 4),
+                '截距': round(intercept, 4),
+                'p值': round(p_value, 6),
+                '显著性': significance,
+            })
+
+    summary_df = pd.DataFrame(rows)
+
+    # ============ R² 热力图 ============
+    r2_matrix = np.full((len(y_cols), len(x_cols)), np.nan)
+    for i, yc in enumerate(y_cols):
+        for j, xc in enumerate(x_cols):
+            row = summary_df[(summary_df['Y'] == yc) & (summary_df['X'] == xc)]
+            if len(row) > 0 and row['R²'].values[0] is not None:
+                r2_matrix[i, j] = row['R²'].values[0]
+
+    heatmap_fig = go.Figure(data=go.Heatmap(
+        z=r2_matrix,
+        x=x_cols,
+        y=y_cols,
+        colorscale='RdYlGn',
+        zmin=0, zmax=1,
+        text=np.round(r2_matrix, 3),
+        texttemplate='%{text}',
+        textfont=dict(size=12),
+        colorbar=dict(title='R²', titleside='right'),
+        hovertemplate='Y=%{y}<br>X=%{x}<br>R²=%{z:.4f}<extra></extra>',
+    ))
+    heatmap_fig.update_layout(
+        title='多 Y-X 回归 R² 热力图',
+        template='plotly_white',
+        height=max(200, 60 * len(y_cols) + 80),
+        xaxis=dict(title='X 变量', side='bottom'),
+        yaxis=dict(title='Y 变量'),
+    )
+
+    result = {
+        'summary_df': summary_df,
+        'heatmap': heatmap_fig,
+        'n_pairs': len(rows),
+        'n_significant': sum(1 for r in rows if r.get('显著性') == '✓ 显著'),
+    }
+
+    # ============ 散点图网格（可选） ============
+    if show_scatter_grid:
+        n_y, n_x = len(y_cols), len(x_cols)
+        subplot_titles = [f'{yc} vs {xc}' for yc in y_cols for xc in x_cols]
+
+        scatter_fig = make_subplots(
+            rows=n_y, cols=n_x,
+            subplot_titles=subplot_titles,
+            horizontal_spacing=0.06,
+            vertical_spacing=0.08,
+        )
+
+        for i, yc in enumerate(y_cols):
+            for j, xc in enumerate(x_cols):
+                x_vals = df[xc].values
+                y_vals = df[yc].values
+                mask = ~(np.isnan(x_vals) | np.isnan(y_vals))
+                x_clean = x_vals[mask]
+                y_clean = y_vals[mask]
+
+                if len(x_clean) < 3:
+                    continue
+
+                slope, intercept, r_value, p_value, _ = stats.linregress(x_clean, y_clean)
+                r_squared = r_value ** 2
+
+                x_ln = np.linspace(x_clean.min(), x_clean.max(), 80)
+                y_ln = slope * x_ln + intercept
+
+                scatter_fig.add_trace(
+                    go.Scatter(x=x_clean, y=y_clean, mode='markers',
+                               marker=dict(size=4, opacity=0.5, color='#4472C4'),
+                               showlegend=False,
+                               hovertemplate=f'{xc}=%{{x:.3f}}<br>{yc}=%{{y:.3f}}<extra></extra>'),
+                    row=i + 1, col=j + 1,
+                )
+                scatter_fig.add_trace(
+                    go.Scatter(x=x_ln, y=y_ln, mode='lines',
+                               line=dict(color='red', width=1.5),
+                               showlegend=False,
+                               name=f'R²={r_squared:.2f}'),
+                    row=i + 1, col=j + 1,
+                )
+
+        scatter_fig.update_layout(
+            title='多 Y-X 散点图矩阵（含回归线）',
+            template='plotly_white',
+            height=280 * n_y + 60,
+            width=None,
+        )
+        result['scatter_grid'] = scatter_fig
+
+    return result
+
+
 # ==================== 相关性矩阵 ====================
 
 def correlation_matrix(df):
