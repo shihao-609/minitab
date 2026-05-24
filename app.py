@@ -1279,13 +1279,12 @@ def page_stats():
                         with cs[3]: st.metric('样本量', r['n'])
                         with cs[4]: st.metric('95% CI', f'[{r["ci_95"][0]:.4f}, {r["ci_95"][1]:.4f}]')
 
-            elif test_type in ['双样本 t 检验 (独立)', '双样本 t 检验 (配对)']:
+            elif test_type == '双样本 t 检验 (配对)':
                 c1, c2 = st.columns(2)
                 with c1: dc1 = st.selectbox('样本 1 列', numeric_cols, key='t2a')
                 with c2: dc2 = st.selectbox('样本 2 列', numeric_cols, key='t2b')
-                paired = '配对' in test_type
                 if st.button('执行检验', use_container_width=True):
-                    r = stats_tools.t_test_two_sample(df[dc1].dropna().values, df[dc2].dropna().values, paired)
+                    r = stats_tools.t_test_two_sample(df[dc1].dropna().values, df[dc2].dropna().values, True)
                     if 'error' in r:
                         st.error(r['error'])
                     else:
@@ -1298,6 +1297,58 @@ def page_stats():
                         with cs[3]: st.metric('均值2', f'{r["mean2"]:.4f}')
                         with cs[4]: st.metric('n1', r['n1'])
                         with cs[5]: st.metric('n2', r['n2'])
+
+            elif test_type == '双样本 t 检验 (独立)':
+                mode = st.radio('数据格式', ['两列分别存放', '同一列按分组拆分'],
+                                horizontal=True, key='t2_ind_mode')
+                if mode == '两列分别存放':
+                    c1, c2 = st.columns(2)
+                    with c1: dc1 = st.selectbox('样本 1 列', numeric_cols, key='t2a')
+                    with c2: dc2 = st.selectbox('样本 2 列', numeric_cols, key='t2b')
+                    if st.button('执行检验', use_container_width=True):
+                        r = stats_tools.t_test_two_sample(
+                            df[dc1].dropna().values, df[dc2].dropna().values, False)
+                        if 'error' in r:
+                            st.error(r['error'])
+                        else:
+                            s = '显著 ✓ (两组有差异)' if r['significant'] else '不显著 (无显著差异)'
+                            st.subheader(s)
+                            cs = st.columns(6)
+                            with cs[0]: st.metric('t', f'{r["t_stat"]:.4f}')
+                            with cs[1]: st.metric('p', f'{r["p_val"]:.6f}')
+                            with cs[2]: st.metric('均值1', f'{r["mean1"]:.4f}')
+                            with cs[3]: st.metric('均值2', f'{r["mean2"]:.4f}')
+                            with cs[4]: st.metric('n1', r['n1'])
+                            with cs[5]: st.metric('n2', r['n2'])
+                else:
+                    st.write('**按分组列拆分同一数值列进行比较**')
+                    c1, c2 = st.columns(2)
+                    with c1: vc = st.selectbox('数值列', numeric_cols, key='t2_val')
+                    with c2: gc = st.selectbox('分组列', text_cols + numeric_cols, key='t2_group')
+                    groups = sorted(df[gc].dropna().unique().tolist())
+                    if len(groups) < 2:
+                        st.warning('分组列至少需要 2 个不同值')
+                    else:
+                        g1, g2 = st.columns(2)
+                        with g1: g1_sel = st.selectbox('组 1', groups, key='t2_g1')
+                        with g2: g2_sel = st.selectbox('组 2', groups,
+                                                        index=min(1, len(groups) - 1), key='t2_g2')
+                        if st.button('执行检验', use_container_width=True):
+                            d1 = df[df[gc] == g1_sel][vc].dropna().values
+                            d2 = df[df[gc] == g2_sel][vc].dropna().values
+                            r = stats_tools.t_test_two_sample(d1, d2, False)
+                            if 'error' in r:
+                                st.error(r['error'])
+                            else:
+                                s = '显著 ✓ (两组有差异)' if r['significant'] else '不显著 (无显著差异)'
+                                st.subheader(s)
+                                cs = st.columns(6)
+                                with cs[0]: st.metric('t', f'{r["t_stat"]:.4f}')
+                                with cs[1]: st.metric('p', f'{r["p_val"]:.6f}')
+                                with cs[2]: st.metric('均值1', f'{r["mean1"]:.4f}')
+                                with cs[3]: st.metric('均值2', f'{r["mean2"]:.4f}')
+                                with cs[4]: st.metric('n1', r['n1'])
+                                with cs[5]: st.metric('n2', r['n2'])
 
             elif test_type == '单因素 ANOVA':
                 st.write('**选择分组列 + 数值列**')
