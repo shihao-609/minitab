@@ -326,7 +326,7 @@ def yx_pair_analysis(df, y_cols, x_cols, show_scatter_grid=False, exclude_self=F
         text=np.round(r2_matrix, 3),
         texttemplate='%{text}',
         textfont=dict(size=12),
-        colorbar=dict(title='R²', titleside='right'),
+        colorbar=dict(title='R²'),
         hovertemplate='Y=%{y}<br>X=%{x}<br>R²=%{z:.4f}<extra></extra>',
     ))
     heatmap_fig.update_layout(
