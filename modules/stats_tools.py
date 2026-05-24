@@ -224,7 +224,7 @@ def multiple_regression(df, y_col):
 
 # ==================== 多 Y-X 批量回归对比 ====================
 
-def yx_pair_analysis(df, y_cols, x_cols, show_scatter_grid=False):
+def yx_pair_analysis(df, y_cols, x_cols, show_scatter_grid=False, exclude_self=False):
     """
     多 Y vs 多 X 批量回归对比分析
 
@@ -241,6 +241,8 @@ def yx_pair_analysis(df, y_cols, x_cols, show_scatter_grid=False):
         自变量列名列表
     show_scatter_grid : bool
         是否生成散点图网格
+    exclude_self : bool
+        是否排除 Y==X 的自对比对（一键全对比模式用）
 
     Returns
     -------
@@ -264,6 +266,10 @@ def yx_pair_analysis(df, y_cols, x_cols, show_scatter_grid=False):
     rows = []
     for yc in y_cols:
         for xc in x_cols:
+            # 一键全对比模式下跳过自对比
+            if exclude_self and yc == xc:
+                continue
+
             # 提取有效数据对
             x_vals = df[xc].values
             y_vals = df[yc].values
@@ -305,6 +311,8 @@ def yx_pair_analysis(df, y_cols, x_cols, show_scatter_grid=False):
     r2_matrix = np.full((len(y_cols), len(x_cols)), np.nan)
     for i, yc in enumerate(y_cols):
         for j, xc in enumerate(x_cols):
+            if exclude_self and yc == xc:
+                continue
             row = summary_df[(summary_df['Y'] == yc) & (summary_df['X'] == xc)]
             if len(row) > 0 and row['R²'].values[0] is not None:
                 r2_matrix[i, j] = row['R²'].values[0]
@@ -350,6 +358,9 @@ def yx_pair_analysis(df, y_cols, x_cols, show_scatter_grid=False):
 
         for i, yc in enumerate(y_cols):
             for j, xc in enumerate(x_cols):
+                if exclude_self and yc == xc:
+                    continue
+
                 x_vals = df[xc].values
                 y_vals = df[yc].values
                 mask = ~(np.isnan(x_vals) | np.isnan(y_vals))

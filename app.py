@@ -1383,34 +1383,26 @@ def page_stats():
                     with cs[2]: st.metric('样本量', r['n'])
             else:
                 # 多 Y-X 批量对比
-                st.caption('选择多个 Y 和多个 X，批量对比每对 (Y, X) 的一元回归关系')
-                c1, c2 = st.columns(2)
-                with c1:
-                    y_selected = st.multiselect(
-                        'Y 变量（因变量）', numeric_cols,
-                        default=[numeric_cols[0]] if numeric_cols else [],
-                        key='yx_y'
-                    )
-                with c2:
-                    x_candidates = [c for c in numeric_cols if c not in y_selected]
-                    x_selected = st.multiselect(
-                        'X 变量（自变量）', x_candidates if x_candidates else numeric_cols,
-                        default=x_candidates[:min(3, len(x_candidates))] if x_candidates else [],
-                        key='yx_x'
-                    )
+                st.caption('选择多个变量，一键自动对比所有变量两两之间的回归关系')
+                sel_vars = st.multiselect(
+                    '对比变量', numeric_cols,
+                    default=numeric_cols[:min(4, len(numeric_cols))] if numeric_cols else [],
+                    key='yx_sel'
+                )
 
-                if y_selected and x_selected:
+                if len(sel_vars) >= 2:
                     show_grid = st.checkbox('📊 显示散点图矩阵', value=False, key='yx_grid')
-                    if st.button('🔍 执行批量对比', use_container_width=True, key='yx_btn'):
+                    if st.button('🔍 一键对比', use_container_width=True, key='yx_btn'):
                         with st.spinner('正在计算...'):
-                            r = stats_tools.yx_pair_analysis(df, y_selected, x_selected,
-                                                             show_scatter_grid=show_grid)
+                            r = stats_tools.yx_pair_analysis(df, sel_vars, sel_vars,
+                                                             show_scatter_grid=show_grid,
+                                                             exclude_self=True)
                         if 'error' in r:
                             st.error(r['error'])
                         else:
                             total = r['n_pairs']
                             sig = r['n_significant']
-                            st.success(f'共 {total} 对 Y-X 关系中，{sig} 对显著 (p < 0.05)')
+                            st.success(f'共 {len(sel_vars)} 个变量，{total} 对关系中 {sig} 对显著 (p < 0.05)')
 
                             st.subheader('📈 R² 热力图')
                             st.plotly_chart(r['heatmap'], use_container_width=True)
@@ -1439,7 +1431,7 @@ def page_stats():
                                 st.subheader('📊 散点图矩阵')
                                 st.plotly_chart(r['scatter_grid'], use_container_width=True)
                 else:
-                    st.info('👆 请至少选择 1 个 Y 变量和 1 个 X 变量')
+                    st.info('👆 请至少选择 2 个变量进行对比')
 
     # --- 相关性矩阵 ---
     with t4:
