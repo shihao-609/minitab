@@ -1137,25 +1137,28 @@ def page_msa():
             st.error('需至少 2 部件 2 操作员')
         else:
             r = gage_rr.gage_rr_crossed(parts, ops, meas)
-            st.subheader('📊 方差分量')
-            cs = st.columns(5)
-            with cs[0]: st.metric('EV 重复性 σ', r['stddev_contributions']['重复性 (EV)'])
-            with cs[1]: st.metric('AV 再现性 σ', r['stddev_contributions']['再现性 (AV)'])
-            with cs[2]: st.metric('GRR σ', r['stddev_contributions']['GRR'])
-            with cs[3]: st.metric('PV 部件 σ', r['stddev_contributions']['部件间 (PV)'])
-            with cs[4]: st.metric('ndc', r['ndc'])
-            cs2 = st.columns(2)
-            grr_pct = float(r['percent_contributions']['GRR占比 %GRR'].replace('%', ''))
-            with cs2[0]: st.metric('%GRR', f'{grr_pct:.1f}%')
-            with cs2[1]: st.metric('评级', r['evaluation'])
-            st.plotly_chart(r['chart'], use_container_width=True)
-            with st.expander('📋 评估标准'):
-                st.table(pd.DataFrame({
-                    '%GRR': ['< 10%', '10%~30%', '> 30%'],
-                    '评级': ['优秀', '临界', '不可接受'],
-                    '说明': ['测量系统能力充足', '可接受但可能需改进', '需要改进'],
-                    'ndc': ['≥ 5', '2~4', '< 2'],
-                }))
+            if 'error' in r:
+                st.error(r['error'])
+            else:
+                st.subheader('📊 方差分量')
+                cs = st.columns(5)
+                with cs[0]: st.metric('EV 重复性 σ', r['stddev_contributions']['重复性 (EV)'])
+                with cs[1]: st.metric('AV 再现性 σ', r['stddev_contributions']['再现性 (AV)'])
+                with cs[2]: st.metric('GRR σ', r['stddev_contributions']['GRR'])
+                with cs[3]: st.metric('PV 部件 σ', r['stddev_contributions']['部件间 (PV)'])
+                with cs[4]: st.metric('ndc', r['ndc'])
+                cs2 = st.columns(2)
+                grr_pct = float(r['percent_contributions']['GRR占比 %GRR'].replace('%', ''))
+                with cs2[0]: st.metric('%GRR', f'{grr_pct:.1f}%')
+                with cs2[1]: st.metric('评级', r['evaluation'])
+                st.plotly_chart(r['chart'], use_container_width=True)
+                with st.expander('📋 评估标准'):
+                    st.table(pd.DataFrame({
+                        '%GRR': ['< 10%', '10%~30%', '> 30%'],
+                        '评级': ['优秀', '临界', '不可接受'],
+                        '说明': ['测量系统能力充足', '可接受但可能需改进', '需要改进'],
+                        'ndc': ['≥ 5', '2~4', '< 2'],
+                    }))
 
     # --- 计数型 GRR ---
     with t2:
