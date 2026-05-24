@@ -639,24 +639,30 @@ def page_spc():
                 dc = st.selectbox('数据列', numeric_cols, key='xbar_col')
             with c2:
                 ss = st.number_input('子组大小', 2, 10, 5)
-            data = df[dc].dropna().values
-            if len(data) < ss * 2:
-                st.error(f'数据不足，需至少 {ss*2} 个点')
+            if dc not in df.columns:
+                st.warning(f'列 "{dc}" 已变更，请重新选择')
             else:
-                r = spc_charts.xbar_r_chart(data, ss) if ct == 'X-bar R (均值-极差)' else spc_charts.xbar_s_chart(data, ss)
-                st.plotly_chart(r['chart'], use_container_width=True)
-                with st.expander('📊 参数'):
-                    for k, v in r['stats'].items():
-                        st.metric(k, f'{v:.4f}')
+                data = df[dc].dropna().values
+                if len(data) < ss * 2:
+                    st.error(f'数据不足，需至少 {ss*2} 个点')
+                else:
+                    r = spc_charts.xbar_r_chart(data, ss) if ct == 'X-bar R (均值-极差)' else spc_charts.xbar_s_chart(data, ss)
+                    st.plotly_chart(r['chart'], use_container_width=True)
+                    with st.expander('📊 参数'):
+                        for k, v in r['stats'].items():
+                            st.metric(k, f'{v:.4f}')
 
         elif ct == 'I-MR (单值-移动极差)':
             dc = st.selectbox('数据列', numeric_cols, key='imr_col')
-            data = df[dc].dropna().values
-            if len(data) < 2:
-                st.error('需至少2个数据点')
+            if dc not in df.columns:
+                st.warning(f'列 "{dc}" 已变更，请重新选择')
             else:
-                r = spc_charts.imr_chart(data)
-                st.plotly_chart(r['chart'], use_container_width=True)
+                data = df[dc].dropna().values
+                if len(data) < 2:
+                    st.error('需至少2个数据点')
+                else:
+                    r = spc_charts.imr_chart(data)
+                    st.plotly_chart(r['chart'], use_container_width=True)
 
         elif ct == 'P 图 (不合格品率)':
             c1, c2 = st.columns(2)
@@ -664,11 +670,14 @@ def page_spc():
                 dcol = st.selectbox('不合格品数列', numeric_cols, key='p_col')
             with c2:
                 scol = st.selectbox('样本量列', numeric_cols, key='p_size')
-            d, s = df[dcol].dropna().values, df[scol].dropna().values
-            ml = min(len(d), len(s))
-            if ml >= 2:
-                r = spc_charts.p_chart(d[:ml], s[:ml])
-                st.plotly_chart(r['chart'], use_container_width=True)
+            if dcol in df.columns and scol in df.columns:
+                d, s = df[dcol].dropna().values, df[scol].dropna().values
+                ml = min(len(d), len(s))
+                if ml >= 2:
+                    r = spc_charts.p_chart(d[:ml], s[:ml])
+                    st.plotly_chart(r['chart'], use_container_width=True)
+            else:
+                st.warning('数据列已变更，请重新选择')
 
         elif ct == 'NP 图 (不合格品数)':
             c1, c2 = st.columns(2)
@@ -676,22 +685,32 @@ def page_spc():
                 dcol = st.selectbox('不合格品数列', numeric_cols, key='np_col')
             with c2:
                 sz = st.number_input('固定样本量', 1, 10000, 100)
-            d = df[dcol].dropna().values
-            if len(d) >= 2:
-                r = spc_charts.np_chart(d, sz)
-                st.plotly_chart(r['chart'], use_container_width=True)
+            if dcol not in df.columns:
+                st.warning(f'列 "{dcol}" 已变更，请重新选择')
+            else:
+                d = df[dcol].dropna().values
+                if len(d) >= 2:
+                    r = spc_charts.np_chart(d, sz)
+                    st.plotly_chart(r['chart'], use_container_width=True)
 
         elif ct in ['C 图 (缺陷数)', 'U 图 (单位缺陷数)']:
             dcol = st.selectbox('缺陷数列', numeric_cols, key='cu_col')
-            d = df[dcol].dropna().values
-            if ct == 'C 图 (缺陷数)':
+            if dcol not in df.columns:
+                st.warning(f'列 "{dcol}" 已变更，请重新选择')
+            elif ct == 'C 图 (缺陷数)':
+                d = df[dcol].dropna().values
                 r = spc_charts.c_chart(d)
+                st.plotly_chart(r['chart'], use_container_width=True)
             else:
                 scol = st.selectbox('单位数列', numeric_cols, key='u_size')
-                s = df[scol].dropna().values
-                ml = min(len(d), len(s))
-                r = spc_charts.u_chart(d[:ml], s[:ml])
-            st.plotly_chart(r['chart'], use_container_width=True)
+                if scol not in df.columns:
+                    st.warning(f'列 "{scol}" 已变更，请重新选择')
+                else:
+                    d = df[dcol].dropna().values
+                    s = df[scol].dropna().values
+                    ml = min(len(d), len(s))
+                    r = spc_charts.u_chart(d[:ml], s[:ml])
+                    st.plotly_chart(r['chart'], use_container_width=True)
 
         st.info('🔴 判异准则：超 UCL/LCL 为异常；连续7点同侧、连续趋势也视为异常')
 
@@ -703,18 +722,21 @@ def page_spc():
             lam = st.slider('平滑系数 λ', 0.05, 1.0, 0.2, 0.05)
         with c2:
             L = st.slider('控制限倍数 L', 2.0, 4.0, 2.7, 0.1)
-        data = df[dc].dropna().values
-        if len(data) >= 2:
-            r = spc_advanced.ewma_chart(data, lam, L)
-            if 'error' in r:
-                st.error(r['error'])
-            else:
-                st.plotly_chart(r['chart'], use_container_width=True)
-                with st.expander('📊 参数'):
-                    for k, v in r['stats'].items():
-                        st.metric(k, v)
+        if dc not in df.columns:
+            st.warning(f'列 "{dc}" 已变更，请重新选择')
         else:
-            st.error('至少需要 2 个数据点')
+            data = df[dc].dropna().values
+            if len(data) >= 2:
+                r = spc_advanced.ewma_chart(data, lam, L)
+                if 'error' in r:
+                    st.error(r['error'])
+                else:
+                    st.plotly_chart(r['chart'], use_container_width=True)
+                    with st.expander('📊 参数'):
+                        for k, v in r['stats'].items():
+                            st.metric(k, v)
+            else:
+                st.error('至少需要 2 个数据点')
 
     # --- Tab3: CUSUM ---
     with tab3:
@@ -724,18 +746,21 @@ def page_spc():
             k_val = st.slider('参考值 k (σ倍数)', 0.1, 2.0, 0.5, 0.1)
         with c2:
             h_val = st.slider('决策区间 h (σ倍数)', 2.0, 8.0, 4.0, 0.5)
-        data = df[dc].dropna().values
-        if len(data) >= 2:
-            r = spc_advanced.cusum_chart(data, k=k_val, h=h_val)
-            if 'error' in r:
-                st.error(r['error'])
-            else:
-                st.plotly_chart(r['chart'], use_container_width=True)
-                with st.expander('📊 参数'):
-                    for k, v in r['stats'].items():
-                        st.metric(k, v)
+        if dc not in df.columns:
+            st.warning(f'列 "{dc}" 已变更，请重新选择')
         else:
-            st.error('至少需要 2 个数据点')
+            data = df[dc].dropna().values
+            if len(data) >= 2:
+                r = spc_advanced.cusum_chart(data, k=k_val, h=h_val)
+                if 'error' in r:
+                    st.error(r['error'])
+                else:
+                    st.plotly_chart(r['chart'], use_container_width=True)
+                    with st.expander('📊 参数'):
+                        for k, v in r['stats'].items():
+                            st.metric(k, v)
+            else:
+                st.error('至少需要 2 个数据点')
 
     # --- Tab4: 多变量 T² ---
     with tab4:
