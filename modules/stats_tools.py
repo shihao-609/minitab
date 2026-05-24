@@ -289,7 +289,7 @@ def yx_pair_analysis(df, y_cols, x_cols, show_scatter_grid=False, exclude_self=F
 
             slope, intercept, r_value, p_value, std_err = stats.linregress(x_clean, y_clean)
             r_squared = r_value ** 2
-            adj_r2 = 1 - (1 - r_squared) * (n_valid - 1) / max(n_valid - 2, 1)
+            adj_r2 = 1 - (1 - r_squared) * (n_valid - 1) / (n_valid - 2)
             significance = '✓ 显著' if p_value < 0.05 else '不显著'
 
             rows.append({
