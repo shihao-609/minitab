@@ -456,10 +456,11 @@ def generate_report(all_analyses: List[dict], filenames: List[str]) -> str:
             if not data.empty:
                 lines.append(f'### 帕累托数据表')
                 lines.append(f'')
-                lines.append(f'| 缺陷类型 | 数量 | 累计占比 |')
-                lines.append(f'|----------|------|----------|')
+                lines.append(f'| 缺陷类型 | 数量 | 占比 (%) | 累积 (%) |')
+                lines.append(f'|----------|------|----------|----------|')
                 for _, row in data.iterrows():
-                    lines.append(f'| {row.iloc[0]} | {row.iloc[1]} | {row.iloc[2] if len(row) > 2 else ""} |')
+                    vals = [row.iloc[i] for i in range(min(len(row), 4))]
+                    lines.append(f'| {" | ".join(str(v) for v in vals)} |')
                 lines.append(f'')
 
             # 建议
