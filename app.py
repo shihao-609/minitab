@@ -15,7 +15,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
 from modules import spc_charts, capability, pareto_histogram, gage_rr, supabase_helper
@@ -2754,7 +2754,7 @@ def page_batch_analysis():
                                 st.session_state.get('batch_uploaded_files', []), None, mod_map, params_map)
                             analyses_summary = batch_analysis.build_analyses_summary(analyses)
 
-                            report_name = f'质量分析报告_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+                            report_name = f'质量分析报告_{(datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y%m%d_%H%M%S")}'
                             result = supabase_helper.save_report(
                                 report_name, report, analyses_summary, files_data, len(analyses))
 

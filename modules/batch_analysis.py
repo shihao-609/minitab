@@ -12,7 +12,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Tuple, Optional
 
 # 导入现有分析模块
@@ -364,7 +364,7 @@ def generate_report(all_analyses: List[dict], filenames: List[str]) -> str:
     """
     生成综合质量分析报告（Markdown 格式）。
     """
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    now = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
     lines = []
     lines.append(f'# 📊 质量综合分析报告')
     lines.append(f'')

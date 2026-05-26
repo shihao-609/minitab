@@ -441,7 +441,7 @@ def list_reports() -> list:
         client = _get_client()
         _check_client(client)
         result = client.table("analysis_reports").select(
-            "id,name,file_count,analyses_summary,created_at"
+            "id,name,file_count,analyses_summary,created_at,user_id"
         ).order("created_at", desc=True).execute()
 
         uid = _get_user_id()
