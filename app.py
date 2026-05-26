@@ -2000,8 +2000,10 @@ def _show_analysis_detail(analysis, data_dict, file_idx):
                     if sub_summary:
                         st.caption(f'**{label}**')
                         st.dataframe(pd.DataFrame(sub_summary), use_container_width=True, hide_index=True)
+                    # 按列分组显示图表，每组加标题区分
                     for chart_key, chart in sub_charts.items():
                         if chart:
+                            st.subheader(f'📐 {chart_key}')
                             st.plotly_chart(chart, use_container_width=True,
                                            key=f'batch_spc_{sk}_{file_idx}_{chart_key}')
         elif isinstance(spc_result, list):

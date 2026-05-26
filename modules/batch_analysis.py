@@ -1448,10 +1448,10 @@ def analyze_process_selective(df: pd.DataFrame, data_label: str = '',
         modules = list(CONTINUOUS_MODULES.keys())
 
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    if cols:
+    if cols is not None:
+        # 用户明确指定了分析列（可能为空列表），只保留有效列
         numeric_cols = [c for c in cols if c in numeric_cols]
-    if not numeric_cols:
-        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    # 注意：不再 fallback 到全部数值列，尊重用户选择
 
     results = {}
     ep = extra_params or {}
