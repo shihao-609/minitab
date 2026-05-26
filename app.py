@@ -486,8 +486,8 @@ def page_data_import():
             if st.button('⏱️ Weibull 可靠性示例', use_container_width=True, key='ex_weibull'):
                 np.random.seed(11)
                 # Weibull(shape=2, scale=1000) 的随机样本
-                from numpy.random import weibull
-                times = 1000 * weibull(2, 50)
+                from scipy.stats import weibull_min
+                times = 1000 * weibull_min.rvs(2, size=50)
                 set_new_data(pd.DataFrame({'失效时间': np.round(times, 1)}))
                 st.success('已加载 Weibull 可靠性示例 (50 条失效时间)')
                 st.rerun()
