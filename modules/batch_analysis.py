@@ -1892,3 +1892,197 @@ def restore_analyses_from_files(files_data: list,
                 })
 
     return data_dict, analyses
+
+
+# ============================================================
+# 第五部分：可复用的模块选择弹窗组件
+# ============================================================
+
+def render_module_selector(
+    current_modules: list,
+    session_key_prefix: str = 'module_sel',
+    columns: int = 3,
+    show_confirm_button: bool = True,
+) -> list:
+    """
+    可复用的分析模块选择 UI 组件。
+    按分组展示所有模块，每组有「全选」「清空」按钮，返回选中的模块列表。
+
+    参数:
+        current_modules: 当前已选中的模块 key 列表
+        session_key_prefix: session_state key 前缀（避免冲突）
+        columns: 分组列数（默认 3 列）
+        show_confirm_button: 是否显示底部确认/取消按钮
+
+    返回:
+        list: 选中的模块 key 列表
+
+    使用方式（两种）:
+
+        方式 A — 直接内嵌在页面中:
+            selected = batch_analysis.render_module_selector(
+                st.session_state.get('my_selected_modules', []),
+                session_key_prefix='mypage'
+            )
+
+        方式 B — 在 @st.dialog 弹窗中使用:
+            @st.dialog('选择分析模块')
+            def my_dialog():
+                selected = batch_analysis.render_module_selector(...)
+                if st.button('确认', type='primary'):
+                    st.session_state.my_selected_modules = selected
+                    st.rerun()
+    """
+    import streamlit as st
+
+    # 用 session_state 存储临时选择状态
+    temp_key = f'{session_key_prefix}_temp'
+    if temp_key not in st.session_state:
+        st.session_state[temp_key] = list(current_modules)
+
+    new_modules = []
+    group_cols = st.columns(columns)
+
+    for gi, (gname, gkey) in enumerate(MODULE_GROUPS):
+        col_idx = gi % columns
+        with group_cols[col_idx]:
+            # ---- 组标题 + 全选/清空 ----
+            st.caption(f'**{gname}**')
+            group_mods = [(k, v) for k, v in ALL_MODULES.items()
+                         if v['group'] == gkey]
+            all_selected = all(k in st.session_state[temp_key] for k, _ in group_mods)
+
+            cm1, cm2 = st.columns([1, 1])
+            with cm1:
+                if st.button('全选' if not all_selected else '已全选',
+                             key=f'{session_key_prefix}_selall_{gkey}',
+                             use_container_width=True,
+                             disabled=all_selected):
+                    for k, _ in group_mods:
+                        if k not in st.session_state[temp_key]:
+                            st.session_state[temp_key].append(k)
+                    st.rerun()
+            with cm2:
+                has_any = any(k in st.session_state[temp_key] for k, _ in group_mods)
+                if st.button('清空', key=f'{session_key_prefix}_clear_{gkey}',
+                             use_container_width=True,
+                             disabled=not has_any):
+                    st.session_state[temp_key] = [
+                        m for m in st.session_state[temp_key]
+                        if m not in {k for k, _ in group_mods}
+                    ]
+                    st.rerun()
+
+            # ---- 各模块 checkbox ----
+            for mod_key, mod_info in group_mods:
+                checked = st.checkbox(
+                    mod_info['label'],
+                    value=mod_key in st.session_state[temp_key],
+                    key=f'{session_key_prefix}_mod_{mod_key}',
+                    help=mod_info.get('desc', ''),
+                )
+                if checked and mod_key not in new_modules:
+                    new_modules.append(mod_key)
+                elif not checked and mod_key in new_modules:
+                    new_modules.remove(mod_key)
+
+    # 同步回 session_state
+    st.session_state[temp_key] = new_modules
+
+    # ---- 底部统计 + 确认按钮 ----
+    if show_confirm_button:
+        st.divider()
+        sel_count = len(new_modules)
+        if sel_count > 0:
+            labels = [ALL_MODULES[m]['label'] for m in new_modules if m in ALL_MODULES]
+            c_info, c_btn = st.columns([3, 1])
+            with c_info:
+                st.caption(f'已选择 **{sel_count}** 个模块：' + ' · '.join(labels))
+            with c_btn:
+                confirmed = st.button('✅ 确认选择', type='primary',
+                                      use_container_width=True,
+                                      key=f'{session_key_prefix}_confirm',
+                                      disabled=sel_count == 0)
+                if confirmed:
+                    result = list(new_modules)
+                    st.session_state[f'{session_key_prefix}_result'] = result
+                    st.session_state.pop(temp_key, None)
+                    return result
+        else:
+            st.caption('⚠️ 请至少选择一个分析模块')
+            st.button('✅ 确认选择', type='primary', use_container_width=True,
+                     key=f'{session_key_prefix}_confirm', disabled=True)
+
+    return new_modules
+
+
+# ============================================================
+# 第六部分：按钮导航式模块选择（跳转式）
+# ============================================================
+
+# 模块导航定义 — 与侧边栏菜单一一对应
+MODULE_NAV_ITEMS = [
+    {'key': 'spc',            'icon': '📈', 'label': 'SPC 控制图',
+     'desc': '休哈特七图 / EWMA / CUSUM / 多变量T²'},
+    {'key': 'capability',      'icon': '🎯', 'label': '过程能力分析',
+     'desc': 'Cp/Cpk/Pp/Ppk / Box-Cox / Cg/Cgk'},
+    {'key': 'quality_tools',   'icon': '📊', 'label': '质量图形工具',
+     'desc': '帕累托 / 直方图 / 箱线图 / 运行图 / 鱼骨图'},
+    {'key': 'msa',             'icon': '🔬', 'label': '测量系统分析 MSA',
+     'desc': '计量型GRR / 计数型GRR / 不确定度'},
+    {'key': 'stats',           'icon': '🔢', 'label': '统计推断',
+     'desc': '正态性检验 / 假设检验 / 回归 / 相关性'},
+    {'key': 'advanced',        'icon': '🧪', 'label': '高级分析',
+     'desc': 'DOE / Weibull / 抽样方案 / FMEA'},
+]
+
+
+def render_module_nav(session_key_prefix: str = 'module_nav') -> str:
+    """
+    按钮列表式的模块导航选择器。
+    每个模块一行，带图标和描述，点击后返回对应的模块 key。
+
+    参数:
+        session_key_prefix: session_state key 前缀
+
+    返回:
+        str: 被选中的模块 key（如 'spc', 'capability' 等），未选中返回 ''
+
+    使用方式:
+
+        @st.dialog('选择分析模块')
+        def nav_dialog():
+            selected = batch_analysis.render_module_nav('batch_page')
+            if selected:
+                st.session_state.menu = f'对应菜单项'
+                st.rerun()
+    """
+    import streamlit as st
+
+    selected_key = ''
+    result_key = f'{session_key_prefix}_result'
+
+    # 检查是否已有结果（上一次点击）
+    if result_key in st.session_state:
+        return st.session_state.pop(result_key)
+
+    for item in MODULE_NAV_ITEMS:
+        col_icon, col_text, col_go = st.columns([0.5, 4, 0.8])
+        with col_icon:
+            st.markdown(f'### {item["icon"]}')
+        with col_text:
+            st.markdown(f'**{item["label"]}**')
+            st.caption(item['desc'])
+        with col_go:
+            # 竖向居中对齐
+            st.markdown('<br>', unsafe_allow_html=True)
+            if st.button('进入 →', key=f'{session_key_prefix}_go_{item["key"]}',
+                         use_container_width=True, type='primary'):
+                selected_key = item['key']
+                break
+
+    if selected_key:
+        st.session_state[result_key] = selected_key
+        st.rerun()
+
+    return selected_key

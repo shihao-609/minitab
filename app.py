@@ -2244,58 +2244,20 @@ def _show_config_dialog(fname, file_idx, cols_list, numeric_cols,
 
 
 def _dlg_step_modules(fname, file_idx):
-    """Step 1: 分析模块分组选择"""
+    """Step 1: 分析模块分组选择 — 复用 batch_analysis.render_module_selector 共享组件"""
     st.caption('👇 按分类勾选分析模块，点击「下一步」设置参数')
 
     current_modules = list(st.session_state.batch_module_map.get(fname, []))
-    # 使用 session_state 存储对话框内的临时选择
-    temp_key = f'_dlg_mods_{file_idx}'
-    if temp_key not in st.session_state:
-        st.session_state[temp_key] = list(current_modules)
 
-    new_modules = []
-    group_cols = st.columns(3)
-    for gi, (gname, gkey) in enumerate(batch_analysis.MODULE_GROUPS):
-        col_idx = gi % 3
-        with group_cols[col_idx]:
-            st.caption(f'**{gname}**')
-            group_mods = [(k, v) for k, v in batch_analysis.ALL_MODULES.items()
-                         if v['group'] == gkey]
-            all_selected = all(k in st.session_state[temp_key] for k, _ in group_mods)
-            cm1, cm2 = st.columns([1, 1])
-            with cm1:
-                if st.button('全选' if not all_selected else '已全选',
-                             key=f'dlg_selall_{file_idx}_{gkey}',
-                             use_container_width=True,
-                             disabled=all_selected):
-                    for k, _ in group_mods:
-                        if k not in st.session_state[temp_key]:
-                            st.session_state[temp_key].append(k)
-                    st.rerun()
-            with cm2:
-                has_any = any(k in st.session_state[temp_key] for k, _ in group_mods)
-                if st.button('清空', key=f'dlg_clear_{file_idx}_{gkey}',
-                             use_container_width=True,
-                             disabled=not has_any):
-                    st.session_state[temp_key] = [
-                        m for m in st.session_state[temp_key]
-                        if m not in {k for k, _ in group_mods}
-                    ]
-                    st.rerun()
-            for mod_key, mod_info in group_mods:
-                checked = st.checkbox(
-                    mod_info['label'],
-                    value=mod_key in st.session_state[temp_key],
-                    key=f'dlg_mod_{file_idx}_{mod_key}',
-                    help=mod_info.get('desc', '')
-                )
-                if checked and mod_key not in new_modules:
-                    new_modules.append(mod_key)
-                elif not checked and mod_key in new_modules:
-                    new_modules.remove(mod_key)
-        st.session_state[temp_key] = new_modules
+    # 调用共享组件，不显示确认按钮（由外层"下一步"按钮统一控制）
+    new_modules = batch_analysis.render_module_selector(
+        current_modules=current_modules,
+        session_key_prefix=f'dlg_mods_{file_idx}',
+        columns=3,
+        show_confirm_button=False,
+    )
 
-    # ---- 底部按钮 ----
+    # ---- 底部按钮（保持原有两步流程） ----
     st.divider()
     c1, c2 = st.columns([2, 1])
     with c1:
@@ -2309,9 +2271,11 @@ def _dlg_step_modules(fname, file_idx):
         if st.button('下一步：参数设置 →', type='primary',
                      use_container_width=True, key=f'dlg_next_{file_idx}',
                      disabled=len(new_modules) == 0):
+            # 清理临时状态
+            temp_key = f'dlg_mods_{file_idx}_temp'
+            st.session_state.pop(temp_key, None)
             st.session_state.batch_module_map[fname] = new_modules
             st.session_state[f'_dlg_step_{file_idx}'] = 'params'
-            st.session_state.pop(temp_key, None)
             st.rerun()
 
 
@@ -2571,6 +2535,76 @@ def page_batch_analysis():
             st.subheader('🔧 分析模块设置')
             st.caption('👇 按分析类型分组勾选模块，展开参数设置可调整每个模块的详细配置')
 
+            # ---- 🚀 跳转分析模块（导航式弹窗，点击即加载数据并跳转） ----
+            c_nav, c_spacer = st.columns([1, 4])
+            with c_nav:
+                if st.button('🚀 跳转分析模块', type='primary', use_container_width=True,
+                             key='batch_module_nav_btn',
+                             help='选择模块后自动加载数据并跳转到该模块页面'):
+                    st.session_state['_batch_nav_dialog_open'] = True
+
+            if st.session_state.get('_batch_nav_dialog_open'):
+
+                @st.dialog('🚀 选择要跳转的分析模块', width='large')
+                def _nav_picker_dialog():
+                    st.caption('数据已自动加载到工作区，点击「进入 →」后开始分析')
+                    selected = batch_analysis.render_module_nav(session_key_prefix='batch_nav')
+                    if selected:
+                        MENU_MAP = {
+                            'spc':           '📈 SPC 控制图',
+                            'capability':    '🎯 过程能力分析',
+                            'quality_tools': '📊 质量图形工具',
+                            'msa':           '🔬 测量系统分析 MSA',
+                            'stats':         '🔢 统计推断',
+                            'advanced':      '🧪 高级分析',
+                        }
+                        target_menu = MENU_MAP.get(selected)
+                        if target_menu:
+                            st.session_state._pending_menu = target_menu
+                            st.session_state.pop('_batch_nav_dialog_open', None)
+
+                _nav_picker_dialog()
+                # 处理待跳转的菜单
+                if '_pending_menu' in st.session_state:
+                    target = st.session_state.pop('_pending_menu')
+                    # 从原始副本加载数据（保证每次跳转都是干净的原始数据）
+                    original = st.session_state.get('_upload_original')
+                    if original is not None:
+                        set_new_data(original.copy())
+                    st.session_state.menu = target
+                    st.rerun()
+            if st.session_state.get('_batch_nav_dialog_open'):
+
+                @st.dialog('🚀 选择要跳转的分析模块', width='large')
+                def _nav_picker_dialog():
+                    selected = batch_analysis.render_module_nav(session_key_prefix='batch_nav')
+                    if selected:
+                        # 模块 key → 侧边栏菜单项 映射
+                        MENU_MAP = {
+                            'spc':           '📈 SPC 控制图',
+                            'capability':    '🎯 过程能力分析',
+                            'quality_tools': '📊 质量图形工具',
+                            'msa':           '🔬 测量系统分析 MSA',
+                            'stats':         '🔢 统计推断',
+                            'advanced':      '🧪 高级分析',
+                        }
+                        target_menu = MENU_MAP.get(selected)
+                        if target_menu:
+                            # 将当前已加载数据保持不变，切换侧边栏菜单
+                            st.session_state._pending_menu = target_menu
+                            st.session_state.pop('_batch_nav_dialog_open', None)
+
+                _nav_picker_dialog()
+                # 处理待跳转的菜单 — 跳转前用原始数据重置工作区
+                if '_pending_menu' in st.session_state:
+                    target = st.session_state.pop('_pending_menu')
+                    # ★ 跳转前：从原始副本加载数据（保证每次都是干净的初始数据）
+                    original = st.session_state.get('_upload_original')
+                    if original is not None:
+                        set_new_data(original.copy())
+                    st.session_state.menu = target
+                    st.rerun()
+
             # ---- 全局参数（所有文件共用） ----
             with st.expander('⚙️ 全局默认参数', expanded=False):
                 gc1, gc2, gc3, gc4 = st.columns(4)
@@ -2614,6 +2648,10 @@ def page_batch_analysis():
                     'numeric_cols': numeric_cols,
                     'df_preview': df_preview,
                 }
+
+                # ★ 保存第一个有效文件的原始数据，供「跳转分析模块」时加载
+                if '_upload_original' not in st.session_state:
+                    st.session_state._upload_original = df_preview.copy()
 
                 # ---- 文件信息 + 当前配置摘要 + 配置按钮 ----
                 with st.container(border=True):
