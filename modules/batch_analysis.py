@@ -1049,8 +1049,16 @@ def _analyze_spc_only(df: pd.DataFrame, numeric_cols: list = None) -> list:
     return result.get('summary', [])
 
 
-def _analyze_capability_only(df: pd.DataFrame, numeric_cols: list = None) -> list:
-    """仅执行过程能力分析"""
+def _analyze_capability_only(df: pd.DataFrame, numeric_cols: list = None,
+                              usl: float = None, lsl: float = None,
+                              subgroup_size: int = 1) -> list:
+    """执行过程能力分析，支持用户指定规格限。
+
+    参数:
+        usl: 规格上限，None=自动估计 (mean + 3σ)
+        lsl: 规格下限，None=自动估计 (mean - 3σ)
+        subgroup_size: 子组大小
+    """
     if numeric_cols is None:
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     cap_results = []
@@ -1058,9 +1066,10 @@ def _analyze_capability_only(df: pd.DataFrame, numeric_cols: list = None) -> lis
         data = df[col].dropna().values
         if len(data) >= 5:
             try:
-                usl = np.mean(data) + 3 * np.std(data, ddof=1)
-                lsl = np.mean(data) - 3 * np.std(data, ddof=1)
-                r = capability.process_capability(data, usl=usl, lsl=lsl, subgroup_size=1)
+                col_usl = usl if usl else np.mean(data) + 3 * np.std(data, ddof=1)
+                col_lsl = lsl if lsl else np.mean(data) - 3 * np.std(data, ddof=1)
+                r = capability.process_capability(data, usl=col_usl, lsl=col_lsl,
+                                                  subgroup_size=subgroup_size)
                 cap_results.append({
                     '列名': col,
                     'Cp': f"{r.get('Cp', 0):.2f}" if r.get('Cp') else 'N/A',
@@ -1434,7 +1443,12 @@ def analyze_process_selective(df: pd.DataFrame, data_label: str = '',
 
     # 能力分析
     if 'capability' in modules:
-        results['capability'] = _analyze_capability_only(df, numeric_cols)
+        results['capability'] = _analyze_capability_only(
+            df, numeric_cols,
+            usl=ep.get('usl'),
+            lsl=ep.get('lsl'),
+            subgroup_size=ep.get('bc_subgroup', 1),
+        )
     if 'box_cox' in modules:
         results['box_cox'] = _analyze_boxcox(df, numeric_cols,
                                               usl=ep.get('usl'),
