@@ -1051,13 +1051,17 @@ def _analyze_spc_only(df: pd.DataFrame, numeric_cols: list = None) -> list:
 
 def _analyze_capability_only(df: pd.DataFrame, numeric_cols: list = None,
                               usl: float = None, lsl: float = None,
-                              subgroup_size: int = 1) -> list:
+                              target: float = None,
+                              subgroup_size: int = 1,
+                              within_method: str = 'Rbar') -> list:
     """执行过程能力分析，支持用户指定规格限。
 
     参数:
         usl: 规格上限，None=自动估计 (mean + 3σ)
         lsl: 规格下限，None=自动估计 (mean - 3σ)
+        target: 目标值
         subgroup_size: 子组大小
+        within_method: 组内标准差方法 ('Rbar' 或 'Sbar')
     """
     if numeric_cols is None:
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -1069,7 +1073,9 @@ def _analyze_capability_only(df: pd.DataFrame, numeric_cols: list = None,
                 col_usl = usl if usl else np.mean(data) + 3 * np.std(data, ddof=1)
                 col_lsl = lsl if lsl else np.mean(data) - 3 * np.std(data, ddof=1)
                 r = capability.process_capability(data, usl=col_usl, lsl=col_lsl,
-                                                  subgroup_size=subgroup_size)
+                                                  target=target,
+                                                  subgroup_size=subgroup_size,
+                                                  within_method=within_method)
                 cap_results.append({
                     '列名': col,
                     'Cp': f"{r.get('Cp', 0):.2f}" if r.get('Cp') else 'N/A',
@@ -1231,7 +1237,8 @@ def _analyze_histogram(df: pd.DataFrame, numeric_cols: list = None) -> dict:
 
 
 def _analyze_ewma(df: pd.DataFrame, numeric_cols: list = None,
-                   lam: float = 0.2, L: float = 2.7) -> dict:
+                   lam: float = 0.2, L: float = 2.7,
+                   target: float = None) -> dict:
     """EWMA 控制图（每个数值列）"""
     if numeric_cols is None:
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -1241,7 +1248,7 @@ def _analyze_ewma(df: pd.DataFrame, numeric_cols: list = None,
         data = df[col].dropna().values
         if len(data) >= 2:
             try:
-                r = spc_advanced.ewma_chart(data, lam=lam, L=L)
+                r = spc_advanced.ewma_chart(data, lam=lam, L=L, target=target)
                 if 'chart' in r:
                     charts[col] = r['chart']
                 ooc = sum(v for v in r.get('ooc_points', {}).values()) if isinstance(r.get('ooc_points'), dict) else 0
@@ -1258,7 +1265,8 @@ def _analyze_ewma(df: pd.DataFrame, numeric_cols: list = None,
 
 
 def _analyze_cusum(df: pd.DataFrame, numeric_cols: list = None,
-                    k: float = 0.5, h: float = 4.0) -> dict:
+                    k: float = 1.0, h: float = 4.0,
+                    target: float = None) -> dict:
     """CUSUM 控制图"""
     if numeric_cols is None:
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -1268,7 +1276,7 @@ def _analyze_cusum(df: pd.DataFrame, numeric_cols: list = None,
         data = df[col].dropna().values
         if len(data) >= 2:
             try:
-                r = spc_advanced.cusum_chart(data, k=k, h=h)
+                r = spc_advanced.cusum_chart(data, target=target, k=k, h=h)
                 if 'chart' in r:
                     charts[col] = r['chart']
                 ooc = sum(v for v in r.get('ooc_points', {}).values()) if isinstance(r.get('ooc_points'), dict) else 0
@@ -1286,6 +1294,7 @@ def _analyze_cusum(df: pd.DataFrame, numeric_cols: list = None,
 
 def _analyze_boxcox(df: pd.DataFrame, numeric_cols: list = None,
                      usl: float = None, lsl: float = None,
+                     target: float = None,
                      subgroup_size: int = 1, within_method: str = 'Rbar') -> dict:
     """Box-Cox 变换过程能力"""
     if numeric_cols is None:
@@ -1435,11 +1444,13 @@ def analyze_process_selective(df: pd.DataFrame, data_label: str = '',
     if 'ewma' in modules:
         results['ewma'] = _analyze_ewma(df, numeric_cols,
                                          lam=ep.get('ewma_lam', 0.2),
-                                         L=ep.get('ewma_L', 2.7))
+                                         L=ep.get('ewma_L', 2.7),
+                                         target=ep.get('spc_target'))
     if 'cusum' in modules:
         results['cusum'] = _analyze_cusum(df, numeric_cols,
-                                           k=ep.get('cusum_k', 0.5),
-                                           h=ep.get('cusum_h', 4.0))
+                                           k=ep.get('cusum_k', 1.0),
+                                           h=ep.get('cusum_h', 4.0),
+                                           target=ep.get('spc_target'))
 
     # 能力分析
     if 'capability' in modules:
@@ -1447,12 +1458,15 @@ def analyze_process_selective(df: pd.DataFrame, data_label: str = '',
             df, numeric_cols,
             usl=ep.get('usl'),
             lsl=ep.get('lsl'),
+            target=ep.get('spc_target'),
             subgroup_size=ep.get('bc_subgroup', 1),
+            within_method=ep.get('bc_method', 'Rbar'),
         )
     if 'box_cox' in modules:
         results['box_cox'] = _analyze_boxcox(df, numeric_cols,
                                               usl=ep.get('usl'),
                                               lsl=ep.get('lsl'),
+                                              target=ep.get('spc_target'),
                                               subgroup_size=ep.get('bc_subgroup', 1),
                                               within_method=ep.get('bc_method', 'Rbar'))
     if 'cg_cgk' in modules:
@@ -1476,7 +1490,7 @@ def analyze_process_selective(df: pd.DataFrame, data_label: str = '',
         results['uncertainty'] = _analyze_uncertainty(df, numeric_cols,
                                                        resolution=ep.get('unc_res', 0.001),
                                                        cal_unc=ep.get('unc_cal', 0.0),
-                                                       temp_range=ep.get('unc_tr', 0.0),
+                                                       temp_range=ep.get('unc_tr', 5.0),
                                                        temp_coeff=ep.get('unc_tc', 0.0))
 
     # 特殊分析
