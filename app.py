@@ -611,6 +611,59 @@ def page_data_import():
     show_data_info()
 
 
+# ==================== SPC 结果展示辅助函数 ====================
+def _show_spc_results(r):
+    """统一展示 SPC 控制图的分析结果：参数、目标偏差、判异规则违规"""
+    # 参数表
+    with st.expander('📊 控制图参数', expanded=True):
+        cols = st.columns(min(len(r['stats']), 5))
+        for i, (k, v) in enumerate(r['stats'].items()):
+            with cols[i % len(cols)]:
+                st.metric(k, f'{v:.4f}' if isinstance(v, (int, float)) else str(v))
+
+    # 目标偏差
+    tgt_dev = r.get('target_deviation')
+    if tgt_dev:
+        st.info(
+            f'🎯 **目标偏差分析**: 中心线 {tgt_dev["center"]:.4f} → 目标值 {tgt_dev["target"]:.4f} | '
+            f'偏差 = {tgt_dev["deviation"]:+.4f} ({tgt_dev["deviation_pct"]:+.2f}%)'
+        )
+
+    # 超限点汇总
+    ooc = r.get('ooc_points', {})
+    if ooc:
+        ooc_total = sum(v for v in ooc.values())
+        if ooc_total > 0:
+            ooc_str = ' | '.join(f'{k}: {v}个' for k, v in ooc.items() if v > 0)
+            st.warning(f'⚠️ **超限点检测**: 共 {ooc_total} 个超限点 ({ooc_str}) — 图中以红色 ✕ 标记')
+        else:
+            st.success('✅ **超限点检测**: 无超限点，过程受控')
+
+    # WECO/Nelson 判异规则
+    weco = r.get('weco', {})
+    violations = weco.get('violations', {})
+    if violations:
+        with st.expander(f'🔴 **判异规则违规** ({weco.get("total_violations", 0)} 条规则触发)', expanded=True):
+            rule_names = {
+                1: '规则1: 超出控制限',
+                2: '规则2: 连续7点同侧 (WECO)',
+                3: '规则3: 连续6点递增/递减 (趋势)',
+                4: '规则4: 连续14点交替上下',
+                5: '规则5: 连续3点中2点超出2σ',
+                6: '规则6: 连续5点中4点超出1σ',
+                7: '规则7: 连续15点在±1σ内',
+                8: '规则8: 连续8点在±1σ外',
+            }
+            for rule_id, v in violations.items():
+                rule_name = rule_names.get(rule_id, f'规则{rule_id}')
+                st.error(f'**{rule_name}** — {v["description"]}')
+                if 'detail' in v:
+                    for d in v['detail']:
+                        st.caption(f'  • {d}')
+    else:
+        st.success('✅ **判异规则**: 未触发任何 Nelson 判异规则，过程稳定')
+
+
 # ==================== 2. SPC 控制图 ====================
 def page_spc():
     st.header('📈 SPC 控制图')
@@ -633,6 +686,11 @@ def page_spc():
             'P 图 (不合格品率)', 'NP 图 (不合格品数)', 'C 图 (缺陷数)', 'U 图 (单位缺陷数)'
         ], key='shewhart_type')
 
+        # 目标值输入（可选）
+        tgt_input = st.text_input('🎯 目标值 (可选)', placeholder='留空=不设目标', key='shewhart_target',
+                                  help='设置后将计算中心线与目标值的偏差，并在图中显示目标线')
+        target_val = float(tgt_input) if tgt_input else None
+
         if ct in ['X-bar R (均值-极差)', 'X-bar S (均值-标准差)']:
             c1, c2 = st.columns(2)
             with c1:
@@ -646,11 +704,9 @@ def page_spc():
                 if len(data) < ss * 2:
                     st.error(f'数据不足，需至少 {ss*2} 个点')
                 else:
-                    r = spc_charts.xbar_r_chart(data, ss) if ct == 'X-bar R (均值-极差)' else spc_charts.xbar_s_chart(data, ss)
+                    r = spc_charts.xbar_r_chart(data, ss, target_val) if ct == 'X-bar R (均值-极差)' else spc_charts.xbar_s_chart(data, ss, target_val)
                     st.plotly_chart(r['chart'], use_container_width=True)
-                    with st.expander('📊 参数'):
-                        for k, v in r['stats'].items():
-                            st.metric(k, f'{v:.4f}')
+                    _show_spc_results(r)
 
         elif ct == 'I-MR (单值-移动极差)':
             dc = st.selectbox('数据列', numeric_cols, key='imr_col')
@@ -661,8 +717,9 @@ def page_spc():
                 if len(data) < 2:
                     st.error('需至少2个数据点')
                 else:
-                    r = spc_charts.imr_chart(data)
+                    r = spc_charts.imr_chart(data, target_val)
                     st.plotly_chart(r['chart'], use_container_width=True)
+                    _show_spc_results(r)
 
         elif ct == 'P 图 (不合格品率)':
             c1, c2 = st.columns(2)
@@ -674,8 +731,9 @@ def page_spc():
                 d, s = df[dcol].dropna().values, df[scol].dropna().values
                 ml = min(len(d), len(s))
                 if ml >= 2:
-                    r = spc_charts.p_chart(d[:ml], s[:ml])
+                    r = spc_charts.p_chart(d[:ml], s[:ml], target_val)
                     st.plotly_chart(r['chart'], use_container_width=True)
+                    _show_spc_results(r)
             else:
                 st.warning('数据列已变更，请重新选择')
 
@@ -690,8 +748,9 @@ def page_spc():
             else:
                 d = df[dcol].dropna().values
                 if len(d) >= 2:
-                    r = spc_charts.np_chart(d, sz)
+                    r = spc_charts.np_chart(d, sz, target_val)
                     st.plotly_chart(r['chart'], use_container_width=True)
+                    _show_spc_results(r)
 
         elif ct in ['C 图 (缺陷数)', 'U 图 (单位缺陷数)']:
             dcol = st.selectbox('缺陷数列', numeric_cols, key='cu_col')
@@ -699,8 +758,9 @@ def page_spc():
                 st.warning(f'列 "{dcol}" 已变更，请重新选择')
             elif ct == 'C 图 (缺陷数)':
                 d = df[dcol].dropna().values
-                r = spc_charts.c_chart(d)
+                r = spc_charts.c_chart(d, target_val)
                 st.plotly_chart(r['chart'], use_container_width=True)
+                _show_spc_results(r)
             else:
                 scol = st.selectbox('单位数列', numeric_cols, key='u_size')
                 if scol not in df.columns:
@@ -709,56 +769,57 @@ def page_spc():
                     d = df[dcol].dropna().values
                     s = df[scol].dropna().values
                     ml = min(len(d), len(s))
-                    r = spc_charts.u_chart(d[:ml], s[:ml])
+                    r = spc_charts.u_chart(d[:ml], s[:ml], target_val)
                     st.plotly_chart(r['chart'], use_container_width=True)
-
-        st.info('🔴 判异准则：超 UCL/LCL 为异常；连续7点同侧、连续趋势也视为异常')
+                    _show_spc_results(r)
 
     # --- Tab2: EWMA ---
     with tab2:
         dc = st.selectbox('数据列', numeric_cols, key='ewma_col')
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         with c1:
             lam = st.slider('平滑系数 λ', 0.05, 1.0, 0.2, 0.05)
         with c2:
             L = st.slider('控制限倍数 L', 2.0, 4.0, 2.7, 0.1)
+        with c3:
+            tgt_input_ewma = st.text_input('目标值 (可选)', placeholder='留空=不设', key='ewma_target')
+        target_ewma = float(tgt_input_ewma) if tgt_input_ewma else None
         if dc not in df.columns:
             st.warning(f'列 "{dc}" 已变更，请重新选择')
         else:
             data = df[dc].dropna().values
             if len(data) >= 2:
-                r = spc_advanced.ewma_chart(data, lam, L)
+                r = spc_advanced.ewma_chart(data, lam, L, target_ewma)
                 if 'error' in r:
                     st.error(r['error'])
                 else:
                     st.plotly_chart(r['chart'], use_container_width=True)
-                    with st.expander('📊 参数'):
-                        for k, v in r['stats'].items():
-                            st.metric(k, v)
+                    _show_spc_results(r)
             else:
                 st.error('至少需要 2 个数据点')
 
     # --- Tab3: CUSUM ---
     with tab3:
         dc = st.selectbox('数据列', numeric_cols, key='cusum_col')
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         with c1:
             k_val = st.slider('参考值 k (σ倍数)', 0.1, 2.0, 0.5, 0.1)
         with c2:
             h_val = st.slider('决策区间 h (σ倍数)', 2.0, 8.0, 4.0, 0.5)
+        with c3:
+            tgt_input_cusum = st.text_input('目标值 (可选)', placeholder='留空=用数据均值', key='cusum_target')
+        target_cusum = float(tgt_input_cusum) if tgt_input_cusum else None
         if dc not in df.columns:
             st.warning(f'列 "{dc}" 已变更，请重新选择')
         else:
             data = df[dc].dropna().values
             if len(data) >= 2:
-                r = spc_advanced.cusum_chart(data, k=k_val, h=h_val)
+                r = spc_advanced.cusum_chart(data, target=target_cusum, k=k_val, h=h_val)
                 if 'error' in r:
                     st.error(r['error'])
                 else:
                     st.plotly_chart(r['chart'], use_container_width=True)
-                    with st.expander('📊 参数'):
-                        for k, v in r['stats'].items():
-                            st.metric(k, v)
+                    _show_spc_results(r)
             else:
                 st.error('至少需要 2 个数据点')
 
@@ -772,9 +833,7 @@ def page_spc():
             st.error(r['error'])
         else:
             st.plotly_chart(r['chart'], use_container_width=True)
-            with st.expander('📊 参数'):
-                for k, v in r['stats'].items():
-                    st.metric(k, v)
+            _show_spc_results(r)
 
     show_data_info()
 

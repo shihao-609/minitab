@@ -1,18 +1,21 @@
 """
 高级 SPC 控制图 — EWMA / CUSUM / 多变量 Hotelling T²
+支持 WECO/Nelson 判异规则
 """
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from modules.weco_rules import apply_all_rules, go_scatter_ooc, compute_target_deviation
 
 
 # ==================== EWMA 控制图 ====================
 
-def ewma_chart(data, lam=0.2, L=2.7):
+def ewma_chart(data, lam=0.2, L=2.7, target=None):
     """
     EWMA (指数加权移动平均) 控制图
     - lam: 平滑系数 (0 < λ ≤ 1)
     - L: 控制限宽度倍数
+    - target: 目标值（可选）
     """
     data = np.array(data, dtype=float)
     data = data[~np.isnan(data)]
@@ -31,7 +34,6 @@ def ewma_chart(data, lam=0.2, L=2.7):
         z[i] = lam * data[i] + (1 - lam) * z[i - 1]
 
     # EWMA 控制限（稳态）
-    # Var(z_i) = sigma² * (λ/(2-λ)) * [1 - (1-λ)^(2i)]
     indices = np.arange(1, n + 1)
     var_multiplier = (lam / (2 - lam)) * (1 - (1 - lam) ** (2 * indices))
     sigma_z = sigma * np.sqrt(var_multiplier)
@@ -39,6 +41,15 @@ def ewma_chart(data, lam=0.2, L=2.7):
     ucl = mu + L * sigma_z
     cl = np.full(n, mu)
     lcl = mu - L * sigma_z
+
+    # 稳态 sigma
+    sigma_steady = sigma * np.sqrt(lam / (2 - lam))
+
+    # 目标偏差
+    tgt_dev = compute_target_deviation(mu, target) if target is not None else None
+
+    # ---- WECO 规则 (对 EWMA 值) ----
+    weco_result = apply_all_rules(z, mu, ucl, lcl, sigma_z)
 
     # 标注超限点
     above = z > ucl
@@ -59,11 +70,14 @@ def ewma_chart(data, lam=0.2, L=2.7):
     fig.add_trace(go.Scatter(x=idx, y=lcl, mode='lines', name='LCL',
                              line=dict(color='red', dash='dash', width=1.5)))
 
+    # 目标线
+    if target is not None:
+        fig.add_trace(go.Scatter(x=idx, y=[target]*n, mode='lines',
+                                 name=f'目标 = {target:.4f}', line=dict(color='orange', dash='dot', width=1.5)))
+
     # 高亮超限点
     if len(ooc_indices) > 0:
-        fig.add_trace(go.Scatter(x=(ooc_indices + 1).tolist(), y=z[ooc_indices], mode='markers',
-                                 name=f'超限点 ({len(ooc_indices)})',
-                                 marker=dict(color='red', size=10, symbol='x')))
+        fig.add_trace(go_scatter_ooc((ooc_indices + 1).tolist(), z[ooc_indices]))
 
     fig.update_layout(title=f'EWMA 控制图 (λ={lam}, L={L})', template='plotly_white',
                       height=450, hovermode='x unified')
@@ -76,9 +90,12 @@ def ewma_chart(data, lam=0.2, L=2.7):
             'λ (平滑系数)': lam, 'L (控制限倍数)': L,
             '均值 μ': f'{mu:.4f}', '标准差 σ': f'{sigma:.4f}',
             '超限点数': len(ooc_indices),
-            '稳态 UCL': f'{mu + L * sigma * np.sqrt(lam / (2 - lam)):.4f}',
-            '稳态 LCL': f'{mu - L * sigma * np.sqrt(lam / (2 - lam)):.4f}',
-        }
+            '稳态 UCL': f'{mu + L * sigma_steady:.4f}',
+            '稳态 LCL': f'{mu - L * sigma_steady:.4f}',
+        },
+        'weco': weco_result,
+        'ooc_points': {'EWMA': len(ooc_indices)},
+        'target_deviation': tgt_dev,
     }
 
 
@@ -125,6 +142,18 @@ def cusum_chart(data, target=None, k=1.0, h=4.0):
             ooc_minus.append(i)
             C_minus[i] = 0
 
+    # 目标偏差
+    mu = np.mean(data)
+    tgt_dev = compute_target_deviation(mu, target)
+
+    # ---- WECO 规则 (对原始数据) ----
+    overall_ucl = target + 3 * sigma
+    overall_lcl = target - 3 * sigma
+    weco_result = apply_all_rules(data, target, overall_ucl, overall_lcl, sigma)
+
+    # 超限点标记 (原始数据超 3σ)
+    ooc_data = np.where((data > overall_ucl) | (data < overall_lcl))[0]
+
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         subplot_titles=('CUSUM 双侧累积和', '原始数据'),
                         vertical_spacing=0.12, row_heights=[0.6, 0.4])
@@ -137,12 +166,27 @@ def cusum_chart(data, target=None, k=1.0, h=4.0):
                              marker=dict(color='#1f77b4', size=4), line=dict(color='#1f77b4')), row=1, col=1)
     fig.add_hline(y=h_val, line_dash='dash', line_color='red', row=1, col=1,
                   annotation_text=f'H={h_val:.3f}')
+
+    # CUSUM 报警点
+    all_ooc = ooc_plus + ooc_minus
+    if all_ooc:
+        all_y = [C_plus[i] if i in ooc_plus else C_minus[i] for i in all_ooc]
+        fig.add_trace(go.Scatter(x=(np.array(all_ooc) + 1).tolist(), y=all_y, mode='markers',
+                                 name=f'CUSUM报警 ({len(all_ooc)})',
+                                 marker=dict(color='red', size=10, symbol='x-thin', line=dict(width=2))),
+                      row=1, col=1)
+
     fig.add_hline(y=0, line_color='gray', row=1, col=1)
 
     fig.add_trace(go.Scatter(x=idx, y=data, mode='lines+markers', name='观测值',
                              marker=dict(color='#2ca02c', size=4), line=dict(color='#2ca02c')), row=2, col=1)
     fig.add_hline(y=target, line_dash='dot', line_color='green', row=2, col=1,
                   annotation_text=f'目标={target:.4f}')
+    fig.add_hline(y=overall_ucl, line_dash='dash', line_color='red', row=2, col=1)
+    fig.add_hline(y=overall_lcl, line_dash='dash', line_color='red', row=2, col=1)
+
+    if len(ooc_data) > 0:
+        fig.add_trace(go_scatter_ooc((ooc_data + 1).tolist(), data[ooc_data], '3σ超限'), row=2, col=1)
 
     fig.update_layout(title=f'CUSUM 控制图 (k={k}σ  h={h}σ)', template='plotly_white',
                       height=550, hovermode='x unified')
@@ -159,7 +203,10 @@ def cusum_chart(data, target=None, k=1.0, h=4.0):
             'h (决策区间)': f'{h_val:.4f}',
             '上侧报警次数': len(ooc_plus),
             '下侧报警次数': len(ooc_minus),
-        }
+        },
+        'weco': weco_result,
+        'ooc_points': {'CUSUM报警': len(all_ooc), '3σ超限': len(ooc_data)},
+        'target_deviation': tgt_dev,
     }
 
 
@@ -224,9 +271,7 @@ def t2_chart(df, alpha=0.0027):
     # 标注超限点
     ooc_idx = np.where(T2 > UCL)[0]
     if len(ooc_idx) > 0:
-        fig.add_trace(go.Scatter(x=(ooc_idx + 1).tolist(), y=T2[ooc_idx], mode='markers',
-                                 name=f'超限 ({len(ooc_idx)})',
-                                 marker=dict(color='red', size=10, symbol='x')))
+        fig.add_trace(go_scatter_ooc((ooc_idx + 1).tolist(), T2[ooc_idx], '超限'))
 
     fig.update_layout(title=f'Hotelling T² 多变量控制图 (p={p}, α={alpha})',
                       template='plotly_white', height=450, hovermode='x unified')
@@ -242,5 +287,8 @@ def t2_chart(df, alpha=0.0027):
             'UCL (控制上限)': f'{UCL:.4f}',
             '超限点数': int(ooc),
             '最大 T²': f'{np.max(T2):.4f}',
-        }
+        },
+        'weco': {'violations': {}, 'total_violations': 0},
+        'ooc_points': {'T²': int(ooc)},
+        'target_deviation': None,
     }
