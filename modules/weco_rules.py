@@ -43,6 +43,11 @@ def apply_all_rules(data, center, ucl, lcl, sigma, n_consecutive_same_side=7,
     else:
         lcl_arr = np.asarray(lcl)
 
+    # sigma 统一为标量（规则5-8 需要标量 sigma）
+    if sigma is not None:
+        if not np.isscalar(sigma):
+            sigma = float(np.mean(sigma))  # 取平均作为代表值
+
     # ---- 规则 1: 任一点超出 3σ 控制限 ----
     above = data > ucl_arr
     below = data < lcl_arr

@@ -42,14 +42,16 @@ def ewma_chart(data, lam=0.2, L=2.7, target=None):
     cl = np.full(n, mu)
     lcl = mu - L * sigma_z
 
-    # 稳态 sigma
+    # 稳态 sigma（用于 WECO 规则等需要标量 sigma 的场景）
     sigma_steady = sigma * np.sqrt(lam / (2 - lam))
 
     # 目标偏差
     tgt_dev = compute_target_deviation(mu, target) if target is not None else None
 
-    # ---- WECO 规则 (对 EWMA 值) ----
-    weco_result = apply_all_rules(z, mu, ucl, lcl, sigma_z)
+    # ---- WECO 规则 (对 EWMA 值，使用稳态 sigma) ----
+    ucl_steady = mu + L * sigma_steady
+    lcl_steady = mu - L * sigma_steady
+    weco_result = apply_all_rules(z, mu, ucl_steady, lcl_steady, sigma_steady)
 
     # 标注超限点
     above = z > ucl
