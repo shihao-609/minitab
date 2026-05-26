@@ -1941,9 +1941,13 @@ def _show_analysis_detail(analysis, data_dict, file_idx):
         st.caption(f"总缺陷数: {analysis['summary'].get('总缺陷数', 'N/A')}")
 
     elif atype == 'grr':
+        saved_params = st.session_state.get('batch_param_map', {}).get(fname, {})
+        saved_method = saved_params.get('grr_method', '平均值-极差法 (X-bar R)')
         grr_method = st.radio(
             '分析方法', ['平均值-极差法 (X-bar R)', 'ANOVA 法 (方差分析)'],
-            horizontal=True, key=f'batch_grr_method_{file_idx}'
+            horizontal=True,
+            index=0 if 'ANOVA' not in saved_method else 1,
+            key=f'batch_grr_method_{file_idx}'
         )
         result_key = 'result_anova' if 'ANOVA' in grr_method else 'result_xbar'
         result = analysis.get(result_key, {})
@@ -2172,7 +2176,12 @@ def _show_analysis_detail(analysis, data_dict, file_idx):
         st.caption('**数据分布**')
         df = data_dict.get(fname)
         if df is not None:
-            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            # 优先使用分析结果中已过滤的数值列（尊重用户在参数配置中的选择）
+            numeric_cols = analysis.get('numeric_cols')
+            if numeric_cols is None:
+                numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            # 排除明显的批次列
+            numeric_cols = [c for c in numeric_cols if not any(k in str(c).lower() for k in ['批次', 'batch', '批号'])]
             cols_per_row = min(3, len(numeric_cols))
             if cols_per_row > 0:
                 rows = (len(numeric_cols) + cols_per_row - 1) // cols_per_row
@@ -2309,6 +2318,15 @@ def _dlg_step_params(fname, file_idx, cols_list, numeric_cols,
     # === 计量型 GRR ===
     if 'grr' in modules:
         st.caption('▸ **计量型 Gage R&R**')
+        # 分析方法选择
+        saved_method = params.get('grr_method', '平均值-极差法 (X-bar R)')
+        params['grr_method'] = st.radio(
+            '分析方法',
+            ['平均值-极差法 (X-bar R)', 'ANOVA 法 (方差分析)'],
+            horizontal=True,
+            index=0 if 'ANOVA' not in saved_method else 1,
+            key=f'dlg_grr_method_{file_idx}'
+        )
         if len(cols_list) >= 3 and all(
             kw in ' '.join(c.lower() for c in cols_list)
             for kw in ['part', 'operator', 'measurement']
