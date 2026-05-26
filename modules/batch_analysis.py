@@ -527,7 +527,10 @@ def generate_report(all_analyses: List[dict], filenames: List[str]) -> str:
                     chart_type = s.get('图表类型', 'I-MR')
                     mean_val = s.get('均值', 0)
                     std_val = s.get('标准差', 0)
-                    lines.append(f'| {s["列名"]} | {chart_type} | {mean_val:.3f} | {std_val:.4f} | {s["超限点数"]} | {s["受控状态"]} |')
+                    # 兼容旧格式（超限点/状态）和新格式（超限点数/受控状态）
+                    ooc_val = s.get('超限点数', s.get('超限点', 0))
+                    status_val = s.get('受控状态', s.get('状态', 'N/A'))
+                    lines.append(f'| {s["列名"]} | {chart_type} | {mean_val:.3f} | {std_val:.4f} | {ooc_val} | {status_val} |')
                 lines.append(f'')
 
             # 过程能力
@@ -1016,7 +1019,7 @@ def _analyze_spc_shewhart(df: pd.DataFrame, numeric_cols: list = None,
                 chart_label = col_defect if not col_size else f'{col_defect} / {col_size}'
                 results[mode]['charts'][chart_label] = r.get('chart')
                 results[mode]['summary'].append({
-                    '列': chart_label,
+                    '列名': chart_label,
                     '超限点': ooc,
                     '状态': '✅ 受控' if ooc == 0 else f'⚠️ {ooc}个超限点',
                 })
@@ -1095,6 +1098,7 @@ def _analyze_capability_only(df: pd.DataFrame, numeric_cols: list = None,
     if numeric_cols is None:
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     cap_results = []
+    skipped_cols = []
     for col in numeric_cols:
         data = df[col].dropna().values
         if len(data) >= 5:
@@ -1115,6 +1119,10 @@ def _analyze_capability_only(df: pd.DataFrame, numeric_cols: list = None,
                 })
             except Exception:
                 pass
+        else:
+            skipped_cols.append(f'{col}(n={len(data)})')
+    if skipped_cols:
+        st.warning(f'⚠️ 能力分析：数据量不足(<5点)已跳过 {", ".join(skipped_cols)}')
     return cap_results
 
 
@@ -1227,6 +1235,7 @@ def _analyze_stats_summary(df: pd.DataFrame, numeric_cols: list = None) -> list:
     if numeric_cols is None:
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     results = []
+    skipped_cols = []
     for col in numeric_cols:
         data = df[col].dropna().values
         if len(data) >= 2:
@@ -1242,6 +1251,10 @@ def _analyze_stats_summary(df: pd.DataFrame, numeric_cols: list = None) -> list:
                 '偏度': f'{sp_stats.skew(data):.4f}',
                 '峰度': f'{sp_stats.kurtosis(data):.4f}',
             })
+        else:
+            skipped_cols.append(f'{col}(n={len(data)})')
+    if skipped_cols:
+        st.warning(f'⚠️ 描述性统计：数据量不足(<2点)已跳过 {", ".join(skipped_cols)}')
     return results
 
 
@@ -1568,6 +1581,12 @@ def run_single_analysis(df: pd.DataFrame, data_type: str,
         分析结果 dict
     """
     params = params or {}
+    # 优先使用 params 中的 tolerance，支持 per-file 设置
+    if params.get('tolerance') is not None and params.get('tolerance') != '':
+        try:
+            grr_tolerance = float(params['tolerance'])
+        except (ValueError, TypeError):
+            grr_tolerance = grr_tolerance  # fallback to argument
     if data_type == 'pareto':
         return analyze_pareto(df,
                               cat_col=params.get('cat_col'),
@@ -1684,7 +1703,14 @@ def batch_import_and_analyze(
                         cat_col=params.get('cat_col'),
                         cnt_col=params.get('cnt_col'))
                 elif mod == 'grr':
-                    analysis = analyze_grr(df, grr_tolerance,
+                    # 优先使用 params 中的 per-file tolerance
+                    file_tol = grr_tolerance
+                    if 'tolerance' in params and params['tolerance'] is not None and params['tolerance'] != '':
+                        try:
+                            file_tol = float(params['tolerance'])
+                        except (ValueError, TypeError):
+                            pass
+                    analysis = analyze_grr(df, file_tol,
                         part_col=params.get('part_col'),
                         op_col=params.get('op_col'),
                         meas_col=params.get('meas_col'))
@@ -1863,7 +1889,14 @@ def restore_analyses_from_files(files_data: list,
                         cat_col=params.get('cat_col'),
                         cnt_col=params.get('cnt_col'))
                 elif mod == 'grr':
-                    analysis = analyze_grr(df, grr_tolerance,
+                    # 优先使用 params 中的 per-file tolerance
+                    file_tol = grr_tolerance
+                    if 'tolerance' in params and params['tolerance'] is not None and params['tolerance'] != '':
+                        try:
+                            file_tol = float(params['tolerance'])
+                        except (ValueError, TypeError):
+                            pass
+                    analysis = analyze_grr(df, file_tol,
                         part_col=params.get('part_col'),
                         op_col=params.get('op_col'),
                         meas_col=params.get('meas_col'))
@@ -1988,6 +2021,10 @@ def render_module_selector(
                     for k, _ in group_mods:
                         if k not in st.session_state[temp_key]:
                             st.session_state[temp_key].append(k)
+                        # 清除 checkbox 自身的 session_state key，使下次渲染时 value 参数生效
+                        ck = f'{session_key_prefix}_mod_{k}'
+                        if ck in st.session_state:
+                            del st.session_state[ck]
                     st.rerun()
             with cm2:
                 has_any = any(k in st.session_state[temp_key] for k, _ in group_mods)
@@ -1998,6 +2035,10 @@ def render_module_selector(
                         m for m in st.session_state[temp_key]
                         if m not in {k for k, _ in group_mods}
                     ]
+                    for k, _ in group_mods:
+                        ck = f'{session_key_prefix}_mod_{k}'
+                        if ck in st.session_state:
+                            del st.session_state[ck]
                     st.rerun()
 
             # ---- 各模块 checkbox ----

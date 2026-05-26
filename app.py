@@ -2698,7 +2698,7 @@ def page_batch_analysis():
                         module_selections[uf.name] = mods
                     p = st.session_state.batch_param_map.get(uf.name, {})
                     if p:
-                        params_map[uf.name] = {k: v for k, v in p.items() if k != 'tolerance'}
+                        params_map[uf.name] = dict(p)  # 保留 tolerance 等所有参数
                         if 'tolerance' in p and p['tolerance']:
                             try:
                                 grr_tolerance = float(p['tolerance'])
