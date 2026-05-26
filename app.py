@@ -1176,10 +1176,21 @@ def page_msa():
                 with cs[2]: st.metric('GRR σ', r['stddev_contributions']['GRR'])
                 with cs[3]: st.metric('PV 部件 σ', r['stddev_contributions']['部件间 (PV)'])
                 with cs[4]: st.metric('ndc', r['ndc'])
-                cs2 = st.columns(2)
+
+                st.subheader('📈 变异占比')
+                pcts = r['percent_studyvar']
+                contribs = r['percent_contribution']
+                cs2 = st.columns(4)
+                with cs2[0]: st.metric('%GRR (StudyVar)', pcts['%GRR'],
+                                       help='标准差比值: σ_GRR / σ_TV × 100')
+                with cs2[1]: st.metric('%GRR (贡献率)', contribs['%GRR'],
+                                       help='方差比值: σ²_GRR / σ²_TV × 100')
+                with cs2[2]: st.metric('评级', r['evaluation'])
+                with cs2[3]: st.metric('%P/T (StudyVar)',
+                                       f'{float(pcts["%PV"].replace("%","")):.1f}%',
+                                       help='部件间标准差占比')
+
                 grr_pct = float(r['percent_contributions']['GRR占比 %GRR'].replace('%', ''))
-                with cs2[0]: st.metric('%GRR', f'{grr_pct:.1f}%')
-                with cs2[1]: st.metric('评级', r['evaluation'])
                 st.plotly_chart(r['chart'], use_container_width=True)
                 with st.expander('📋 评估标准'):
                     st.table(pd.DataFrame({

@@ -44,7 +44,7 @@ def gage_rr_crossed(parts, operators, measurements):
     R_bar_by_op = summary.groupby('Operator')['range_'].mean()
     R_bar = R_bar_by_op.mean()
 
-    # d2常数（查表）
+    # d2常数 (标准表, g ≥ 15): EV用, 因 g = n_parts × n_operators ≥ 15
     d2_table = {2: 1.128, 3: 1.693, 4: 2.059, 5: 2.326, 6: 2.534,
                 7: 2.704, 8: 2.847, 9: 2.970, 10: 3.078}
     d2 = d2_table.get(n_trials, d2_table[3])
@@ -56,8 +56,10 @@ def gage_rr_crossed(parts, operators, measurements):
     # 再现性 (Reproducibility) = Appraiser Variation (AV)
     xbar_by_op = summary.groupby('Operator')['avg'].mean()
     X_bar_diff = xbar_by_op.max() - xbar_by_op.min()
-    d2_op_table = {2: 1.128, 3: 1.693, 4: 2.059, 5: 2.326}
-    d2_op = d2_op_table.get(n_operators, 1.693)
+    # d₂* 表 (AIAG MSA 第4版, g=1): 操作员均值的极差只有1个子组
+    d2_star_ops = {2: 1.414, 3: 1.911, 4: 2.240, 5: 2.481,
+                   6: 2.673, 7: 2.830, 8: 2.963, 9: 3.078, 10: 3.179}
+    d2_op = d2_star_ops.get(n_operators, 1.911)
 
     AV_sq = (X_bar_diff / d2_op) ** 2 - var_EV / (n_parts * n_trials)
     AV = np.sqrt(max(AV_sq, 0))
@@ -71,10 +73,12 @@ def gage_rr_crossed(parts, operators, measurements):
     part_avgs = summary.groupby('Part')['avg'].mean()
     Rp = part_avgs.max() - part_avgs.min()
 
-    d2_part_table = {2: 1.128, 3: 1.693, 4: 2.059, 5: 2.326,
-                     6: 2.534, 7: 2.704, 8: 2.847, 9: 2.970, 10: 3.078,
-                     15: 3.472, 20: 3.735}
-    d2_part = d2_part_table.get(n_parts, d2_part_table[10])
+    # d₂* 表 (AIAG MSA 第4版, g=1): 部件均值的极差只有1个子组
+    d2_star_parts = {2: 1.414, 3: 1.911, 4: 2.240, 5: 2.481,
+                     6: 2.673, 7: 2.830, 8: 2.963, 9: 3.078, 10: 3.179,
+                     11: 3.269, 12: 3.350, 13: 3.424, 14: 3.491, 15: 3.553,
+                     16: 3.610, 17: 3.663, 18: 3.713, 19: 3.760, 20: 3.804}
+    d2_part = d2_star_parts.get(n_parts, 3.179)
     PV = Rp / d2_part
     var_PV = PV ** 2
 
@@ -82,11 +86,18 @@ def gage_rr_crossed(parts, operators, measurements):
     var_TV = var_GRR + var_PV
     TV = np.sqrt(var_TV)
 
-    # 各分量的百分比贡献
+    # 各分量的百分比 (%StudyVar = 标准差比值, %Contribution = 方差比值)
     pct_EV = (EV / TV * 100) if TV > 0 else 0
     pct_AV = (AV / TV * 100) if TV > 0 else 0
     pct_GRR = (GRR / TV * 100) if TV > 0 else 0
     pct_PV = (PV / TV * 100) if TV > 0 else 0
+
+    # %Contribution (Minitab 方差分量占比)
+    total_var = var_TV if var_TV > 0 else 1
+    contrib_EV = var_EV / total_var * 100
+    contrib_AV = var_AV / total_var * 100
+    contrib_GRR = var_GRR / total_var * 100
+    contrib_PV = var_PV / total_var * 100
 
     # 区分数 (Number of Distinct Categories, ndc)
     ndc = int(np.floor(1.41 * PV / GRR)) if GRR > 0 else np.inf
@@ -117,6 +128,19 @@ def gage_rr_crossed(parts, operators, measurements):
             '部件间 (PV)': f'{PV:.5f}',
             '总变异 (TV)': f'{TV:.5f}',
         },
+        'percent_studyvar': {  # %StudyVar = 100 × σ_component / σ_total
+            '%EV': f'{pct_EV:.2f}%',
+            '%AV': f'{pct_AV:.2f}%',
+            '%GRR': f'{pct_GRR:.2f}%',
+            '%PV': f'{pct_PV:.2f}%',
+        },
+        'percent_contribution': {  # %Contribution = 100 × σ²_component / σ²_total
+            '%EV': f'{contrib_EV:.2f}%',
+            '%AV': f'{contrib_AV:.2f}%',
+            '%GRR': f'{contrib_GRR:.2f}%',
+            '%PV': f'{contrib_PV:.2f}%',
+        },
+        # 向后兼容: 保留旧键名
         'percent_contributions': {
             '重复性占比 %EV': f'{pct_EV:.2f}%',
             '再现性占比 %AV': f'{pct_AV:.2f}%',
