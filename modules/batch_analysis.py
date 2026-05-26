@@ -7,6 +7,7 @@
   3. 生成综合质量分析报告
 """
 
+import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -1933,8 +1934,6 @@ def render_module_selector(
                     st.session_state.my_selected_modules = selected
                     st.rerun()
     """
-    import streamlit as st
-
     # 用 session_state 存储临时选择状态
     temp_key = f'{session_key_prefix}_temp'
     if temp_key not in st.session_state:
@@ -2057,8 +2056,6 @@ def render_module_nav(session_key_prefix: str = 'module_nav') -> str:
                 st.session_state.menu = f'对应菜单项'
                 st.rerun()
     """
-    import streamlit as st
-
     selected_key = ''
     result_key = f'{session_key_prefix}_result'
 

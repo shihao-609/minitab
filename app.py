@@ -2573,38 +2573,6 @@ def page_batch_analysis():
                         set_new_data(original.copy())
                     st.session_state.menu = target
                     st.rerun()
-            if st.session_state.get('_batch_nav_dialog_open'):
-
-                @st.dialog('🚀 选择要跳转的分析模块', width='large')
-                def _nav_picker_dialog():
-                    selected = batch_analysis.render_module_nav(session_key_prefix='batch_nav')
-                    if selected:
-                        # 模块 key → 侧边栏菜单项 映射
-                        MENU_MAP = {
-                            'spc':           '📈 SPC 控制图',
-                            'capability':    '🎯 过程能力分析',
-                            'quality_tools': '📊 质量图形工具',
-                            'msa':           '🔬 测量系统分析 MSA',
-                            'stats':         '🔢 统计推断',
-                            'advanced':      '🧪 高级分析',
-                        }
-                        target_menu = MENU_MAP.get(selected)
-                        if target_menu:
-                            # 将当前已加载数据保持不变，切换侧边栏菜单
-                            st.session_state._pending_menu = target_menu
-                            st.session_state.pop('_batch_nav_dialog_open', None)
-
-                _nav_picker_dialog()
-                # 处理待跳转的菜单 — 跳转前用原始数据重置工作区
-                if '_pending_menu' in st.session_state:
-                    target = st.session_state.pop('_pending_menu')
-                    # ★ 跳转前：从原始副本加载数据（保证每次都是干净的初始数据）
-                    original = st.session_state.get('_upload_original')
-                    if original is not None:
-                        set_new_data(original.copy())
-                    st.session_state.menu = target
-                    st.rerun()
-
             # ---- 全局参数（所有文件共用） ----
             with st.expander('⚙️ 全局默认参数', expanded=False):
                 gc1, gc2, gc3, gc4 = st.columns(4)
