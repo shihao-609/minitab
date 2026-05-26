@@ -24,14 +24,23 @@ from modules import stats_tools, quality_tools, spc_advanced, msa_advanced, adva
 # 第一部分：数据类型自动识别
 # ============================================================
 
-DATA_TYPES = {
-    'pareto':    '帕累托（缺陷分析）',
-    'grr':       '测量系统分析 GRR',
-    'component': '化学成分',
-    'mechanics': '力学性能',
-    'dimension': '型材尺寸',
-    'unknown':   '通用数据',
-}
+def _get_type_label(analysis: dict) -> str:
+    """从分析结果中提取可读的类型标签 — 优先使用已选模块名称"""
+    # 连续数据批量选择了多个模块 → 列出模块名称
+    modules = analysis.get('modules_selected', [])
+    if modules:
+        labels = [ALL_MODULES[m]['label'] for m in modules if m in ALL_MODULES]
+        if labels:
+            return ', '.join(labels)
+    # 独立模块（pareto / grr / dimension / grr_attribute）
+    mod = analysis.get('module', '')
+    if mod and mod in ALL_MODULES:
+        return ALL_MODULES[mod]['label']
+    # 兜底
+    dtype = analysis.get('data_type', analysis.get('type', ''))
+    if dtype in ALL_MODULES:
+        return ALL_MODULES[dtype]['label']
+    return dtype
 
 def detect_data_type(df: pd.DataFrame, filename: str = '') -> Tuple[str, float]:
     """
@@ -395,23 +404,14 @@ def generate_report(all_analyses: List[dict], filenames: List[str]) -> str:
             if rating and '不可' in str(rating):
                 total_issues += 1
 
-        elif atype == 'component':
+        elif atype in ('component', 'mechanics', 'continuous'):
             data_info = f"{summary.get('数据行数', '?')}行×{summary.get('数值列数', '?')}变量"
             spc_ok = summary.get('SPC受控列数', 0)
             spc_bad = summary.get('SPC异常列数', 0)
             sig_corr = summary.get('显著相关对数', 0)
             key_findings.append(f'受控: {spc_ok}列 / 异常: {spc_bad}列')
-            key_findings.append(f'显著相关: {sig_corr}对')
-            if spc_bad > 0:
-                total_issues += 1
-
-        elif atype == 'mechanics':
-            data_info = f"{summary.get('数据行数', '?')}行×{summary.get('数值列数', '?')}变量"
-            spc_ok = summary.get('SPC受控列数', 0)
-            spc_bad = summary.get('SPC异常列数', 0)
-            sig_corr = summary.get('显著相关对数', 0)
-            key_findings.append(f'受控: {spc_ok}列 / 异常: {spc_bad}列')
-            key_findings.append(f'显著相关: {sig_corr}对')
+            if sig_corr:
+                key_findings.append(f'显著相关: {sig_corr}对')
             if spc_bad > 0:
                 total_issues += 1
 
@@ -420,18 +420,14 @@ def generate_report(all_analyses: List[dict], filenames: List[str]) -> str:
             key_findings.append(f"均值: {summary.get('整体均值', 'N/A')}")
             key_findings.append(f"标准差: {summary.get('整体标准差', 'N/A')}")
 
-        elif atype == 'continuous':
-            data_info = f"{summary.get('数据行数', '?')}行×{summary.get('数值列数', '?')}变量"
-            spc_ok = summary.get('SPC受控列数', 0)
-            spc_bad = summary.get('SPC异常列数', 0)
-            key_findings.append(f'受控: {spc_ok}列 / 异常: {spc_bad}列')
-            if spc_bad > 0:
-                total_issues += 1
+        elif atype == 'grr_attribute':
+            data_info = f"{summary.get('操作员数', '?')}操作员×{summary.get('样本数', '?')}样本"
+            key_findings.append(f"两两一致性: {summary.get('两两一致性', 'N/A')}")
 
         else:
             data_info = f"{summary.get('数据行数', '?')}行"
 
-        lines.append(f'| {i} | {fname} | {DATA_TYPES.get(atype, atype)} | {data_info} | {"; ".join(key_findings)} |')
+        lines.append(f'| {i} | {fname} | {_get_type_label(analysis)} | {data_info} | {"; ".join(key_findings)} |')
 
     lines.append(f'')
     lines.append(f'**⚠️ 需关注问题数**: {total_issues}')
@@ -442,7 +438,7 @@ def generate_report(all_analyses: List[dict], filenames: List[str]) -> str:
         atype = analysis.get('type', 'unknown')
         lines.append(f'---')
         lines.append(f'')
-        lines.append(f'## {i}. {fname} — {DATA_TYPES.get(atype, atype)}分析')
+        lines.append(f'## {i}. {fname} — {_get_type_label(analysis)}分析')
         lines.append(f'')
 
         if atype == 'pareto':
@@ -655,6 +651,37 @@ def generate_report(all_analyses: List[dict], filenames: List[str]) -> str:
                 pass
             lines.append(f'')
 
+        elif atype == 'grr_attribute':
+            summary = analysis.get('summary', {})
+            lines.append(f'### 计数型 GRR 评估')
+            lines.append(f'- **参考列**: {summary.get("参考列", "N/A")}')
+            lines.append(f'- **操作员数**: {summary.get("操作员数", "N/A")}')
+            lines.append(f'- **样本数**: {summary.get("样本数", "N/A")}')
+            lines.append(f'- **两两一致性**: {summary.get("两两一致性", "N/A")}')
+            lines.append(f'')
+            kappa = analysis.get('kappa_summary', [])
+            if kappa:
+                lines.append(f'### Kappa 一致性')
+                lines.append(f'')
+                lines.append(f'| 操作员 | Kappa | 评级 |')
+                lines.append(f'|--------|-------|------|')
+                for k in kappa:
+                    lines.append(f'| {k.get("操作员", "N/A")} | {k.get("Kappa", "N/A")} | {k.get("评级", "N/A")} |')
+                lines.append(f'')
+            lines.append(f'### 💡 改进建议')
+            agree_str = summary.get('两两一致性', '0%')
+            try:
+                agree_val = float(agree_str.replace('%', '')) / 100 if '%' in agree_str else float(agree_str)
+            except (ValueError, AttributeError):
+                agree_val = 0
+            if agree_val >= 0.9:
+                lines.append(f'- ✅ 操作员一致性好，测量系统可靠')
+            elif agree_val >= 0.7:
+                lines.append(f'- ⚠️ 操作员一致性可接受，建议加强培训和标准')
+            else:
+                lines.append(f'- 🔴 操作员一致性差，急需统一判定标准和培训')
+            lines.append(f'')
+
     # === 总结 ===
     lines.append(f'---')
     lines.append(f'')
@@ -684,7 +711,7 @@ def generate_report(all_analyses: List[dict], filenames: List[str]) -> str:
             else:
                 grr_issues.append(f'✅ 测量系统优秀 (%GRR={grr_v}%)')
 
-        elif atype in ('component', 'mechanics', 'continuous'):
+        elif atype in ('component', 'mechanics', 'continuous', 'dimension'):
             results = analysis.get('results', {})
             spc_result = results.get('spc', {})
             spc_list = spc_result.get('summary', []) if isinstance(spc_result, dict) else spc_result
