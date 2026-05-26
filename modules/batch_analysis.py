@@ -128,10 +128,10 @@ def detect_data_type(df: pd.DataFrame, filename: str = '') -> Tuple[str, float]:
 # 第二部分：各类型数据分析
 # ============================================================
 
-def analyze_pareto(df: pd.DataFrame) -> dict:
+def analyze_pareto(df: pd.DataFrame, cat_col: str = None, cnt_col: str = None) -> dict:
     """帕累托分析（缺陷数据）"""
-    cat_col = df.columns[0]
-    cnt_col = df.columns[1]
+    cat_col = cat_col if cat_col else df.columns[0]
+    cnt_col = cnt_col if cnt_col else df.columns[1]
     categories = df[cat_col].astype(str).tolist()
     counts = pd.to_numeric(df[cnt_col], errors='coerce').fillna(0).values
     result = pareto_histogram.pareto_chart(categories, counts)
@@ -147,9 +147,12 @@ def analyze_pareto(df: pd.DataFrame) -> dict:
     }
 
 
-def analyze_grr(df: pd.DataFrame, tolerance: Optional[float] = None) -> dict:
+def analyze_grr(df: pd.DataFrame, tolerance: Optional[float] = None,
+                part_col: str = None, op_col: str = None, meas_col: str = None) -> dict:
     """GRR 测量系统分析"""
-    part_col, op_col, meas_col = df.columns[0], df.columns[1], df.columns[2]
+    part_col = part_col if part_col else df.columns[0]
+    op_col = op_col if op_col else df.columns[1]
+    meas_col = meas_col if meas_col else df.columns[2]
     parts = df[part_col].values
     ops = df[op_col].values
     meas = pd.to_numeric(df[meas_col], errors='coerce').values
@@ -280,7 +283,7 @@ def analyze_process_continuous(df: pd.DataFrame, data_label: str = '') -> dict:
     }
 
 
-def analyze_dimension(df: pd.DataFrame) -> dict:
+def analyze_dimension(df: pd.DataFrame, batch_col: str = None, meas_cols: list = None) -> dict:
     """
     型材尺寸数据分析：
     - 将多测量值列合并，做 SPC I-MR
@@ -288,8 +291,11 @@ def analyze_dimension(df: pd.DataFrame) -> dict:
     """
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
-    # 将除批次列外的所有数值合并
-    non_batch_cols = [c for c in numeric_cols if '批' not in str(c).lower() and 'batch' not in str(c).lower()]
+    # 测量列：优先使用用户指定，否则自动排除批次列
+    if meas_cols:
+        non_batch_cols = [c for c in meas_cols if c in numeric_cols]
+    else:
+        non_batch_cols = [c for c in numeric_cols if '批' not in str(c).lower() and 'batch' not in str(c).lower()]
     if not non_batch_cols:
         non_batch_cols = numeric_cols
 
@@ -557,6 +563,43 @@ def generate_report(all_analyses: List[dict], filenames: List[str]) -> str:
                     lines.append(f'| {r["X变量"]} | {r["Y变量"]} | {r["Pearson r"]} | {r["p值"]} | {r["显著性"]} |')
                 lines.append(f'')
 
+            # 正态性检验
+            normality_list = results.get('normality', [])
+            if normality_list:
+                lines.append(f'### 正态性检验 (Shapiro-Wilk)')
+                lines.append(f'')
+                lines.append(f'| 变量 | 样本量 | p值 | 正态性 |')
+                lines.append(f'|------|--------|-----|--------|')
+                for n in normality_list:
+                    lines.append(f'| {n["列名"]} | {n["样本量"]} | {n["Shapiro-Wilk p值"]} | {n["正态性"]} |')
+                non_normal = [n for n in normality_list if '❌' in n.get('正态性', '')]
+                if non_normal:
+                    lines.append(f'')
+                    lines.append(f'⚠️ {len(non_normal)} 个变量不服从正态分布: {", ".join([n["列名"] for n in non_normal])}')
+                lines.append(f'')
+
+            # 运行图
+            runchart_list = results.get('run_chart', [])
+            if runchart_list:
+                lines.append(f'### 运行图分析')
+                lines.append(f'')
+                lines.append(f'| 变量 | 均值 | 中位数 | 游程检验 | 趋势检验 |')
+                lines.append(f'|------|------|--------|----------|----------|')
+                for r in runchart_list:
+                    lines.append(f'| {r["列名"]} | {r["均值"]} | {r["中位数"]} | {r["游程检验"]} | {r["趋势检验"]} |')
+                lines.append(f'')
+
+            # 描述性统计
+            stats_list = results.get('stats_summary', [])
+            if stats_list:
+                lines.append(f'### 描述性统计')
+                lines.append(f'')
+                lines.append(f'| 变量 | 样本量 | 均值 | 标准差 | 最小值 | 中位数 | 最大值 | 偏度 | 峰度 |')
+                lines.append(f'|------|--------|------|--------|--------|--------|--------|------|------|')
+                for s in stats_list:
+                    lines.append(f'| {s["列名"]} | {s["样本量"]} | {s["均值"]} | {s["标准差"]} | {s["最小值"]} | {s["中位数"]} | {s["最大值"]} | {s["偏度"]} | {s["峰度"]} |')
+                lines.append(f'')
+
             # 建议
             lines.append(f'### 💡 改进建议')
             bad_spc = [s for s in spc_list if '超限' in s.get('受控状态', '')]
@@ -701,39 +744,320 @@ def generate_report(all_analyses: List[dict], filenames: List[str]) -> str:
 
 
 # ============================================================
-# 第四部分：便捷批量导入接口
+# 第四部分：便捷批量导入接口（纯手动版）
 # ============================================================
 
-def run_single_analysis(df: pd.DataFrame, data_type: str,
-                        grr_tolerance: Optional[float] = None) -> dict:
+# 连续数据类型可选择的分析模块
+CONTINUOUS_MODULES = {
+    'spc':        {'label': 'SPC 控制图 (I-MR)', 'default': True},
+    'capability': {'label': '过程能力分析 (Cp/Cpk)', 'default': True},
+    'correlation': {'label': '相关性矩阵', 'default': True},
+    'regression': {'label': '回归分析', 'default': True},
+}
+
+# 全部可用的分析模块（用户直接选择）
+ALL_MODULES = {
+    'pareto':        {'label': '帕累托图（缺陷分析）', 'group': 'standalone'},
+    'grr':           {'label': '测量系统分析 GRR', 'group': 'standalone'},
+    'spc':           {'label': 'SPC 控制图 (I-MR)', 'group': 'continuous'},
+    'capability':    {'label': '过程能力分析 (Cp/Cpk)', 'group': 'continuous'},
+    'correlation':   {'label': '相关性矩阵', 'group': 'continuous'},
+    'regression':    {'label': '回归分析', 'group': 'continuous'},
+    'normality':     {'label': '正态性检验', 'group': 'continuous'},
+    'boxplot':       {'label': '箱线图', 'group': 'continuous'},
+    'run_chart':     {'label': '运行图', 'group': 'continuous'},
+    'stats_summary': {'label': '描述性统计', 'group': 'continuous'},
+    'dimension':     {'label': '型材尺寸分析', 'group': 'standalone'},
+}
+
+# 连续型模块的子分析函数映射
+_CONTINUOUS_ANALYZERS = {
+    'normality':     '_analyze_normality',
+    'boxplot':       '_analyze_boxplot',
+    'run_chart':     '_analyze_runchart',
+    'stats_summary': '_analyze_stats_summary',
+}
+
+
+def _analyze_spc_only(df: pd.DataFrame, numeric_cols: list = None) -> list:
+    """仅执行 SPC I-MR 分析"""
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    spc_results = []
+    for col in numeric_cols:
+        data = df[col].dropna().values
+        if len(data) >= 3:
+            try:
+                r = spc_charts.imr_chart(data)
+                ooc = sum(r.get('ooc_points', {}).values()) if isinstance(r.get('ooc_points'), dict) else 0
+                spc_results.append({
+                    '列名': col,
+                    '均值': np.mean(data),
+                    '标准差': np.std(data, ddof=1),
+                    '超限点数': ooc,
+                    '受控状态': '✅ 受控' if ooc == 0 else f'⚠️ {ooc}个超限点',
+                })
+            except Exception:
+                pass
+    return spc_results
+
+
+def _analyze_capability_only(df: pd.DataFrame, numeric_cols: list = None) -> list:
+    """仅执行过程能力分析"""
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    cap_results = []
+    for col in numeric_cols:
+        data = df[col].dropna().values
+        if len(data) >= 5:
+            try:
+                usl = np.mean(data) + 3 * np.std(data, ddof=1)
+                lsl = np.mean(data) - 3 * np.std(data, ddof=1)
+                r = capability.process_capability(data, usl=usl, lsl=lsl, subgroup_size=1)
+                cap_results.append({
+                    '列名': col,
+                    'Cp': f"{r.get('Cp', 0):.2f}" if r.get('Cp') else 'N/A',
+                    'Cpk': f"{r.get('Cpk', 0):.2f}" if r.get('Cpk') else 'N/A',
+                    'Pp': f"{r.get('Pp', 0):.2f}" if r.get('Pp') else 'N/A',
+                    'Ppk': f"{r.get('Ppk', 0):.2f}" if r.get('Ppk') else 'N/A',
+                    'Cpk评级': r.get('cpk_level', 'N/A'),
+                })
+            except Exception:
+                pass
+    return cap_results
+
+
+def _analyze_correlation_only(df: pd.DataFrame, numeric_cols: list = None) -> Optional[dict]:
+    """仅执行相关性矩阵"""
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    if len(numeric_cols) >= 2:
+        try:
+            return stats_tools.correlation_matrix(df[numeric_cols])
+        except Exception:
+            pass
+    return None
+
+
+def _analyze_regression_only(df: pd.DataFrame, numeric_cols: list = None) -> list:
+    """仅执行回归分析"""
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    reg_results = []
+    if len(numeric_cols) >= 2:
+        for i, xc in enumerate(numeric_cols):
+            for yc in numeric_cols[i+1:]:
+                x = df[xc].dropna().values
+                y = df[yc].dropna().values
+                ml = min(len(x), len(y))
+                if ml >= 5:
+                    try:
+                        from scipy import stats
+                        r_val, p_val = stats.pearsonr(x[:ml], y[:ml])
+                        if p_val < 0.05:
+                            reg_results.append({
+                                'X变量': xc,
+                                'Y变量': yc,
+                                'Pearson r': f'{r_val:.4f}',
+                                'p值': f'{p_val:.4f}',
+                                '显著性': '✓ 显著',
+                            })
+                    except Exception:
+                        pass
+        reg_results = sorted(reg_results, key=lambda x: abs(float(x['Pearson r'])), reverse=True)[:10]
+    return reg_results
+
+
+def _analyze_normality(df: pd.DataFrame, numeric_cols: list = None) -> list:
+    """正态性检验"""
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    results = []
+    for col in numeric_cols:
+        data = df[col].dropna().values
+        if len(data) >= 8:
+            try:
+                r = pareto_histogram.normality_test(data)
+                # 取最常用的 Shapiro-Wilk 结果
+                sw = r.get('Shapiro-Wilk', {})
+                results.append({
+                    '列名': col,
+                    '样本量': len(data),
+                    'Shapiro-Wilk p值': f"{sw.get('p_value', 0):.4f}",
+                    '正态性': '✅ 正态' if sw.get('normal', True) else '❌ 非正态',
+                })
+            except Exception:
+                pass
+    return results
+
+
+def _analyze_boxplot(df: pd.DataFrame, numeric_cols: list = None) -> dict:
+    """箱线图"""
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    charts = {}
+    for col in numeric_cols:
+        data = df[col].dropna().values
+        if len(data) >= 5:
+            try:
+                r = pareto_histogram.box_plot(data, title=col)
+                if 'chart' in r:
+                    charts[col] = r['chart']
+            except Exception:
+                pass
+    return {'charts': charts, 'columns': numeric_cols}
+
+
+def _analyze_runchart(df: pd.DataFrame, numeric_cols: list = None) -> list:
+    """运行图"""
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    results = []
+    for col in numeric_cols:
+        data = df[col].dropna().values
+        if len(data) >= 5:
+            try:
+                r = quality_tools.run_chart(data)
+                stats = r.get('stats', {})
+                results.append({
+                    '列名': col,
+                    '均值': f"{stats.get('均值', 0):.4f}",
+                    '中位数': f"{stats.get('中位数', 0):.4f}",
+                    '游程检验': stats.get('游程检验结论', 'N/A'),
+                    '趋势检验': stats.get('趋势检验结论', 'N/A'),
+                })
+            except Exception:
+                pass
+    return results
+
+
+def _analyze_stats_summary(df: pd.DataFrame, numeric_cols: list = None) -> list:
+    """描述性统计"""
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    results = []
+    for col in numeric_cols:
+        data = df[col].dropna().values
+        if len(data) >= 2:
+            from scipy import stats as sp_stats
+            results.append({
+                '列名': col,
+                '样本量': len(data),
+                '均值': f'{np.mean(data):.4f}',
+                '标准差': f'{np.std(data, ddof=1):.4f}',
+                '最小值': f'{np.min(data):.4f}',
+                '中位数': f'{np.median(data):.4f}',
+                '最大值': f'{np.max(data):.4f}',
+                '偏度': f'{sp_stats.skew(data):.4f}',
+                '峰度': f'{sp_stats.kurtosis(data):.4f}',
+            })
+    return results
+
+
+def analyze_process_selective(df: pd.DataFrame, data_label: str = '',
+                               modules: Optional[List[str]] = None,
+                               cols: Optional[List[str]] = None) -> dict:
     """
-    对单个 DataFrame 执行指定类型的分析。
-    可用于手动指定类型（覆盖自动识别）。
+    通用连续型数据 — 按模块选择性分析。
+    支持模块: spc, capability, correlation, regression,
+             normality, boxplot, run_chart, stats_summary
+    cols: 指定要分析的数值列，None=全部数值列
+    """
+    if modules is None:
+        modules = list(CONTINUOUS_MODULES.keys())
+
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    if cols:
+        numeric_cols = [c for c in cols if c in numeric_cols]
+    if not numeric_cols:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+
+    results = {}
+
+    # 原有4个模块
+    if 'spc' in modules:
+        results['spc'] = _analyze_spc_only(df, numeric_cols)
+    if 'capability' in modules:
+        results['capability'] = _analyze_capability_only(df, numeric_cols)
+    if 'correlation' in modules:
+        results['correlation'] = _analyze_correlation_only(df, numeric_cols)
+    if 'regression' in modules:
+        results['regression'] = _analyze_regression_only(df, numeric_cols)
+
+    # 新增模块
+    if 'normality' in modules:
+        results['normality'] = _analyze_normality(df, numeric_cols)
+    if 'boxplot' in modules:
+        results['boxplot'] = _analyze_boxplot(df, numeric_cols)
+    if 'run_chart' in modules:
+        results['run_chart'] = _analyze_runchart(df, numeric_cols)
+    if 'stats_summary' in modules:
+        results['stats_summary'] = _analyze_stats_summary(df, numeric_cols)
+
+    spc_results = results.get('spc', [])
+    reg_results = results.get('regression', [])
+    normality_results = results.get('normality', [])
+
+    return {
+        'type': 'continuous',
+        'label': data_label,
+        'numeric_cols': numeric_cols,
+        'results': results,
+        'modules_selected': modules,
+        'summary': {
+            '数据行数': len(df),
+            '数值列数': len(numeric_cols),
+            'SPC受控列数': sum(1 for s in spc_results if '受控' in s.get('受控状态', '')),
+            'SPC异常列数': sum(1 for s in spc_results if '超限' in s.get('受控状态', '')),
+            '显著相关对数': len(reg_results),
+            '正态列数': sum(1 for n in normality_results if '✅' in n.get('正态性', '')),
+        }
+    }
+
+
+def run_single_analysis(df: pd.DataFrame, data_type: str,
+                        grr_tolerance: Optional[float] = None,
+                        modules: Optional[List[str]] = None,
+                        params: Optional[dict] = None) -> dict:
+    """
+    对单个 DataFrame 执行指定类型的分析（纯手动）。
 
     参数:
         df: 数据 DataFrame
-        data_type: 类型代码 ('pareto'/'grr'/'component'/'mechanics'/'dimension'/'continuous')
-        grr_tolerance: GRR公差 (可选)
+        data_type: 类型代码
+        grr_tolerance: GRR公差
+        modules: 连续数据类型的分析模块列表 (可选，默认全部)
+        params: 额外参数字典，如 {'cat_col':'不良类型','cnt_col':'数量',
+               'part_col':'Part','op_col':'Operator','meas_col':'Measurement',
+               'cols':['Si','Mg'],'batch_col':'批次','meas_cols':['测量值1','测量值2']}
 
     返回:
         分析结果 dict
     """
+    params = params or {}
     if data_type == 'pareto':
-        return analyze_pareto(df)
+        return analyze_pareto(df,
+                              cat_col=params.get('cat_col'),
+                              cnt_col=params.get('cnt_col'))
     elif data_type == 'grr':
-        return analyze_grr(df, grr_tolerance)
+        return analyze_grr(df, grr_tolerance,
+                           part_col=params.get('part_col'),
+                           op_col=params.get('op_col'),
+                           meas_col=params.get('meas_col'))
     elif data_type == 'component':
-        r = analyze_process_continuous(df, '化学成分')
+        r = analyze_process_selective(df, '化学成分', modules, cols=params.get('cols'))
         r['type'] = 'component'
         return r
     elif data_type == 'mechanics':
-        r = analyze_process_continuous(df, '力学性能')
+        r = analyze_process_selective(df, '力学性能', modules, cols=params.get('cols'))
         r['type'] = 'mechanics'
         return r
     elif data_type == 'dimension':
-        return analyze_dimension(df)
+        return analyze_dimension(df,
+                                 batch_col=params.get('batch_col'),
+                                 meas_cols=params.get('meas_cols'))
     else:
-        r = analyze_process_continuous(df, '通用')
+        r = analyze_process_selective(df, '通用', modules, cols=params.get('cols'))
         r['type'] = 'continuous'
         return r
 
@@ -741,30 +1065,33 @@ def run_single_analysis(df: pd.DataFrame, data_type: str,
 def batch_import_and_analyze(
     uploaded_files: list,
     grr_tolerance: Optional[float] = None,
-    type_overrides: Optional[Dict[str, str]] = None,
+    type_mapping: Optional[Dict[str, str]] = None,
+    module_selections: Optional[Dict[str, List[str]]] = None,
+    params_map: Optional[Dict[str, dict]] = None,
 ) -> Tuple[Dict[str, pd.DataFrame], List[dict], str]:
     """
-    批量导入多个CSV文件并自动分析。
+    批量导入多个CSV文件并按选中的模块分析。
 
     参数:
         uploaded_files: Streamlit UploadedFile 对象列表
-        grr_tolerance: GRR分析的公差值 (可选)
-        type_overrides: 手动类型覆盖 {文件名: 类型代码} (可选)
-                        用于覆盖自动识别结果
+        grr_tolerance: GRR分析的公差值
+        type_mapping: （向后兼容，新模式下可省略）{文件名: 类型代码}
+        module_selections: {文件名: [模块key列表]}  — 每个文件选中的模块
+        params_map: {文件名: {参数字典}}  — 各文件的分析参数
 
     返回:
-        (数据字典 {文件名: DataFrame}, 分析结果列表, 报告字符串)
+        (数据字典, 分析结果列表, 报告字符串)
     """
-    if type_overrides is None:
-        type_overrides = {}
+    if module_selections is None:
+        module_selections = {}
+    if params_map is None:
+        params_map = {}
 
     data_dict = {}
     analyses = []
-    filenames = []
 
     for uploaded_file in uploaded_files:
         fname = uploaded_file.name
-        filenames.append(fname)
 
         # 解析 CSV
         raw_bytes = uploaded_file.getvalue()
@@ -782,32 +1109,73 @@ def batch_import_and_analyze(
 
         data_dict[fname] = df
 
-        # 确定最终使用的数据类型：手动覆盖 > 自动识别
-        if fname in type_overrides:
-            dtype = type_overrides[fname]
-            confidence = 1.0  # 手动指定 = 100% 置信
-            auto_detected = detect_data_type(df, fname)[0]
-        else:
-            dtype, confidence = detect_data_type(df, fname)
-            auto_detected = dtype
+        # 获取选中的模块
+        modules = module_selections.get(fname, [])
+        # 向后兼容：如果提供了 type_mapping 但没有 module_selections
+        if not modules and type_mapping and fname in type_mapping:
+            dtype = type_mapping[fname]
+            if dtype in ('component', 'mechanics', 'continuous'):
+                modules = list(CONTINUOUS_MODULES.keys())
+            else:
+                modules = [dtype]
 
-        # 执行对应分析
-        try:
-            analysis = run_single_analysis(df, dtype, grr_tolerance)
-            analysis['filename'] = fname
-            analysis['detection_confidence'] = confidence
-            analysis['detected_type'] = auto_detected
-            analysis['manual_override'] = fname in type_overrides
-            analyses.append(analysis)
-
-        except Exception as e:
+        if not modules:
             analyses.append({
                 'type': 'error',
                 'filename': fname,
-                'error': f'分析失败: {str(e)}',
-                'detected_type': auto_detected if 'auto_detected' in dir() else dtype,
-                'detection_confidence': confidence if 'confidence' in dir() else 0,
+                'error': f'未选择任何分析模块，请为「{fname}」勾选模块',
             })
+            continue
+
+        params = params_map.get(fname, {})
+
+        # 分组：standalone 和 continuous
+        standalone_mods = [m for m in modules if ALL_MODULES.get(m, {}).get('group') == 'standalone']
+        continuous_mods = [m for m in modules if ALL_MODULES.get(m, {}).get('group') == 'continuous']
+
+        # ---- standalone 模块各自分析 ----
+        for mod in standalone_mods:
+            try:
+                if mod == 'pareto':
+                    analysis = analyze_pareto(df,
+                        cat_col=params.get('cat_col'),
+                        cnt_col=params.get('cnt_col'))
+                elif mod == 'grr':
+                    analysis = analyze_grr(df, grr_tolerance,
+                        part_col=params.get('part_col'),
+                        op_col=params.get('op_col'),
+                        meas_col=params.get('meas_col'))
+                elif mod == 'dimension':
+                    analysis = analyze_dimension(df,
+                        batch_col=params.get('batch_col'),
+                        meas_cols=params.get('meas_cols'))
+                else:
+                    continue
+                analysis['filename'] = fname
+                analysis['module'] = mod
+                analysis['data_type'] = mod
+                analyses.append(analysis)
+            except Exception as e:
+                analyses.append({
+                    'type': 'error',
+                    'filename': fname,
+                    'error': f'分析模块 {ALL_MODULES.get(mod,{}).get("label",mod)} 失败: {str(e)}',
+                })
+
+        # ---- continuous 模块合并分析 ----
+        if continuous_mods:
+            try:
+                analysis = analyze_process_selective(df, '数值分析', continuous_mods, cols=params.get('cols'))
+                analysis['filename'] = fname
+                analysis['module'] = 'continuous'
+                analysis['data_type'] = 'continuous'
+                analyses.append(analysis)
+            except Exception as e:
+                analyses.append({
+                    'type': 'error',
+                    'filename': fname,
+                    'error': f'连续数据分析失败: {str(e)}',
+                })
 
     # 生成报告
     valid_analyses = [a for a in analyses if a.get('type') != 'error']
@@ -817,26 +1185,34 @@ def batch_import_and_analyze(
     return data_dict, analyses, report
 
 
-def build_files_data(uploaded_files: list, type_mapping: Dict[str, str]) -> list:
+def build_files_data(uploaded_files: list, type_mapping: Optional[Dict[str, str]] = None,
+                     module_selections: Optional[Dict[str, List[str]]] = None,
+                     params_map: Optional[Dict[str, dict]] = None) -> list:
     """
-    将上传的 CSV 原始数据打包为可存储格式。
-    用于保存到数据库以便后续重新加载分析。
-
-    参数:
-        uploaded_files: Streamlit UploadedFile 对象列表
-        type_mapping: {文件名: 数据类型代码}
-
-    返回:
-        [{filename, csv_data, data_type}, ...]
+    将上传的 CSV 原始数据打包为可存储格式（含模块和参数信息）。
     """
+    if type_mapping is None:
+        type_mapping = {}
+    if module_selections is None:
+        module_selections = {}
+    if params_map is None:
+        params_map = {}
     files_data = []
     for uf in uploaded_files:
         raw_bytes = uf.getvalue()
-        csv_str = raw_bytes.decode('utf-8-sig') or raw_bytes.decode('utf-8') or raw_bytes.decode('gbk', errors='replace')
+        try:
+            csv_str = raw_bytes.decode('utf-8-sig')
+        except UnicodeDecodeError:
+            try:
+                csv_str = raw_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                csv_str = raw_bytes.decode('gbk', errors='replace')
         files_data.append({
             'filename': uf.name,
             'csv_data': csv_str,
-            'data_type': type_mapping.get(uf.name, 'unknown'),
+            'data_type': type_mapping.get(uf.name, ''),
+            'modules': module_selections.get(uf.name, []),
+            'params': params_map.get(uf.name, {}),
         })
     return files_data
 
@@ -844,9 +1220,6 @@ def build_files_data(uploaded_files: list, type_mapping: Dict[str, str]) -> list
 def build_analyses_summary(analyses: List[dict]) -> list:
     """
     从分析结果中提取摘要（排除不可序列化的图表对象），用于存储。
-
-    返回:
-        [{filename, type, summary, detected_type, manual_override}, ...]
     """
     summary_list = []
     for a in analyses:
@@ -854,8 +1227,8 @@ def build_analyses_summary(analyses: List[dict]) -> list:
             'filename': a.get('filename', ''),
             'type': a.get('type', 'unknown'),
             'summary': a.get('summary', {}),
-            'detected_type': a.get('detected_type', ''),
-            'manual_override': a.get('manual_override', False),
+            'data_type': a.get('data_type', ''),
+            'modules_selected': a.get('modules_selected', []),
         })
     return summary_list
 
@@ -864,13 +1237,7 @@ def restore_analyses_from_files(files_data: list,
                                 grr_tolerance: Optional[float] = None) -> Tuple[Dict[str, pd.DataFrame], List[dict]]:
     """
     从数据库加载的文件数据重新执行分析（恢复完整分析结果含图表）。
-
-    参数:
-        files_data: [{filename, csv_data, data_type}, ...]
-        grr_tolerance: GRR公差
-
-    返回:
-        (数据字典, 分析结果列表)
+    支持新的模块化分析模式。
     """
     data_dict = {}
     analyses = []
@@ -878,7 +1245,9 @@ def restore_analyses_from_files(files_data: list,
     for fd in files_data:
         fname = fd.get('filename', 'unknown.csv')
         csv_str = fd.get('csv_data', '')
-        data_type = fd.get('data_type', 'continuous')
+        modules = fd.get('modules', [])
+        params = fd.get('params', {})
+        data_type = fd.get('data_type', '')
 
         if not csv_str:
             continue
@@ -891,18 +1260,69 @@ def restore_analyses_from_files(files_data: list,
 
         data_dict[fname] = df
 
-        try:
-            analysis = run_single_analysis(df, data_type, grr_tolerance)
-            analysis['filename'] = fname
-            analysis['detected_type'] = data_type
-            analysis['manual_override'] = True  # 从数据库恢复的，类型来自存储
-            analysis['detection_confidence'] = 1.0
-            analyses.append(analysis)
-        except Exception as e:
+        # 向后兼容：如果 modules 为空但有 data_type，推导模块
+        if not modules and data_type:
+            if data_type in ('component', 'mechanics', 'continuous'):
+                modules = list(CONTINUOUS_MODULES.keys())
+            else:
+                modules = [data_type]
+            # 也把 data_type 当作模块来处理（适用于 pareto/grr/dimension）
+            if data_type in ('component', 'mechanics'):
+                # 用 continuous 模块替代
+                modules = list(CONTINUOUS_MODULES.keys())
+
+        if not modules:
             analyses.append({
                 'type': 'error',
                 'filename': fname,
-                'error': f'重新分析失败: {str(e)}',
+                'error': '没有可恢复的分析模块',
             })
+            continue
+
+        # 分组
+        standalone_mods = [m for m in modules if ALL_MODULES.get(m, {}).get('group') == 'standalone']
+        continuous_mods = [m for m in modules if ALL_MODULES.get(m, {}).get('group') == 'continuous']
+
+        for mod in standalone_mods:
+            try:
+                if mod == 'pareto':
+                    analysis = analyze_pareto(df,
+                        cat_col=params.get('cat_col'),
+                        cnt_col=params.get('cnt_col'))
+                elif mod == 'grr':
+                    analysis = analyze_grr(df, grr_tolerance,
+                        part_col=params.get('part_col'),
+                        op_col=params.get('op_col'),
+                        meas_col=params.get('meas_col'))
+                elif mod == 'dimension':
+                    analysis = analyze_dimension(df,
+                        batch_col=params.get('batch_col'),
+                        meas_cols=params.get('meas_cols'))
+                else:
+                    continue
+                analysis['filename'] = fname
+                analysis['module'] = mod
+                analysis['data_type'] = mod
+                analyses.append(analysis)
+            except Exception as e:
+                analyses.append({
+                    'type': 'error',
+                    'filename': fname,
+                    'error': f'重新分析失败 ({mod}): {str(e)}',
+                })
+
+        if continuous_mods:
+            try:
+                analysis = analyze_process_selective(df, '数值分析', continuous_mods, cols=params.get('cols'))
+                analysis['filename'] = fname
+                analysis['module'] = 'continuous'
+                analysis['data_type'] = 'continuous'
+                analyses.append(analysis)
+            except Exception as e:
+                analyses.append({
+                    'type': 'error',
+                    'filename': fname,
+                    'error': f'重新分析失败 (连续数据): {str(e)}',
+                })
 
     return data_dict, analyses
