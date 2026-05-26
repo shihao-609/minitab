@@ -2843,7 +2843,7 @@ def page_batch_analysis():
                     st.caption(f'包含 {fcount} 个文件: {"; ".join(summary_parts[:3])}'
                               f'{"..." if len(summary_parts) > 3 else ""}')
 
-                    c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+                    c1, c2, c3 = st.columns([1, 1, 1])
                     with c1:
                         if st.button('📖 查看报告', key=f'view_{rid}', use_container_width=True):
                             with st.spinner('加载报告...'):
@@ -2884,30 +2884,6 @@ def page_batch_analysis():
                                 st.session_state.pop('viewed_report', None)
                                 st.success('已删除')
                                 st.rerun()
-                    with c4:
-                        if analyses_summary and isinstance(analyses_summary, list) and len(analyses_summary) > 0:
-                            first_type = analyses_summary[0].get('data_type', analyses_summary[0].get('type', ''))
-                            recommended = TYPE_MODULE_MAP.get(first_type, [])
-                            if recommended:
-                                mod_name = recommended[0][0]
-                                if st.button(f'🚀 {mod_name}', key=f'nav_{rid}', use_container_width=True,
-                                            help='加载数据并跳转到对应模块'):
-                                    full_rpt = supabase_helper.load_report(rid)
-                                    if full_rpt:
-                                        files_data = full_rpt.get('files_data', [])
-                                        if isinstance(files_data, str):
-                                            import json
-                                            files_data = json.loads(files_data)
-                                        if files_data:
-                                            from io import StringIO
-                                            csv_str = files_data[0].get('csv_data', '')
-                                            try:
-                                                df = pd.read_csv(StringIO(csv_str))
-                                                set_new_data(df)
-                                                st.success(f'✅ 数据已加载！请在左侧侧边栏选择「{mod_name}」模块进行深度分析')
-                                                st.info(f'👈 左侧菜单 → {mod_name}')
-                                            except Exception:
-                                                pass
 
             st.divider()
 
