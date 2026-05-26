@@ -2535,44 +2535,7 @@ def page_batch_analysis():
             st.subheader('🔧 分析模块设置')
             st.caption('👇 按分析类型分组勾选模块，展开参数设置可调整每个模块的详细配置')
 
-            # ---- 🚀 跳转分析模块（导航式弹窗，点击即加载数据并跳转） ----
-            c_nav, c_spacer = st.columns([1, 4])
-            with c_nav:
-                if st.button('🚀 跳转分析模块', type='primary', use_container_width=True,
-                             key='batch_module_nav_btn',
-                             help='选择模块后自动加载数据并跳转到该模块页面'):
-                    st.session_state['_batch_nav_dialog_open'] = True
 
-            if st.session_state.get('_batch_nav_dialog_open'):
-
-                @st.dialog('🚀 选择要跳转的分析模块', width='large')
-                def _nav_picker_dialog():
-                    st.caption('数据已自动加载到工作区，点击「进入 →」后开始分析')
-                    selected = batch_analysis.render_module_nav(session_key_prefix='batch_nav')
-                    if selected:
-                        MENU_MAP = {
-                            'spc':           '📈 SPC 控制图',
-                            'capability':    '🎯 过程能力分析',
-                            'quality_tools': '📊 质量图形工具',
-                            'msa':           '🔬 测量系统分析 MSA',
-                            'stats':         '🔢 统计推断',
-                            'advanced':      '🧪 高级分析',
-                        }
-                        target_menu = MENU_MAP.get(selected)
-                        if target_menu:
-                            st.session_state._pending_menu = target_menu
-                            st.session_state.pop('_batch_nav_dialog_open', None)
-
-                _nav_picker_dialog()
-                # 处理待跳转的菜单
-                if '_pending_menu' in st.session_state:
-                    target = st.session_state.pop('_pending_menu')
-                    # 从原始副本加载数据（保证每次跳转都是干净的原始数据）
-                    original = st.session_state.get('_upload_original')
-                    if original is not None:
-                        set_new_data(original.copy())
-                    st.session_state.menu = target
-                    st.rerun()
             # ---- 全局参数（所有文件共用） ----
             with st.expander('⚙️ 全局默认参数', expanded=False):
                 gc1, gc2, gc3, gc4 = st.columns(4)
@@ -2617,9 +2580,7 @@ def page_batch_analysis():
                     'df_preview': df_preview,
                 }
 
-                # ★ 保存第一个有效文件的原始数据，供「跳转分析模块」时加载
-                if '_upload_original' not in st.session_state:
-                    st.session_state._upload_original = df_preview.copy()
+
 
                 # ---- 文件信息 + 当前配置摘要 + 配置按钮 ----
                 with st.container(border=True):
