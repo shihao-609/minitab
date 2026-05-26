@@ -9,13 +9,19 @@ from plotly.subplots import make_subplots
 
 # ==================== MSA Type 1 — Cg / Cgk ====================
 
-def cg_cgk(data, tolerance, ref_value=None, n_trials=None):
+def cg_cgk(data, tolerance, ref_value=None, n_trials=None, percent_tol=20):
     """
     MSA Type 1 检具能力指数
+
     - data: 重复测量值
     - tolerance: 公差 (USL - LSL)
     - ref_value: 参考值/标准值（如未提供则用数据均值）
     - n_trials: 重复次数（如未提供则按全部）
+    - percent_tol: 容差百分比 (默认 20 = VDA 5 标准, 100 = 完整公差)
+
+    公式:
+        Cg  = (percent_tol% × T) / (6 × s)
+        Cgk = (percent_tol%/2 × T - |bias|) / (3 × s)
     """
     data = np.array(data, dtype=float)
     data = data[~np.isnan(data)]
@@ -29,12 +35,15 @@ def cg_cgk(data, tolerance, ref_value=None, n_trials=None):
     if ref_value is None:
         ref_value = mean_val
 
-    # Cg: 检具能力指数，使用 0.2T 作为能力范围
-    Cap = 0.2 * tolerance
+    # 能力范围 = percent_tol% × 公差
+    pct = percent_tol / 100.0
+    Cap = pct * tolerance
+
+    # Cg: 检具能力指数 (精度)
     Cg = Cap / (6 * std_val) if std_val > 0 else np.inf
-    # Cgk: 检具能力+位置指数，使用 0.1T 扣除偏倚（VDA 5 / ISO 22514-7）
+    # Cgk: 检具能力+位置指数 (精度 + 准确度)
     bias = abs(mean_val - ref_value)
-    Cgk = (0.1 * tolerance - bias) / (3 * std_val) if std_val > 0 else np.inf
+    Cgk = (pct * 0.5 * tolerance - bias) / (3 * std_val) if std_val > 0 else np.inf
 
     # 评估
     def evaluate(val):
@@ -88,7 +97,7 @@ def cg_cgk(data, tolerance, ref_value=None, n_trials=None):
             '标准差 σ': f'{std_val:.5f}',
             '参考值': f'{ref_value:.5f}',
             '公差 T': f'{tolerance:.5f}',
-            '能力范围 0.2T': f'{Cap:.5f}',
+            f'能力范围 {percent_tol}%T': f'{Cap:.5f}',
             '偏倚': f'{bias:.5f}',
             '偏倚占比': f'{bias_pct:.2f}%',
         }

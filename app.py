@@ -918,18 +918,21 @@ def page_capability():
         st.caption('MSA Type 1 — 检具能力指数评估')
         dc = st.selectbox('重复测量列', numeric_cols, key='cg_col')
         data = df[dc].dropna().values
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         with c1:
             tol = st.text_input('公差 T = USL - LSL', value='', key='cg_tol',
                                 placeholder='例: 0.1')
         with c2:
             ref_val = st.text_input('参考值 (标准值)', value='', key='cg_ref',
                                     placeholder='留空=用数据均值')
+        with c3:
+            pct = st.selectbox('容差百分比', [20, 100], index=0, key='cg_pct',
+                               help='20% = VDA 5 标准, 100% = 完整公差法')
 
         if tol:
             tolerance = float(tol)
             ref = float(ref_val) if ref_val else None
-            r = msa_advanced.cg_cgk(data, tolerance, ref)
+            r = msa_advanced.cg_cgk(data, tolerance, ref, percent_tol=pct)
             if 'error' in r:
                 st.error(r['error'])
             else:
