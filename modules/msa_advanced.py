@@ -29,11 +29,12 @@ def cg_cgk(data, tolerance, ref_value=None, n_trials=None):
     if ref_value is None:
         ref_value = mean_val
 
-    # 使用 0.2 * tolerance 作为能力范围
+    # Cg: 检具能力指数，使用 0.2T 作为能力范围
     Cap = 0.2 * tolerance
     Cg = Cap / (6 * std_val) if std_val > 0 else np.inf
-    Cgk_num = Cap - abs(mean_val - ref_value)
-    Cgk = Cgk_num / (3 * std_val) if std_val > 0 else np.inf
+    # Cgk: 检具能力+位置指数，使用 0.1T 扣除偏倚（VDA 5 / ISO 22514-7）
+    bias = abs(mean_val - ref_value)
+    Cgk = (0.1 * tolerance - bias) / (3 * std_val) if std_val > 0 else np.inf
 
     # 评估
     def evaluate(val):
@@ -65,7 +66,6 @@ def cg_cgk(data, tolerance, ref_value=None, n_trials=None):
     fig.add_hline(y=mean_val - 3*std_val, line_dash='dot', line_color='orange', row=1, col=1)
 
     # 偏倚分析柱状图
-    bias = abs(mean_val - ref_value)
     bias_pct = (bias / tolerance * 100) if tolerance > 0 else 0
     fig.add_trace(go.Bar(x=['偏倚'], y=[bias], name='偏倚',
                          marker=dict(color='#d62728'), text=[f'{bias:.5f}'], textposition='outside'), row=1, col=2)
@@ -127,14 +127,14 @@ def attribute_gage_rr(reference, appraisers, n_trials=2):
         match = (dec_aligned == ref_aligned)
         accuracy = np.mean(match)
 
-        # 自动检测实际试验次数
-        actual_trials = min_len // n_parts if n_parts > 0 and min_len >= n_parts else 1
-        actual_n_parts = min_len // actual_trials if actual_trials > 0 else min_len
+        # 使用 n_trials 参数或从数据长度推断实际试验次数
+        actual_trials = n_trials if n_trials and len(dec) >= n_parts * n_trials else max(1, len(dec) // n_parts)
+        actual_n_parts = min(n_parts, len(dec) // actual_trials)
         all_trials.append(actual_trials)
 
         # 自身一致性（各次试验之间，仅当有多次试验时）
-        if actual_trials > 1 and actual_n_parts * actual_trials <= len(dec_aligned):
-            trial_cols = dec_aligned[:actual_n_parts * actual_trials].reshape(actual_n_parts, actual_trials)
+        if actual_trials > 1 and actual_n_parts * actual_trials <= len(dec):
+            trial_cols = dec[:actual_n_parts * actual_trials].reshape(actual_n_parts, actual_trials)
             self_match = np.all(trial_cols == trial_cols[:, [0]], axis=1)
             self_consistent = np.mean(self_match)
         else:

@@ -6,12 +6,28 @@ from scipy import stats
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+# d2 常数表（用于将子组极差转换为组内标准差估计）
+D2_CONSTANTS = {
+    1:  1.128,   # 单值用移动极差，等同于 n=2 的 d2
+    2:  1.128,
+    3:  1.693,
+    4:  2.059,
+    5:  2.326,
+    6:  2.534,
+    7:  2.704,
+    8:  2.847,
+    9:  2.970,
+    10: 3.078,
+}
 
-def process_capability(data, usl=None, lsl=None, target=None):
+
+def process_capability(data, usl=None, lsl=None, target=None, subgroup_size=1):
     """
     过程能力分析
     - Cp/Cpk: 短期能力指数（基于组内变异）
     - Pp/Ppk: 长期能力指数（基于整体变异）
+
+    subgroup_size: 子组大小，1 表示单值（使用移动极差法），>1 使用子组极差法
     """
     data = np.array(data, dtype=float)
     data = data[~np.isnan(data)]
@@ -22,11 +38,11 @@ def process_capability(data, usl=None, lsl=None, target=None):
 
     mean = np.mean(data)
     std_overall = np.std(data, ddof=1)  # 整体标准差 (长期)
-    std_within = estimate_within_sigma(data)  # 组内标准差估计 (短期)
+    std_within = estimate_within_sigma(data, subgroup_size)  # 组内标准差估计 (短期)
 
     # 存储原始结果
     raw_results = {'mean': mean, 'std_overall': std_overall, 'std_within': std_within,
-                   'n': n, 'data': data}
+                   'n': n, 'data': data, 'subgroup_size': subgroup_size}
 
     if usl is None and lsl is None:
         raw_results['error'] = '请至少提供一个规格限 (USL 或 LSL)'
@@ -103,21 +119,47 @@ def process_capability(data, usl=None, lsl=None, target=None):
         'usl': usl, 'lsl': lsl, 'target': target,
         'cpk_level': evaluate_score(Cpk),
         'ppk_level': evaluate_score(Ppk),
-        'chart': capability_chart(data, mean, std_overall, std_within, usl, lsl, target),
+        'chart': capability_chart(data, mean, std_overall, std_within, usl, lsl, target, subgroup_size),
     }
     return results
 
 
-def estimate_within_sigma(data):
-    """使用移动极差法估计组内标准差"""
+def estimate_within_sigma(data, subgroup_size=1):
+    """
+    估计组内标准差（短期变异）
+
+    - subgroup_size == 1: 单值数据，使用移动极差法（MR̄ / d₂，d₂=1.128 for n=2）
+    - subgroup_size > 1:  有子组结构，使用子组极差法（R̄ / d₂(n)）
+                          仅在子组内计算极差，子组间变异不纳入组内估计
+    """
     if len(data) < 2:
         return np.std(data, ddof=1)
-    mr = np.abs(np.diff(data))
-    mr_bar = np.mean(mr)
-    return mr_bar / 1.128  # d2 for n=2
+
+    if subgroup_size <= 1:
+        # 单值数据：移动极差法（等同于 I-MR 控制图的方法）
+        mr = np.abs(np.diff(data))
+        mr_bar = np.mean(mr)
+        return mr_bar / 1.128  # d2 for n=2
+    else:
+        # 有子组结构：子组极差法
+        n = len(data)
+        n_subgroups = n // subgroup_size
+        if n_subgroups < 2:
+            # 数据不足以形成至少2个子组，回退到移动极差法
+            mr = np.abs(np.diff(data))
+            mr_bar = np.mean(mr)
+            return mr_bar / 1.128
+        # 截断多余数据，保证完整子组
+        data_trimmed = data[:n_subgroups * subgroup_size]
+        subgroups = data_trimmed.reshape(n_subgroups, subgroup_size)
+        # 每个子组内计算极差
+        R = np.ptp(subgroups, axis=1)
+        R_bar = np.mean(R)
+        d2 = D2_CONSTANTS.get(subgroup_size, 2.326)  # 默认 d2 for n=5
+        return R_bar / d2
 
 
-def capability_chart(data, mean, std_overall, std_within, usl, lsl, target):
+def capability_chart(data, mean, std_overall, std_within, usl, lsl, target, subgroup_size=1):
     """绘制过程能力图"""
     fig = make_subplots(
         rows=2, cols=1,
@@ -134,11 +176,13 @@ def capability_chart(data, mean, std_overall, std_within, usl, lsl, target):
                                histnorm='probability density', name='数据分布',
                                marker=dict(color='#4472C4', opacity=0.6)), row=1, col=1)
     fig.add_trace(go.Scatter(x=x_range, y=normal_fit, mode='lines',
-                             name=f'正态拟合 (σ={std_overall:.4f})',
+                             name=f'正态拟合 (整体 σ_overall={std_overall:.4f})',
                              line=dict(color='red', width=2)), row=1, col=1)
+    # 组内变异拟合线
+    method_label = f'子组极差法' if subgroup_size > 1 else f'移动极差法'
     fig.add_trace(go.Scatter(x=x_range, y=stats.norm.pdf(x_range, mean, std_within),
                              mode='lines',
-                             name=f'组内变异 (σ={std_within:.4f})',
+                             name=f'组内变异 ({method_label}, σ_within={std_within:.4f})',
                              line=dict(color='#2ca02c', width=2, dash='dash')), row=1, col=1)
 
     # 规格限线

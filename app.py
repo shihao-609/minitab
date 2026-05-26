@@ -801,13 +801,16 @@ def page_capability():
         if len(data) < 2:
             st.error('至少需要 2 个数据点')
         else:
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns(4)
             with c1:
                 usl = st.text_input('规格上限 USL', placeholder='留空=不设')
             with c2:
                 lsl = st.text_input('规格下限 LSL', placeholder='留空=不设')
             with c3:
                 tgt = st.text_input('目标值', placeholder='留空=不设')
+            with c4:
+                ss = st.number_input('子组大小', 1, 10, 1,
+                                     help='1=单值(移动极差法), >1=子组极差法')
 
             usl = float(usl) if usl else None
             lsl = float(lsl) if lsl else None
@@ -818,7 +821,7 @@ def page_capability():
             elif usl is not None and lsl is not None and usl <= lsl:
                 st.error('USL 必须大于 LSL')
             else:
-                r = capability.process_capability(data, usl, lsl, tgt)
+                r = capability.process_capability(data, usl, lsl, tgt, ss)
                 if 'error' in r:
                     st.error(r['error'])
                 else:
@@ -834,8 +837,9 @@ def page_capability():
                     cs2 = st.columns(4)
                     with cs2[0]: st.metric('均值', f'{r["mean"]:.4f}')
                     with cs2[1]: st.metric('整体 σ', f'{r["std_overall"]:.4f}')
-                    with cs2[2]: st.metric('组内 σ', f'{r["std_within"]:.4f}')
-                    with cs2[3]: st.metric('样本量', r['n'])
+                    sigma_method = f'子组极差 (n={r.get("subgroup_size",1)})' if r.get('subgroup_size', 1) > 1 else '移动极差'
+                    with cs2[2]: st.metric('组内 σ', f'{r["std_within"]:.4f}', help=f'估计方法: {sigma_method}')
+                    with cs2[3]: st.metric('样本量', f'{r["n"]} (子组={r.get("subgroup_size",1)})')
 
                     st.plotly_chart(r['chart'], use_container_width=True)
 
