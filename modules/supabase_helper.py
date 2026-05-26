@@ -337,8 +337,9 @@ def ensure_reports_table() -> bool:
 
 
 def get_create_reports_table_sql() -> str:
-    """返回创建 analysis_reports 表的 SQL 语句"""
+    """返回创建 analysis_reports 表的 SQL 语句（含 RLS 策略）"""
     return """
+-- 1. 创建表
 CREATE TABLE IF NOT EXISTS analysis_reports (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID REFERENCES auth.users(id),
@@ -351,10 +352,16 @@ CREATE TABLE IF NOT EXISTS analysis_reports (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 启用 RLS
+-- 2. 启用 RLS
 ALTER TABLE analysis_reports ENABLE ROW LEVEL SECURITY;
 
--- RLS 策略：用户只能访问自己的报告
+-- 3. 删除旧策略（避免重复创建报错）
+DROP POLICY IF EXISTS "Users can view own reports" ON analysis_reports;
+DROP POLICY IF EXISTS "Users can insert own reports" ON analysis_reports;
+DROP POLICY IF EXISTS "Users can update own reports" ON analysis_reports;
+DROP POLICY IF EXISTS "Users can delete own reports" ON analysis_reports;
+
+-- 4. 创建 RLS 策略：用户只能访问自己的报告
 CREATE POLICY "Users can view own reports"
     ON analysis_reports FOR SELECT
     USING (auth.uid() = user_id);
@@ -371,7 +378,7 @@ CREATE POLICY "Users can delete own reports"
     ON analysis_reports FOR DELETE
     USING (auth.uid() = user_id);
 
--- 创建索引
+-- 5. 创建索引
 CREATE INDEX IF NOT EXISTS idx_reports_user_id ON analysis_reports(user_id);
 CREATE INDEX IF NOT EXISTS idx_reports_created_at ON analysis_reports(created_at DESC);
 """
@@ -395,21 +402,31 @@ def save_report(name: str, report_md: str, analyses_summary: list,
     try:
         client = _get_client()
         _check_client(client)
+
+        uid = _get_user_id()
+        if not uid:
+            st.error("保存报告失败: 未获取到用户 ID，请确保已登录。")
+            return None
+
         data = {
             "name": name,
             "report_md": report_md,
             "analyses_summary": json.loads(json.dumps(analyses_summary, ensure_ascii=False, default=str)),
             "files_data": json.loads(json.dumps(files_data, ensure_ascii=False)),
             "file_count": file_count,
+            "user_id": uid,
         }
-        uid = _get_user_id()
-        if uid:
-            data["user_id"] = uid
 
         result = client.table("analysis_reports").insert(data).execute()
         return result.data[0] if result.data else None
     except Exception as e:
-        st.error(f"保存报告失败: {e}")
+        err_msg = str(e)
+        if "row-level security" in err_msg.lower() or "42501" in err_msg:
+            st.error("保存报告失败: 数据库安全策略阻止了写入。请在 Supabase SQL Editor 中执行以下 SQL 修复：")
+            with st.expander("📋 修复 SQL（点击展开）"):
+                st.code(get_create_reports_table_sql(), language='sql')
+        else:
+            st.error(f"保存报告失败: {e}")
         return None
 
 
