@@ -2572,8 +2572,12 @@ def page_batch_analysis():
                     _file_metas[uf.name] = {'error': err, 'cols_list': [], 'numeric_cols': []}
                     continue
 
-                cols_list = df_preview.columns.tolist()
-                numeric_cols = df_preview.select_dtypes(include=[np.number]).columns.tolist()
+                # 去重：CSV 可能包含同名列（如两个"屈服强度"），pandas 会都保留
+                def _dedup(cols):
+                    seen = set()
+                    return [c for c in cols if not (c in seen or seen.add(c))]
+                cols_list = _dedup(df_preview.columns.tolist())
+                numeric_cols = _dedup(df_preview.select_dtypes(include=[np.number]).columns.tolist())
                 _file_metas[uf.name] = {
                     'cols_list': cols_list,
                     'numeric_cols': numeric_cols,
