@@ -1212,7 +1212,15 @@ def page_msa():
 
     # --- 计量型 GRR ---
     with t1:
-        st.caption('交叉型 (Crossed) 平均值-极差法')
+        # 方法选择
+        grr_method = st.radio(
+            '分析方法',
+            ['平均值-极差法 (X-bar R)', 'ANOVA 法 (方差分析)'],
+            horizontal=True, key='grr_method',
+            help='平均值-极差法: AIAG MSA 第4版经典方法\n'
+                 'ANOVA 法: 双因素随机效应方差分析，可检测交互效应'
+        )
+
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             pc = st.selectbox('部件列', all_cols, key='grr_part')
@@ -1236,10 +1244,29 @@ def page_msa():
         if n_parts < 2 or n_ops < 2:
             st.error('需至少 2 部件 2 操作员')
         else:
-            r = gage_rr.gage_rr_crossed(parts, ops, meas, tolerance)
+            # 根据选择的方法调用不同函数
+            if 'ANOVA' in grr_method:
+                r = gage_rr.gage_rr_anova(parts, ops, meas, tolerance)
+            else:
+                r = gage_rr.gage_rr_crossed(parts, ops, meas, tolerance)
+
             if 'error' in r:
                 st.error(r['error'])
             else:
+                # ── ANOVA 特有信息 ──
+                if r.get('method') == 'ANOVA':
+                    pooling_msg = r.get('pooling_msg')
+                    if pooling_msg:
+                        st.info(f'💡 {pooling_msg}')
+                    elif r.get('interaction_significant'):
+                        p_int = r.get('interaction_p_value', 0)
+                        st.warning(f'⚠️ 交互效应显著 (p={p_int:.4f})，保留交互项')
+
+                    # ANOVA 表
+                    with st.expander('📊 ANOVA 方差分析表', expanded=True):
+                        st.table(r['anova_table'])
+
+                # ── 方差分量 (两种方法共用) ──
                 st.subheader('📊 方差分量')
                 cs = st.columns(5)
                 with cs[0]: st.metric('EV 重复性 σ', r['stddev_contributions']['重复性 (EV)'])
@@ -1247,6 +1274,15 @@ def page_msa():
                 with cs[2]: st.metric('GRR σ', r['stddev_contributions']['GRR'])
                 with cs[3]: st.metric('PV 部件 σ', r['stddev_contributions']['部件间 (PV)'])
                 with cs[4]: st.metric('ndc', r['ndc'])
+
+                # ── ANOVA 详细方差分量 ──
+                if r.get('method') == 'ANOVA' and 'variance_components_detail' in r:
+                    with st.expander('🔍 详细方差分量 (σ²)', expanded=False):
+                        detail = r['variance_components_detail']
+                        cols = st.columns(len(detail))
+                        for i, (k, v) in enumerate(detail.items()):
+                            with cols[i]:
+                                st.metric(k, v)
 
                 st.subheader('📈 变异占比')
                 pcts = r['percent_studyvar']
