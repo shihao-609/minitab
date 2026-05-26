@@ -2222,6 +2222,326 @@ def _show_analysis_detail(analysis, data_dict, file_idx):
         st.metric('两两一致性均值', f'{agreement:.1%}')
 
 
+
+
+def _show_config_dialog(fname, file_idx, cols_list, numeric_cols,
+                         global_tol, global_ewma_lam, global_ewma_L,
+                         global_cusum_k, global_cusum_h, global_cg_pct,
+                         global_unc_res, global_unc_cal):
+    """弹窗：两步式配置 — Step1选模块 → Step2设参数 → 确认保存"""
+    step = st.session_state.get(f'_dlg_step_{file_idx}', 'modules')
+
+    @st.dialog(f'配置分析 — {fname}', width='large')
+    def _dlg():
+        if step == 'modules':
+            _dlg_step_modules(fname, file_idx)
+        else:
+            _dlg_step_params(fname, file_idx, cols_list, numeric_cols,
+                             global_tol, global_ewma_lam, global_ewma_L,
+                             global_cusum_k, global_cusum_h, global_cg_pct,
+                             global_unc_res, global_unc_cal)
+    _dlg()
+
+
+def _dlg_step_modules(fname, file_idx):
+    """Step 1: 分析模块分组选择"""
+    st.caption('👇 按分类勾选分析模块，点击「下一步」设置参数')
+
+    current_modules = list(st.session_state.batch_module_map.get(fname, []))
+    # 使用 session_state 存储对话框内的临时选择
+    temp_key = f'_dlg_mods_{file_idx}'
+    if temp_key not in st.session_state:
+        st.session_state[temp_key] = list(current_modules)
+
+    new_modules = []
+    group_cols = st.columns(3)
+    for gi, (gname, gkey) in enumerate(batch_analysis.MODULE_GROUPS):
+        col_idx = gi % 3
+        with group_cols[col_idx]:
+            st.caption(f'**{gname}**')
+            group_mods = [(k, v) for k, v in batch_analysis.ALL_MODULES.items()
+                         if v['group'] == gkey]
+            all_selected = all(k in st.session_state[temp_key] for k, _ in group_mods)
+            cm1, cm2 = st.columns([1, 1])
+            with cm1:
+                if st.button('全选' if not all_selected else '已全选',
+                             key=f'dlg_selall_{file_idx}_{gkey}',
+                             use_container_width=True,
+                             disabled=all_selected):
+                    for k, _ in group_mods:
+                        if k not in st.session_state[temp_key]:
+                            st.session_state[temp_key].append(k)
+                    st.rerun()
+            with cm2:
+                has_any = any(k in st.session_state[temp_key] for k, _ in group_mods)
+                if st.button('清空', key=f'dlg_clear_{file_idx}_{gkey}',
+                             use_container_width=True,
+                             disabled=not has_any):
+                    st.session_state[temp_key] = [
+                        m for m in st.session_state[temp_key]
+                        if m not in {k for k, _ in group_mods}
+                    ]
+                    st.rerun()
+            for mod_key, mod_info in group_mods:
+                checked = st.checkbox(
+                    mod_info['label'],
+                    value=mod_key in st.session_state[temp_key],
+                    key=f'dlg_mod_{file_idx}_{mod_key}',
+                    help=mod_info.get('desc', '')
+                )
+                if checked and mod_key not in new_modules:
+                    new_modules.append(mod_key)
+                elif not checked and mod_key in new_modules:
+                    new_modules.remove(mod_key)
+        st.session_state[temp_key] = new_modules
+
+    # ---- 底部按钮 ----
+    st.divider()
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        sel_count = len(new_modules)
+        if sel_count > 0:
+            labels = [batch_analysis.ALL_MODULES[m]['label'] for m in new_modules if m in batch_analysis.ALL_MODULES]
+            st.caption(f'已选择 {sel_count} 个模块：' + ' · '.join(labels))
+        else:
+            st.caption('⚠️ 请至少选择一个分析模块')
+    with c2:
+        if st.button('下一步：参数设置 →', type='primary',
+                     use_container_width=True, key=f'dlg_next_{file_idx}',
+                     disabled=len(new_modules) == 0):
+            st.session_state.batch_module_map[fname] = new_modules
+            st.session_state[f'_dlg_step_{file_idx}'] = 'params'
+            st.session_state.pop(temp_key, None)
+            st.rerun()
+
+
+def _dlg_step_params(fname, file_idx, cols_list, numeric_cols,
+                      global_tol, global_ewma_lam, global_ewma_L,
+                      global_cusum_k, global_cusum_h, global_cg_pct,
+                      global_unc_res, global_unc_cal):
+    """Step 2: 参数配置（根据已选模块动态显示）"""
+    modules = st.session_state.batch_module_map.get(fname, [])
+    params = dict(st.session_state.batch_param_map.get(fname, {}))
+
+    st.caption(f'为 **{fname}** 配置分析参数')
+
+    # === 帕累托 ===
+    if 'pareto' in modules:
+        st.caption('▸ **帕累托图**')
+        if len(cols_list) == 2:
+            params['cat_col'] = cols_list[0]
+            params['cnt_col'] = cols_list[1]
+            st.success(f'自动匹配: 类别={cols_list[0]}, 数量={cols_list[1]}')
+        else:
+            pc1, pc2 = st.columns(2)
+            with pc1:
+                params['cat_col'] = st.selectbox('类别列', cols_list, key=f'dlg_par_cat_{file_idx}')
+            with pc2:
+                remain = [c for c in cols_list if c != params.get('cat_col')]
+                params['cnt_col'] = st.selectbox('数量列', remain, key=f'dlg_par_cnt_{file_idx}')
+
+    # === 计量型 GRR ===
+    if 'grr' in modules:
+        st.caption('▸ **计量型 Gage R&R**')
+        if len(cols_list) >= 3 and all(
+            kw in ' '.join(c.lower() for c in cols_list)
+            for kw in ['part', 'operator', 'measurement']
+        ):
+            params['part_col'] = cols_list[0]
+            params['op_col'] = cols_list[1]
+            params['meas_col'] = cols_list[2]
+            st.success(f'自动匹配: P={cols_list[0]}, Op={cols_list[1]}, M={cols_list[2]}')
+        else:
+            gc1, gc2, gc3 = st.columns(3)
+            with gc1:
+                params['part_col'] = st.selectbox('Part列', cols_list, key=f'dlg_grr_part_{file_idx}')
+            with gc2:
+                params['op_col'] = st.selectbox('Operator列',
+                    [c for c in cols_list if c != params.get('part_col')], key=f'dlg_grr_op_{file_idx}')
+            with gc3:
+                params['meas_col'] = st.selectbox('Measurement列',
+                    [c for c in cols_list if c not in (params.get('part_col'), params.get('op_col'))],
+                    key=f'dlg_grr_meas_{file_idx}')
+        grr_tol = st.text_input('公差 (USL-LSL)', placeholder='留空=不计算%Tol',
+                                 key=f'dlg_grr_tol_{file_idx}',
+                                 value=global_tol if global_tol else '')
+        if grr_tol:
+            params['tolerance'] = grr_tol
+
+    # === 计数型 GRR ===
+    if 'grr_attribute' in modules:
+        st.caption('▸ **计数型 Gage R&R** (属性一致性 Kappa)')
+        params['ref_col'] = st.selectbox('参考列 (0/1)', numeric_cols, key=f'dlg_attr_ref_{file_idx}')
+        params['op_cols'] = st.multiselect('操作员判定列',
+            [c for c in numeric_cols if c != params.get('ref_col')],
+            default=[c for c in numeric_cols if c != params.get('ref_col')][:3],
+            key=f'dlg_attr_ops_{file_idx}')
+
+    # === 型材尺寸 ===
+    if 'dimension' in modules:
+        st.caption('▸ **型材尺寸分析**')
+        batch_candidates = [c for c in cols_list if '批' in str(c) or 'batch' in str(c).lower()]
+        default_batch = batch_candidates[0] if batch_candidates else (cols_list[0] if cols_list else None)
+        bidx = cols_list.index(default_batch) if default_batch in cols_list else 0
+        dc1, dc2 = st.columns(2)
+        with dc1:
+            params['batch_col'] = st.selectbox('批次列', cols_list, index=bidx, key=f'dlg_dim_batch_{file_idx}')
+        with dc2:
+            default_meas = [c for c in numeric_cols if c != params.get('batch_col')]
+            params['meas_cols'] = st.multiselect('测量值列', numeric_cols,
+                                                 default=default_meas, key=f'dlg_dim_meas_{file_idx}')
+
+    # === 连续型通用参数 ===
+    continuous_keys = {'histogram', 'boxplot', 'run_chart', 'normality',
+                      'correlation', 'regression', 'stats_summary',
+                      'spc', 'ewma', 'cusum',
+                      'capability', 'box_cox', 'cg_cgk',
+                      'uncertainty', 'weibull'}
+    has_continuous = any(m in continuous_keys for m in modules)
+    if has_continuous and numeric_cols:
+        st.caption('▸ **数值分析通用**')
+        params['cols'] = st.multiselect('分析列（默认全部）', numeric_cols,
+                                        default=numeric_cols[:min(8, len(numeric_cols))],
+                                        key=f'dlg_cols_{file_idx}')
+
+        # ----- SPC 休哈特控制图子类型 -----
+        if 'spc' in modules:
+            st.caption('▸ **SPC 控制图 — 休哈特类型**')
+            saved_spc = params.get('spc_sub_modes', ['imr'])
+            spc_options = list(batch_analysis.SPC_SUB_MODES.keys())
+            spc_sub_modes = st.multiselect(
+                '选择控制图类型 (可多选)',
+                options=spc_options,
+                format_func=lambda k: batch_analysis.SPC_SUB_MODES[k]['label'],
+                default=saved_spc,
+                key=f'dlg_spc_sub_{file_idx}',
+                help='连续型(I-MR/X̄-R/X̄-S)自动按列分析；计数型需配置列映射'
+            )
+            params['spc_sub_modes'] = spc_sub_modes
+
+            # 子组/目标参数
+            has_bar = any(m in spc_sub_modes for m in ('xbar_r', 'xbar_s'))
+            has_attr = any(m in spc_sub_modes for m in ('p', 'np', 'c', 'u'))
+            if has_bar:
+                c_sub1, c_sub2 = st.columns(2)
+                with c_sub1:
+                    params['spc_subgroup_size'] = st.number_input(
+                        '子组大小', 2, 25, params.get('spc_subgroup_size', 5),
+                        key=f'dlg_spc_ss_{file_idx}')
+                with c_sub2:
+                    spc_tgt = st.text_input('目标值 (可选)', placeholder='留空=不设',
+                                            key=f'dlg_spc_tgt_{file_idx}')
+            elif has_attr:
+                spc_tgt = st.text_input('目标值 (可选)', placeholder='留空=不设',
+                                         key=f'dlg_spc_tgt_{file_idx}')
+            else:
+                spc_tgt = st.text_input('目标值 (可选)', placeholder='留空=不设',
+                                         key=f'dlg_spc_tgt_{file_idx}')
+            if spc_tgt:
+                try:
+                    params['spc_target'] = float(spc_tgt)
+                except ValueError:
+                    params.pop('spc_target', None)
+
+            # 计数型 SPC 列映射
+            if has_attr:
+                st.caption('▸ **计数型 SPC 列映射**')
+                attr_cfg = params.get('spc_attr_cols', {})
+                if 'p' in spc_sub_modes:
+                    ac1, ac2 = st.columns(2)
+                    with ac1:
+                        attr_cfg['p_defect_col'] = st.selectbox(
+                            'P图-不良品数列', numeric_cols, index=0,
+                            key=f'dlg_spc_p_def_{file_idx}')
+                    with ac2:
+                        remain_p = [c for c in numeric_cols if c != attr_cfg.get('p_defect_col')]
+                        attr_cfg['p_size_col'] = st.selectbox(
+                            'P图-样本量列', remain_p if remain_p else numeric_cols,
+                            index=0, key=f'dlg_spc_p_sz_{file_idx}')
+                if 'np' in spc_sub_modes:
+                    attr_cfg['np_col'] = st.selectbox(
+                        'NP图-不良品数列', numeric_cols, index=0,
+                        key=f'dlg_spc_np_col_{file_idx}')
+                    params['spc_np_size'] = st.number_input(
+                        'NP图-固定样本量', 10, 100000,
+                        params.get('spc_np_size', 100),
+                        key=f'dlg_spc_np_sz_{file_idx}')
+                if 'c' in spc_sub_modes:
+                    attr_cfg['c_col'] = st.selectbox(
+                        'C图-缺陷数列', numeric_cols, index=0,
+                        key=f'dlg_spc_c_col_{file_idx}')
+                if 'u' in spc_sub_modes:
+                    uc1, uc2 = st.columns(2)
+                    with uc1:
+                        attr_cfg['u_defect_col'] = st.selectbox(
+                            'U图-缺陷数列', numeric_cols, index=0,
+                            key=f'dlg_spc_u_def_{file_idx}')
+                    with uc2:
+                        remain_u = [c for c in numeric_cols if c != attr_cfg.get('u_defect_col')]
+                        attr_cfg['u_size_col'] = st.selectbox(
+                            'U图-样本量列', remain_u if remain_u else numeric_cols,
+                            index=0, key=f'dlg_spc_u_sz_{file_idx}')
+                params['spc_attr_cols'] = attr_cfg
+
+        # 能力分析参数
+        has_cap = any(m in modules for m in ('capability', 'box_cox', 'cg_cgk'))
+        if has_cap:
+            cc1, cc2, cc3 = st.columns(3)
+            with cc1:
+                cap_usl = st.text_input('规格上限 USL', placeholder='留空=不设',
+                                         key=f'dlg_cap_usl_{file_idx}')
+            with cc2:
+                cap_lsl = st.text_input('规格下限 LSL', placeholder='留空=不设',
+                                         key=f'dlg_cap_lsl_{file_idx}')
+            with cc3:
+                cap_ss = st.number_input('子组大小', 1, 10,
+                                         params.get('bc_subgroup', 1),
+                                         key=f'dlg_cap_ss_{file_idx}')
+            if cap_usl:
+                params['usl'] = float(cap_usl)
+            if cap_lsl:
+                params['lsl'] = float(cap_lsl)
+            params['bc_subgroup'] = cap_ss
+
+        # SPC 高级参数
+        if any(m in modules for m in ('ewma', 'cusum')):
+            params['ewma_lam'] = global_ewma_lam
+            params['ewma_L'] = global_ewma_L
+            params['cusum_k'] = global_cusum_k
+            params['cusum_h'] = global_cusum_h
+
+        # Cg/Cgk
+        if 'cg_cgk' in modules:
+            if global_tol:
+                try:
+                    params['cg_tolerance'] = float(global_tol)
+                except ValueError:
+                    pass
+            params['cg_pct'] = global_cg_pct
+
+        # 不确定度
+        if 'uncertainty' in modules:
+            params['unc_res'] = global_unc_res
+            params['unc_cal'] = global_unc_cal
+
+    # ---- 底部按钮 ----
+    st.divider()
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button('← 返回选择模块', use_container_width=True, key=f'dlg_back_{file_idx}'):
+            st.session_state[f'_dlg_step_{file_idx}'] = 'modules'
+            st.session_state.batch_param_map[fname] = params
+            st.rerun()
+    with c2:
+        if st.button('✅ 确认保存', type='primary', use_container_width=True,
+                     key=f'dlg_save_{file_idx}'):
+            st.session_state.batch_param_map[fname] = params
+            # 清理弹窗状态
+            st.session_state.pop(f'_dlg_open_{file_idx}', None)
+            st.session_state.pop(f'_dlg_step_{file_idx}', None)
+            st.rerun()
+
+
 def page_batch_analysis():
     st.header('📋 批量导入与手动分析报告')
     st.caption('上传 CSV 文件，直接选择要执行的分析模块')
@@ -2277,312 +2597,88 @@ def page_batch_analysis():
                 with gc8:
                     global_unc_cal = st.number_input('不确定度 校准(k=2)', value=0.0, format='%.6f', key='g_unc_cal')
 
-            all_ready = True
-            preview_data = []
+            _build_preview_data = []  # 在循环中收集预览
+            _file_metas = {}          # {filename: {cols_list, numeric_cols, df_preview}}
 
             for i, uf in enumerate(uploaded_files):
                 df_preview, err = _parse_preview_df(uf)
                 if df_preview is None:
                     st.error(f'❌ {uf.name}: {err}')
-                    all_ready = False
+                    _file_metas[uf.name] = {'error': err, 'cols_list': [], 'numeric_cols': []}
                     continue
 
-                with st.container(border=True):
-                    # ---- 文件基本信息 ----
-                    cols_list = df_preview.columns.tolist()
-                    numeric_cols = df_preview.select_dtypes(include=[np.number]).columns.tolist()
+                cols_list = df_preview.columns.tolist()
+                numeric_cols = df_preview.select_dtypes(include=[np.number]).columns.tolist()
+                _file_metas[uf.name] = {
+                    'cols_list': cols_list,
+                    'numeric_cols': numeric_cols,
+                    'df_preview': df_preview,
+                }
 
+                # ---- 文件信息 + 当前配置摘要 + 配置按钮 ----
+                with st.container(border=True):
                     st.markdown(
                         f'**{uf.name}** · `{len(df_preview)}`行 × `{len(cols_list)}`列  '
                         f'| 数值列: `{", ".join(numeric_cols[:4])}{"…" if len(numeric_cols) > 4 else ""}`'
                     )
 
-                    # ---- 分析模块分组选择 ----
                     current_modules = st.session_state.batch_module_map.get(uf.name, [])
+                    current_params = st.session_state.batch_param_map.get(uf.name, {})
 
-                    with st.expander('📋 选择分析模块', expanded=(i == 0)):
-                        new_modules = []
-                        group_cols = st.columns(3)
-                        for gi, (gname, gkey) in enumerate(batch_analysis.MODULE_GROUPS):
-                            col_idx = gi % 3
-                            with group_cols[col_idx]:
-                                st.caption(f'**{gname}**')
-                                group_mods = [(k, v) for k, v in batch_analysis.ALL_MODULES.items()
-                                             if v['group'] == gkey]
-                                # 全选/全不选快捷按钮
-                                all_selected = all(k in current_modules for k, _ in group_mods)
-                                cm1, cm2 = st.columns([1, 1])
-                                with cm1:
-                                    if st.button('全选' if not all_selected else '已全选',
-                                                 key=f'gselall_{i}_{gkey}',
-                                                 use_container_width=True,
-                                                 type='secondary' if all_selected else 'secondary',
-                                                 disabled=all_selected):
-                                        current_modules = list(set(current_modules) | set(k for k, _ in group_mods))
-                                        st.session_state.batch_module_map[uf.name] = current_modules
-                                        st.rerun()
-                                with cm2:
-                                    if st.button('清空', key=f'gclear_{i}_{gkey}',
-                                                 use_container_width=True,
-                                                 disabled=not any(k in current_modules for k, _ in group_mods)):
-                                        current_modules = [m for m in current_modules
-                                                          if m not in set(k for k, _ in group_mods)]
-                                        st.session_state.batch_module_map[uf.name] = current_modules
-                                        st.rerun()
-                                for mod_key, mod_info in group_mods:
-                                    checked = st.checkbox(
-                                        f'{mod_info["label"]}',
-                                        value=mod_key in current_modules,
-                                        key=f'mod_{i}_{mod_key}',
-                                        help=mod_info.get('desc', '')
-                                    )
-                                    if checked:
-                                        new_modules.append(mod_key)
-                        st.session_state.batch_module_map[uf.name] = new_modules
+                    if current_modules:
+                        selected_labels = [batch_analysis.ALL_MODULES[m]['label']
+                                          for m in current_modules if m in batch_analysis.ALL_MODULES]
+                        pkeys = [k for k in current_params if k not in (
+                            'tolerance', 'ewma_lam', 'ewma_L', 'cusum_k', 'cusum_h',
+                            'unc_res', 'unc_cal', 'cg_pct', 'bc_subgroup')]
+                        pstr = ', '.join([f'{k}={current_params[k]}' for k in pkeys]) if pkeys else '默认'
+                        st.caption(f'✅ 已配置 ({len(current_modules)})：' + ' · '.join(selected_labels))
+                        st.caption(f'⚙️ 参数：{pstr[:80]}{"…" if len(pstr) > 80 else ""}')
+                    else:
+                        st.caption('⚠️ 尚未配置分析模块')
 
-                    if not new_modules:
-                        st.warning('⚠️ 请至少选择一个分析模块')
-                        all_ready = False
-                        continue
+                    cbtn1, cbtn2 = st.columns([1, 4])
+                    with cbtn1:
+                        if st.button('📋 配置' if not current_modules else '⚙️ 重新配置',
+                                     key=f'open_dlg_{i}', use_container_width=True):
+                            st.session_state[f'_dlg_open_{i}'] = True
+                            st.session_state.pop(f'_dlg_step_{i}', None)  # reset step
+                            st.rerun()
 
-                    # ---- 已选模块标签预览 ----
-                    selected_labels = [batch_analysis.ALL_MODULES[m]['label']
-                                      for m in new_modules if m in batch_analysis.ALL_MODULES]
-                    st.caption(f'已选 ({len(new_modules)}): ' + ' · '.join(selected_labels))
+                # ---- 弹窗：两步式模块选择 + 参数配置 ----
+                if st.session_state.get(f'_dlg_open_{i}', False):
+                    _show_config_dialog(uf.name, i, cols_list, numeric_cols,
+                                        global_tolerance, global_ewma_lam, global_ewma_L,
+                                        global_cusum_k, global_cusum_h, global_cg_pct,
+                                        global_unc_res, global_unc_cal)
 
-                    # ---- 参数设置（根据勾选的模块动态显示） ----
-                    params = {}
-                    if new_modules:
-                        with st.expander('⚙️ 参数设置', expanded=len(new_modules) <= 4):
-                            # === 帕累托 ===
-                            if 'pareto' in new_modules:
-                                st.caption('▸ **帕累托图**')
-                                if len(cols_list) == 2:
-                                    params['cat_col'] = cols_list[0]
-                                    params['cnt_col'] = cols_list[1]
-                                    st.success(f'自动匹配: 类别={cols_list[0]}, 数量={cols_list[1]}')
-                                else:
-                                    pc1, pc2 = st.columns(2)
-                                    with pc1:
-                                        params['cat_col'] = st.selectbox('类别列', cols_list, key=f'par_cat_{i}')
-                                    with pc2:
-                                        remain = [c for c in cols_list if c != params.get('cat_col')]
-                                        params['cnt_col'] = st.selectbox('数量列', remain, key=f'par_cnt_{i}')
-
-                            # === 计量型 GRR ===
-                            if 'grr' in new_modules:
-                                st.caption('▸ **计量型 Gage R&R**')
-                                if len(cols_list) >= 3 and all(
-                                    kw in ' '.join(c.lower() for c in cols_list)
-                                    for kw in ['part', 'operator', 'measurement']
-                                ):
-                                    params['part_col'] = cols_list[0]
-                                    params['op_col'] = cols_list[1]
-                                    params['meas_col'] = cols_list[2]
-                                    st.success(f'自动匹配: P={cols_list[0]}, Op={cols_list[1]}, M={cols_list[2]}')
-                                else:
-                                    gc1, gc2, gc3 = st.columns(3)
-                                    with gc1:
-                                        params['part_col'] = st.selectbox('Part列', cols_list, key=f'grr_part_{i}')
-                                    with gc2:
-                                        params['op_col'] = st.selectbox('Operator列',
-                                            [c for c in cols_list if c != params.get('part_col')], key=f'grr_op_{i}')
-                                    with gc3:
-                                        params['meas_col'] = st.selectbox('Measurement列',
-                                            [c for c in cols_list if c not in (params.get('part_col'), params.get('op_col'))],
-                                            key=f'grr_meas_{i}')
-                                grr_tol = st.text_input('公差 (USL-LSL)', placeholder='留空=不计算%Tol',
-                                                         key=f'grr_tol_{i}',
-                                                         value=global_tolerance if global_tolerance else '')
-                                if grr_tol:
-                                    params['tolerance'] = grr_tol
-
-                            # === 计数型 GRR ===
-                            if 'grr_attribute' in new_modules:
-                                st.caption('▸ **计数型 Gage R&R** (属性一致性 Kappa)')
-                                params['ref_col'] = st.selectbox('参考列 (0/1)', numeric_cols, key=f'attr_ref_{i}')
-                                params['op_cols'] = st.multiselect('操作员判定列',
-                                    [c for c in numeric_cols if c != params.get('ref_col')],
-                                    default=[c for c in numeric_cols if c != params.get('ref_col')][:3],
-                                    key=f'attr_ops_{i}')
-
-                            # === 型材尺寸 ===
-                            if 'dimension' in new_modules:
-                                st.caption('▸ **型材尺寸分析**')
-                                batch_candidates = [c for c in cols_list if '批' in str(c) or 'batch' in str(c).lower()]
-                                default_batch = batch_candidates[0] if batch_candidates else (cols_list[0] if cols_list else None)
-                                bidx = cols_list.index(default_batch) if default_batch in cols_list else 0
-                                dc1, dc2 = st.columns(2)
-                                with dc1:
-                                    params['batch_col'] = st.selectbox('批次列', cols_list, index=bidx, key=f'dim_batch_{i}')
-                                with dc2:
-                                    default_meas = [c for c in numeric_cols if c != params.get('batch_col')]
-                                    params['meas_cols'] = st.multiselect('测量值列', numeric_cols,
-                                                                         default=default_meas, key=f'dim_meas_{i}')
-
-                            # === 连续型 / 能力类 / SPC高级 / 不确定度 共用列选择 + 专有参数 ===
-                            continuous_keys = {'histogram', 'boxplot', 'run_chart', 'normality',
-                                              'correlation', 'regression', 'stats_summary',
-                                              'spc', 'ewma', 'cusum',
-                                              'capability', 'box_cox', 'cg_cgk',
-                                              'uncertainty', 'weibull'}
-                            has_continuous = any(m in continuous_keys for m in new_modules)
-                            if has_continuous and numeric_cols:
-                                st.caption('▸ **数值分析通用**')
-                                params['cols'] = st.multiselect('分析列（默认全部）', numeric_cols,
-                                                                default=numeric_cols[:min(8, len(numeric_cols))],
-                                                                key=f'cols_{i}')
-
-                                # ----- SPC 休哈特控制图子类型（多选）-----
-                                if 'spc' in new_modules:
-                                    st.caption('▸ **SPC 控制图 — 休哈特类型**')
-                                    default_spc = st.session_state.get(f'spc_sub_default_{i}', ['imr'])
-                                    spc_options = list(batch_analysis.SPC_SUB_MODES.keys())
-                                    spc_sub_modes = st.multiselect(
-                                        '选择控制图类型 (可多选)',
-                                        options=spc_options,
-                                        format_func=lambda k: batch_analysis.SPC_SUB_MODES[k]['label'],
-                                        default=default_spc,
-                                        key=f'spc_sub_{i}',
-                                        help='连续型(I-MR/X̄-R/X̄-S)自动按列分析；计数型需配置列映射'
-                                    )
-                                    st.session_state[f'spc_sub_default_{i}'] = spc_sub_modes
-                                    params['spc_sub_modes'] = spc_sub_modes
-
-                                    # 连续型子类型的子组参数
-                                    if any(m in spc_sub_modes for m in ('xbar_r', 'xbar_s')):
-                                        c_sub1, c_sub2 = st.columns(2)
-                                        with c_sub1:
-                                            params['spc_subgroup_size'] = st.number_input(
-                                                '子组大小', 2, 25, 5, key=f'spc_ss_{i}',
-                                                help='用于 X-bar R / X-bar S')
-                                        with c_sub2:
-                                            spc_tgt = st.text_input('目标值 (可选)', placeholder='留空=不设',
-                                                                    key=f'spc_tgt_{i}',
-                                                                    help='目标线，适用于 I-MR/X-bar/C/P/NP/C/U')
-                                            if spc_tgt:
-                                                try:
-                                                    params['spc_target'] = float(spc_tgt)
-                                                except ValueError:
-                                                    pass
-                                    elif any(m in spc_sub_modes for m in ('p', 'np', 'c', 'u')):
-                                        spc_tgt = st.text_input('目标值 (可选)', placeholder='留空=不设',
-                                                                 key=f'spc_tgt_{i}',
-                                                                 help='目标线，适用于所有控制图类型')
-                                        if spc_tgt:
-                                            try:
-                                                params['spc_target'] = float(spc_tgt)
-                                            except ValueError:
-                                                pass
-                                    else:
-                                        spc_tgt = st.text_input('目标值 (可选)', placeholder='留空=不设',
-                                                                 key=f'spc_tgt_{i}',
-                                                                 help='目标线 (I-MR)')
-                                        if spc_tgt:
-                                            try:
-                                                params['spc_target'] = float(spc_tgt)
-                                            except ValueError:
-                                                pass
-
-                                    # 计数型 SPC 的列配置（仅当选中时显示）
-                                    has_attr_spc = any(m in spc_sub_modes for m in ('p', 'np', 'c', 'u'))
-                                    if has_attr_spc:
-                                        st.caption('▸ **计数型 SPC 列映射** (自动尝试，也可手动指定)')
-                                        attr_cfg = {}
-                                        ac1, ac2 = st.columns(2)
-                                        if 'p' in spc_sub_modes:
-                                            with ac1:
-                                                attr_cfg['p_defect_col'] = st.selectbox(
-                                                    'P图-不良品数列', numeric_cols, index=0,
-                                                    key=f'spc_p_def_{i}')
-                                            with ac2:
-                                                remain_p = [c for c in numeric_cols if c != attr_cfg.get('p_defect_col')]
-                                                idx2 = 0 if remain_p else 0
-                                                attr_cfg['p_size_col'] = st.selectbox(
-                                                    'P图-样本量列', remain_p if remain_p else numeric_cols,
-                                                    index=idx2, key=f'spc_p_sz_{i}')
-                                        if 'np' in spc_sub_modes:
-                                            attr_cfg['np_col'] = st.selectbox(
-                                                'NP图-不良品数列', numeric_cols, index=0,
-                                                key=f'spc_np_col_{i}')
-                                            params['spc_np_size'] = st.number_input(
-                                                'NP图-固定样本量', 10, 100000, 100, key=f'spc_np_sz_{i}')
-                                        if 'c' in spc_sub_modes:
-                                            attr_cfg['c_col'] = st.selectbox(
-                                                'C图-缺陷数列', numeric_cols, index=0,
-                                                key=f'spc_c_col_{i}')
-                                        if 'u' in spc_sub_modes:
-                                            uc1, uc2 = st.columns(2)
-                                            with uc1:
-                                                attr_cfg['u_defect_col'] = st.selectbox(
-                                                    'U图-缺陷数列', numeric_cols, index=0,
-                                                    key=f'spc_u_def_{i}')
-                                            with uc2:
-                                                remain_u = [c for c in numeric_cols if c != attr_cfg.get('u_defect_col')]
-                                                attr_cfg['u_size_col'] = st.selectbox(
-                                                    'U图-样本量列', remain_u if remain_u else numeric_cols,
-                                                    index=0, key=f'spc_u_sz_{i}')
-                                        params['spc_attr_cols'] = attr_cfg
-
-                                # 能力分析参数
-                                has_cap = any(m in new_modules for m in ('capability', 'box_cox', 'cg_cgk'))
-                                if has_cap:
-                                    cc1, cc2, cc3 = st.columns(3)
-                                    with cc1:
-                                        cap_usl = st.text_input('规格上限 USL', placeholder='留空=不设',
-                                                                 key=f'cap_usl_{i}',
-                                                                 help='应用于 Cp/Cpk 和 Box-Cox')
-                                    with cc2:
-                                        cap_lsl = st.text_input('规格下限 LSL', placeholder='留空=不设',
-                                                                 key=f'cap_lsl_{i}')
-                                    with cc3:
-                                        cap_ss = st.number_input('子组大小', 1, 10, 1, key=f'cap_ss_{i}')
-                                    if cap_usl:
-                                        params['usl'] = float(cap_usl)
-                                    if cap_lsl:
-                                        params['lsl'] = float(cap_lsl)
-                                    params['bc_subgroup'] = cap_ss
-
-                                # SPC 高级参数
-                                has_adv_spc = any(m in new_modules for m in ('ewma', 'cusum'))
-                                if has_adv_spc:
-                                    params['ewma_lam'] = global_ewma_lam
-                                    params['ewma_L'] = global_ewma_L
-                                    params['cusum_k'] = global_cusum_k
-                                    params['cusum_h'] = global_cusum_h
-
-                                # Cg/Cgk 参数
-                                if 'cg_cgk' in new_modules:
-                                    tol_val = global_tolerance if global_tolerance else ''
-                                    if tol_val:
-                                        try:
-                                            params['cg_tolerance'] = float(tol_val)
-                                        except ValueError:
-                                            pass
-                                    params['cg_pct'] = global_cg_pct
-
-                                # Weibull / 不确定度 / Box-Cox 无需额外参数
-                                if 'uncertainty' in new_modules:
-                                    params['unc_res'] = global_unc_res
-                                    params['unc_cal'] = global_unc_cal
-
-                    if params:
-                        st.session_state.batch_param_map[uf.name] = params
-
-                    # 汇总行
-                    modules = st.session_state.batch_module_map.get(uf.name, [])
-                    modules_str = ', '.join([batch_analysis.ALL_MODULES.get(m, {}).get('label', m) for m in modules]) if modules else '-'
-                    param_keys_shown = [k for k in params if k not in ('tolerance', 'ewma_lam', 'ewma_L',
-                                                                        'cusum_k', 'cusum_h', 'unc_res', 'unc_cal',
-                                                                        'cg_pct', 'bc_subgroup')]
-                    param_str = ', '.join([f"{k}={params[k]}" for k in param_keys_shown]) if param_keys_shown else '默认'
-                    preview_data.append({
-                        '文件名': uf.name,
-                        '分析模块': modules_str,
-                        '参数': param_str[:60] + ('…' if len(param_str) > 60 else ''),
-                        '行数': len(df_preview),
-                        '列数': len(cols_list),
-                    })
+            # ---- 从 session_state 重建汇总预览 ----
+            preview_data = []
+            all_ready = True
+            for uf in uploaded_files:
+                fname = uf.name
+                meta = _file_metas.get(fname, {})
+                if meta.get('error'):
+                    all_ready = False
+                    continue
+                modules = st.session_state.batch_module_map.get(fname, [])
+                params = st.session_state.batch_param_map.get(fname, {})
+                if not modules:
+                    all_ready = False
+                modules_str = ', '.join([batch_analysis.ALL_MODULES.get(m, {}).get('label', m)
+                                        for m in modules]) if modules else '-'
+                param_keys_shown = [k for k in params if k not in (
+                    'tolerance', 'ewma_lam', 'ewma_L', 'cusum_k', 'cusum_h',
+                    'unc_res', 'unc_cal', 'cg_pct', 'bc_subgroup')]
+                param_str = ', '.join([f'{k}={params[k]}' for k in param_keys_shown]) if param_keys_shown else '默认'
+                df_p = meta.get('df_preview')
+                preview_data.append({
+                    '文件名': fname,
+                    '分析模块': modules_str,
+                    '参数': param_str[:60] + ('…' if len(param_str) > 60 else ''),
+                    '行数': len(df_p) if df_p is not None else '?',
+                    '列数': len(meta.get('cols_list', [])),
+                })
 
             # ---- 汇总预览 ----
             with st.expander('📋 汇总预览', expanded=True):
