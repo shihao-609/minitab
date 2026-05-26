@@ -16,7 +16,7 @@ from typing import Dict, List, Tuple, Optional
 
 # 导入现有分析模块
 from modules import pareto_histogram, gage_rr, spc_charts, capability
-from modules import stats_tools, quality_tools
+from modules import stats_tools, quality_tools, spc_advanced, msa_advanced, advanced_analysis
 
 
 # ============================================================
@@ -757,18 +757,42 @@ CONTINUOUS_MODULES = {
 
 # 全部可用的分析模块（用户直接选择）
 ALL_MODULES = {
-    'pareto':        {'label': '帕累托图（缺陷分析）', 'group': 'standalone'},
-    'grr':           {'label': '测量系统分析 GRR', 'group': 'standalone'},
-    'spc':           {'label': 'SPC 控制图 (I-MR)', 'group': 'continuous'},
-    'capability':    {'label': '过程能力分析 (Cp/Cpk)', 'group': 'continuous'},
-    'correlation':   {'label': '相关性矩阵', 'group': 'continuous'},
-    'regression':    {'label': '回归分析', 'group': 'continuous'},
-    'normality':     {'label': '正态性检验', 'group': 'continuous'},
-    'boxplot':       {'label': '箱线图', 'group': 'continuous'},
-    'run_chart':     {'label': '运行图', 'group': 'continuous'},
-    'stats_summary': {'label': '描述性统计', 'group': 'continuous'},
-    'dimension':     {'label': '型材尺寸分析', 'group': 'standalone'},
+    # ---- 基础图形 ----
+    'pareto':        {'label': '帕累托图',          'group': 'quality_graph', 'desc': '缺陷类别 + 数量'},
+    'histogram':     {'label': '直方图 (含统计)',   'group': 'quality_graph', 'desc': '分布形态 + 正态拟合'},
+    'boxplot':       {'label': '箱线图',             'group': 'quality_graph', 'desc': '分布特征 + 异常值'},
+    'run_chart':     {'label': '运行图',             'group': 'quality_graph', 'desc': '时序趋势 + 游程检验'},
+    # ---- SPC 控制 ----
+    'spc':           {'label': 'I-MR 控制图',        'group': 'spc_control',  'desc': '单值-移动极差'},
+    'ewma':          {'label': 'EWMA 控制图',        'group': 'spc_control',  'desc': '指数加权移动平均'},
+    'cusum':         {'label': 'CUSUM 控制图',       'group': 'spc_control',  'desc': '累积和 (灵敏检测小偏移)'},
+    # ---- 能力分析 ----
+    'capability':    {'label': 'Cp/Cpk 过程能力',    'group': 'capability',   'desc': '短期+长期能力指数'},
+    'box_cox':       {'label': 'Box-Cox 变换能力',   'group': 'capability',   'desc': '非正态数据能力分析'},
+    'cg_cgk':        {'label': 'Cg/Cgk 检具能力',    'group': 'capability',   'desc': 'MSA Type 1 检具评估'},
+    # ---- 统计推断 ----
+    'normality':     {'label': '正态性检验',         'group': 'statistics',   'desc': 'Shapiro-Wilk / AD / K²'},
+    'correlation':   {'label': '相关性矩阵',         'group': 'statistics',   'desc': 'Pearson 相关系数热力图'},
+    'regression':    {'label': '回归分析',           'group': 'statistics',   'desc': '一元/多元线性回归'},
+    'stats_summary': {'label': '描述性统计',         'group': 'statistics',   'desc': '均值/标准差/偏度/峰度'},
+    # ---- 测量系统 MSA ----
+    'grr':           {'label': '计量型 Gage R&R',    'group': 'msa',          'desc': 'X-bar R + ANOVA 法'},
+    'grr_attribute': {'label': '计数型 Gage R&R',    'group': 'msa',          'desc': '属性一致性 Kappa 法'},
+    'uncertainty':   {'label': '测量不确定度',       'group': 'msa',          'desc': 'GUM 法评定'},
+    # ---- 特殊分析 ----
+    'dimension':     {'label': '型材尺寸分析',       'group': 'special',      'desc': '批次多测量值 SPC'},
+    'weibull':       {'label': 'Weibull 可靠性',     'group': 'special',      'desc': '失效时间/寿命分析'},
 }
+
+# 模块分组（用于设置界面按组展示）
+MODULE_GROUPS = [
+    ('📊 基础图形',    'quality_graph'),
+    ('📈 SPC 控制',    'spc_control'),
+    ('🎯 能力分析',    'capability'),
+    ('🔢 统计推断',    'statistics'),
+    ('🔬 测量系统 MSA', 'msa'),
+    ('📏 特殊分析',    'special'),
+]
 
 # 连续型模块的子分析函数映射
 _CONTINUOUS_ANALYZERS = {
@@ -776,6 +800,13 @@ _CONTINUOUS_ANALYZERS = {
     'boxplot':       '_analyze_boxplot',
     'run_chart':     '_analyze_runchart',
     'stats_summary': '_analyze_stats_summary',
+    'histogram':     '_analyze_histogram',
+    'ewma':          '_analyze_ewma',
+    'cusum':         '_analyze_cusum',
+    'box_cox':       '_analyze_boxcox',
+    'cg_cgk':        '_analyze_cgcgk',
+    'uncertainty':   '_analyze_uncertainty',
+    'weibull':       '_analyze_weibull',
 }
 
 
@@ -954,14 +985,201 @@ def _analyze_stats_summary(df: pd.DataFrame, numeric_cols: list = None) -> list:
     return results
 
 
+def _analyze_histogram(df: pd.DataFrame, numeric_cols: list = None) -> dict:
+    """直方图（含统计）"""
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    charts = {}
+    stats_list = []
+    for col in numeric_cols:
+        data = df[col].dropna().values
+        if len(data) >= 3:
+            try:
+                r = pareto_histogram.histogram_with_stats(data, title=col)
+                if 'chart' in r:
+                    charts[col] = r['chart']
+                if 'stats' in r:
+                    stats_list.append({'列名': col, **r['stats']})
+            except Exception:
+                pass
+    return {'charts': charts, 'stats': stats_list, 'columns': numeric_cols}
+
+
+def _analyze_ewma(df: pd.DataFrame, numeric_cols: list = None,
+                   lam: float = 0.2, L: float = 2.7) -> dict:
+    """EWMA 控制图（每个数值列）"""
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    charts = {}
+    results = []
+    for col in numeric_cols:
+        data = df[col].dropna().values
+        if len(data) >= 2:
+            try:
+                r = spc_advanced.ewma_chart(data, lam=lam, L=L)
+                if 'chart' in r:
+                    charts[col] = r['chart']
+                ooc = sum(v for v in r.get('ooc_points', {}).values()) if isinstance(r.get('ooc_points'), dict) else 0
+                results.append({
+                    '列名': col,
+                    '均值': f'{np.mean(data):.4f}',
+                    '标准差': f'{np.std(data, ddof=1):.4f}',
+                    '超限点': ooc,
+                    '状态': '✅ 受控' if ooc == 0 else f'⚠️ {ooc}个超限点',
+                })
+            except Exception:
+                pass
+    return {'charts': charts, 'summary': results, 'columns': numeric_cols}
+
+
+def _analyze_cusum(df: pd.DataFrame, numeric_cols: list = None,
+                    k: float = 0.5, h: float = 4.0) -> dict:
+    """CUSUM 控制图"""
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    charts = {}
+    results = []
+    for col in numeric_cols:
+        data = df[col].dropna().values
+        if len(data) >= 2:
+            try:
+                r = spc_advanced.cusum_chart(data, k=k, h=h)
+                if 'chart' in r:
+                    charts[col] = r['chart']
+                ooc = sum(v for v in r.get('ooc_points', {}).values()) if isinstance(r.get('ooc_points'), dict) else 0
+                results.append({
+                    '列名': col,
+                    '均值': f'{np.mean(data):.4f}',
+                    '标准差': f'{np.std(data, ddof=1):.4f}',
+                    '超限点': ooc,
+                    '状态': '✅ 受控' if ooc == 0 else f'⚠️ {ooc}个超限点',
+                })
+            except Exception:
+                pass
+    return {'charts': charts, 'summary': results, 'columns': numeric_cols}
+
+
+def _analyze_boxcox(df: pd.DataFrame, numeric_cols: list = None,
+                     usl: float = None, lsl: float = None,
+                     subgroup_size: int = 1, within_method: str = 'Rbar') -> dict:
+    """Box-Cox 变换过程能力"""
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    charts = {}
+    results = []
+    for col in numeric_cols:
+        data = df[col].dropna().values
+        if len(data) >= 5:
+            try:
+                r = capability.process_capability_boxcox(data, usl, lsl,
+                                                          subgroup_size=subgroup_size,
+                                                          within_method=within_method)
+                if 'chart' in r:
+                    charts[col] = r['chart']
+                trans = r.get('transformation', {})
+                results.append({
+                    '列名': col,
+                    'λ': str(trans.get('lambda', 'N/A')),
+                    'Cp': f'{r.get("Cp", 0):.2f}' if r.get('Cp') else 'N/A',
+                    'Cpk': f'{r.get("Cpk", 0):.2f}' if r.get('Cpk') else 'N/A',
+                    'Pp': f'{r.get("Pp", 0):.2f}' if r.get('Pp') else 'N/A',
+                    'Ppk': f'{r.get("Ppk", 0):.2f}' if r.get('Ppk') else 'N/A',
+                    '评级': r.get('cpk_level', 'N/A'),
+                })
+            except Exception:
+                pass
+    return {'charts': charts, 'summary': results, 'columns': numeric_cols}
+
+
+def _analyze_cgcgk(df: pd.DataFrame, numeric_cols: list = None,
+                    tolerance: float = None, ref_value: float = None,
+                    percent_tol: float = 20) -> dict:
+    """Cg/Cgk 检具能力"""
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    charts = {}
+    results = []
+    for col in numeric_cols:
+        data = df[col].dropna().values
+        if len(data) >= 5 and tolerance:
+            try:
+                r = msa_advanced.cg_cgk(data, tolerance, ref_value, percent_tol=percent_tol)
+                if 'chart' in r:
+                    charts[col] = r['chart']
+                results.append({
+                    '列名': col,
+                    'Cg': r.get('stats', {}).get('Cg', 'N/A'),
+                    'Cgk': r.get('stats', {}).get('Cgk', 'N/A'),
+                    'Cg评级': r.get('stats', {}).get('Cg 评级', 'N/A'),
+                    'Cgk评级': r.get('stats', {}).get('Cgk 评级', 'N/A'),
+                })
+            except Exception:
+                pass
+    return {'charts': charts, 'summary': results, 'columns': numeric_cols}
+
+
+def _analyze_uncertainty(df: pd.DataFrame, numeric_cols: list = None,
+                          resolution: float = 0.001, cal_unc: float = 0.0,
+                          temp_range: float = 0.0, temp_coeff: float = 0.0) -> dict:
+    """测量不确定度"""
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    charts = {}
+    results = []
+    for col in numeric_cols:
+        data = df[col].dropna().values
+        if len(data) >= 5:
+            try:
+                r = msa_advanced.measurement_uncertainty(data, resolution, cal_unc,
+                                                          temp_range, temp_coeff)
+                if 'chart' in r:
+                    charts[col] = r['chart']
+                results.append({
+                    '列名': col,
+                    '合成标准不确定度 uc': r.get('result', {}).get('合成标准不确定度 uc', 'N/A'),
+                    '扩展不确定度 U (k=2)': r.get('result', {}).get('扩展不确定度 U (k=2)', 'N/A'),
+                })
+            except Exception:
+                pass
+    return {'charts': charts, 'summary': results, 'columns': numeric_cols}
+
+
+def _analyze_weibull(df: pd.DataFrame, numeric_cols: list = None) -> dict:
+    """Weibull 可靠性分析"""
+    if numeric_cols is None:
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    charts = {}
+    results = []
+    for col in numeric_cols:
+        data = df[col].dropna().values
+        if len(data) >= 5:
+            try:
+                r = advanced_analysis.weibull_analysis(data)
+                if 'chart' in r:
+                    charts[col] = r['chart']
+                results.append({
+                    '列名': col,
+                    '形状参数 β': r.get('params', {}).get('形状参数 β', 'N/A'),
+                    '尺度参数 η': r.get('params', {}).get('尺度参数 η', 'N/A'),
+                })
+            except Exception:
+                pass
+    return {'charts': charts, 'summary': results, 'columns': numeric_cols}
+
+
 def analyze_process_selective(df: pd.DataFrame, data_label: str = '',
                                modules: Optional[List[str]] = None,
-                               cols: Optional[List[str]] = None) -> dict:
+                               cols: Optional[List[str]] = None,
+                               extra_params: Optional[dict] = None) -> dict:
     """
     通用连续型数据 — 按模块选择性分析。
-    支持模块: spc, capability, correlation, regression,
-             normality, boxplot, run_chart, stats_summary
+    支持所有 continuous group 模块:
+        spc, capability, correlation, regression,
+        normality, boxplot, run_chart, stats_summary,
+        histogram, ewma, cusum, box_cox, cg_cgk,
+        uncertainty, weibull
     cols: 指定要分析的数值列，None=全部数值列
+    extra_params: 额外参数字典，如 {'ewma_lam':0.3, 'cusum_k':0.5, 'tolerance':0.1, ...}
     """
     if modules is None:
         modules = list(CONTINUOUS_MODULES.keys())
@@ -973,26 +1191,64 @@ def analyze_process_selective(df: pd.DataFrame, data_label: str = '',
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
     results = {}
+    ep = extra_params or {}
 
-    # 原有4个模块
+    # 基础图形
     if 'spc' in modules:
         results['spc'] = _analyze_spc_only(df, numeric_cols)
-    if 'capability' in modules:
-        results['capability'] = _analyze_capability_only(df, numeric_cols)
-    if 'correlation' in modules:
-        results['correlation'] = _analyze_correlation_only(df, numeric_cols)
-    if 'regression' in modules:
-        results['regression'] = _analyze_regression_only(df, numeric_cols)
-
-    # 新增模块
-    if 'normality' in modules:
-        results['normality'] = _analyze_normality(df, numeric_cols)
+    if 'histogram' in modules:
+        results['histogram'] = _analyze_histogram(df, numeric_cols)
     if 'boxplot' in modules:
         results['boxplot'] = _analyze_boxplot(df, numeric_cols)
     if 'run_chart' in modules:
         results['run_chart'] = _analyze_runchart(df, numeric_cols)
+
+    # SPC 高级
+    if 'ewma' in modules:
+        results['ewma'] = _analyze_ewma(df, numeric_cols,
+                                         lam=ep.get('ewma_lam', 0.2),
+                                         L=ep.get('ewma_L', 2.7))
+    if 'cusum' in modules:
+        results['cusum'] = _analyze_cusum(df, numeric_cols,
+                                           k=ep.get('cusum_k', 0.5),
+                                           h=ep.get('cusum_h', 4.0))
+
+    # 能力分析
+    if 'capability' in modules:
+        results['capability'] = _analyze_capability_only(df, numeric_cols)
+    if 'box_cox' in modules:
+        results['box_cox'] = _analyze_boxcox(df, numeric_cols,
+                                              usl=ep.get('usl'),
+                                              lsl=ep.get('lsl'),
+                                              subgroup_size=ep.get('bc_subgroup', 1),
+                                              within_method=ep.get('bc_method', 'Rbar'))
+    if 'cg_cgk' in modules:
+        results['cg_cgk'] = _analyze_cgcgk(df, numeric_cols,
+                                            tolerance=ep.get('cg_tolerance'),
+                                            ref_value=ep.get('cg_ref'),
+                                            percent_tol=ep.get('cg_pct', 20))
+
+    # 统计推断
+    if 'normality' in modules:
+        results['normality'] = _analyze_normality(df, numeric_cols)
+    if 'correlation' in modules:
+        results['correlation'] = _analyze_correlation_only(df, numeric_cols)
+    if 'regression' in modules:
+        results['regression'] = _analyze_regression_only(df, numeric_cols)
     if 'stats_summary' in modules:
         results['stats_summary'] = _analyze_stats_summary(df, numeric_cols)
+
+    # 测量系统
+    if 'uncertainty' in modules:
+        results['uncertainty'] = _analyze_uncertainty(df, numeric_cols,
+                                                       resolution=ep.get('unc_res', 0.001),
+                                                       cal_unc=ep.get('unc_cal', 0.0),
+                                                       temp_range=ep.get('unc_tr', 0.0),
+                                                       temp_coeff=ep.get('unc_tc', 0.0))
+
+    # 特殊分析
+    if 'weibull' in modules:
+        results['weibull'] = _analyze_weibull(df, numeric_cols)
 
     spc_results = results.get('spc', [])
     reg_results = results.get('regression', [])
@@ -1129,9 +1385,19 @@ def batch_import_and_analyze(
 
         params = params_map.get(fname, {})
 
-        # 分组：standalone 和 continuous
-        standalone_mods = [m for m in modules if ALL_MODULES.get(m, {}).get('group') == 'standalone']
-        continuous_mods = [m for m in modules if ALL_MODULES.get(m, {}).get('group') == 'continuous']
+        # 分组：standalone（需特定列格式） vs continuous（适用任何数值列）
+        STANDALONE_MODULE_KEYS = {'pareto', 'grr', 'grr_attribute', 'dimension'}
+        standalone_mods = [m for m in modules if m in STANDALONE_MODULE_KEYS]
+        continuous_mods = [m for m in modules if m not in STANDALONE_MODULE_KEYS]
+
+        # 提取连续型模块额外参数
+        extra_params = {k: v for k, v in params.items() if k not in (
+            'cat_col', 'cnt_col', 'part_col', 'op_col', 'meas_col',
+            'batch_col', 'meas_cols', 'cols', 'tolerance',
+            'ref_col', 'op_cols', 'attr_ops'
+        )}
+        if 'tolerance' in params:
+            extra_params['cg_tolerance'] = params['tolerance']
 
         # ---- standalone 模块各自分析 ----
         for mod in standalone_mods:
@@ -1145,6 +1411,27 @@ def batch_import_and_analyze(
                         part_col=params.get('part_col'),
                         op_col=params.get('op_col'),
                         meas_col=params.get('meas_col'))
+                elif mod == 'grr_attribute':
+                    # 计数型 GRR: 参考列 + 操作员判定列
+                    ref_col = params.get('ref_col', df.columns[0])
+                    op_cols = params.get('op_cols', params.get('attr_ops', []))
+                    if not op_cols:
+                        op_cols = [c for c in df.columns if c != ref_col][:5]
+                    ref = df[ref_col].values
+                    appraisers = {c: df[c].values for c in op_cols if c in df.columns}
+                    r_attr = msa_advanced.attribute_gage_rr(ref, appraisers)
+                    analysis = {
+                        'type': 'grr_attribute',
+                        'chart': r_attr.get('chart'),
+                        'kappa_summary': r_attr.get('kappa_summary', []),
+                        'between_operators_agreement': r_attr.get('between_operators_agreement', 0),
+                        'summary': {
+                            '参考列': ref_col,
+                            '操作员数': len(op_cols),
+                            '样本数': len(ref),
+                            '两两一致性': f"{r_attr.get('between_operators_agreement', 0):.1%}",
+                        }
+                    }
                 elif mod == 'dimension':
                     analysis = analyze_dimension(df,
                         batch_col=params.get('batch_col'),
@@ -1165,7 +1452,9 @@ def batch_import_and_analyze(
         # ---- continuous 模块合并分析 ----
         if continuous_mods:
             try:
-                analysis = analyze_process_selective(df, '数值分析', continuous_mods, cols=params.get('cols'))
+                analysis = analyze_process_selective(df, '数值分析', continuous_mods,
+                                                      cols=params.get('cols'),
+                                                      extra_params=extra_params)
                 analysis['filename'] = fname
                 analysis['module'] = 'continuous'
                 analysis['data_type'] = 'continuous'
@@ -1279,9 +1568,16 @@ def restore_analyses_from_files(files_data: list,
             })
             continue
 
-        # 分组
-        standalone_mods = [m for m in modules if ALL_MODULES.get(m, {}).get('group') == 'standalone']
-        continuous_mods = [m for m in modules if ALL_MODULES.get(m, {}).get('group') == 'continuous']
+        # 分组（与 batch_import_and_analyze 保持一致）
+        STANDALONE_MODULE_KEYS = {'pareto', 'grr', 'grr_attribute', 'dimension'}
+        standalone_mods = [m for m in modules if m in STANDALONE_MODULE_KEYS]
+        continuous_mods = [m for m in modules if m not in STANDALONE_MODULE_KEYS]
+
+        extra_params = {k: v for k, v in params.items() if k not in (
+            'cat_col', 'cnt_col', 'part_col', 'op_col', 'meas_col',
+            'batch_col', 'meas_cols', 'cols', 'tolerance',
+            'ref_col', 'op_cols', 'attr_ops'
+        )}
 
         for mod in standalone_mods:
             try:
@@ -1294,6 +1590,26 @@ def restore_analyses_from_files(files_data: list,
                         part_col=params.get('part_col'),
                         op_col=params.get('op_col'),
                         meas_col=params.get('meas_col'))
+                elif mod == 'grr_attribute':
+                    ref_col = params.get('ref_col', df.columns[0])
+                    op_cols = params.get('op_cols', params.get('attr_ops', []))
+                    if not op_cols:
+                        op_cols = [c for c in df.columns if c != ref_col][:5]
+                    ref = df[ref_col].values
+                    appraisers = {c: df[c].values for c in op_cols if c in df.columns}
+                    r_attr = msa_advanced.attribute_gage_rr(ref, appraisers)
+                    analysis = {
+                        'type': 'grr_attribute',
+                        'chart': r_attr.get('chart'),
+                        'kappa_summary': r_attr.get('kappa_summary', []),
+                        'between_operators_agreement': r_attr.get('between_operators_agreement', 0),
+                        'summary': {
+                            '参考列': ref_col,
+                            '操作员数': len(op_cols),
+                            '样本数': len(ref),
+                            '两两一致性': f"{r_attr.get('between_operators_agreement', 0):.1%}",
+                        }
+                    }
                 elif mod == 'dimension':
                     analysis = analyze_dimension(df,
                         batch_col=params.get('batch_col'),
@@ -1313,7 +1629,9 @@ def restore_analyses_from_files(files_data: list,
 
         if continuous_mods:
             try:
-                analysis = analyze_process_selective(df, '数值分析', continuous_mods, cols=params.get('cols'))
+                analysis = analyze_process_selective(df, '数值分析', continuous_mods,
+                                                      cols=params.get('cols'),
+                                                      extra_params=extra_params)
                 analysis['filename'] = fname
                 analysis['module'] = 'continuous'
                 analysis['data_type'] = 'continuous'
