@@ -792,7 +792,7 @@ def page_capability():
         st.error('无数值列')
         return
 
-    tab1, tab2 = st.tabs(['Cp/Cpk/Pp/Ppk', 'Cg/Cgk 检具能力'])
+    tab1, tab2, tab3 = st.tabs(['Cp/Cpk/Pp/Ppk', '非正态 (Box-Cox)', 'Cg/Cgk 检具能力'])
 
     # --- Tab1: Cp/Cpk ---
     with tab1:
@@ -810,7 +810,15 @@ def page_capability():
                 tgt = st.text_input('目标值', placeholder='留空=不设')
             with c4:
                 ss = st.number_input('子组大小', 1, 10, 1,
-                                     help='1=单值(移动极差法), >1=子组极差法')
+                                     help='1=单值(移动极差法), >1=子组法')
+
+            c5, c6 = st.columns([1, 3])
+            with c5:
+                wm = st.selectbox('组内σ方法', ['Rbar', 'Sbar'],
+                                  help='Rbar=R̄/d₂(极差法), Sbar=S̄/c₄(标准差法, 对正态数据更高效)',
+                                  disabled=(ss <= 1))
+                if ss <= 1:
+                    wm = 'Rbar'  # 单值只能用移动极差
 
             usl = float(usl) if usl else None
             lsl = float(lsl) if lsl else None
@@ -821,7 +829,7 @@ def page_capability():
             elif usl is not None and lsl is not None and usl <= lsl:
                 st.error('USL 必须大于 LSL')
             else:
-                r = capability.process_capability(data, usl, lsl, tgt, ss)
+                r = capability.process_capability(data, usl, lsl, tgt, ss, wm)
                 if 'error' in r:
                     st.error(r['error'])
                 else:
@@ -832,14 +840,23 @@ def page_capability():
                     with cs[2]: st.metric('Pp (长期)', f'{r["Pp"]:.2f}' if r['Pp'] is not None else 'N/A')
                     with cs[3]: st.metric('Ppk (长期)', f'{r["Ppk"]:.2f}' if r['Ppk'] is not None else 'N/A')
                     with cs[4]: st.metric('Cpk 评级', r.get('cpk_level', 'N/A'))
-                    with cs[5]: st.metric('预计 PPM', f'{r["ppm_total"]:,.0f}')
+                    with cs[5]: st.metric('预计 PPM',
+                                           f'{r["ppm_total"]:,.0f}',
+                                           help=f'实测 PPM: {r.get("ppm_observed_total", 0):,.0f}')
 
-                    cs2 = st.columns(4)
+                    cs2 = st.columns(5)
                     with cs2[0]: st.metric('均值', f'{r["mean"]:.4f}')
                     with cs2[1]: st.metric('整体 σ', f'{r["std_overall"]:.4f}')
-                    sigma_method = f'子组极差 (n={r.get("subgroup_size",1)})' if r.get('subgroup_size', 1) > 1 else '移动极差'
+                    wm_label = r.get('within_method', 'Rbar')
+                    if r.get('subgroup_size', 1) <= 1:
+                        sigma_method = '移动极差 MR̄/d₂'
+                    else:
+                        sigma_method = f'子组{wm_label}法 (n={r.get("subgroup_size",1)})'
                     with cs2[2]: st.metric('组内 σ', f'{r["std_within"]:.4f}', help=f'估计方法: {sigma_method}')
                     with cs2[3]: st.metric('样本量', f'{r["n"]} (子组={r.get("subgroup_size",1)})')
+                    with cs2[4]: st.metric('实测 PPM',
+                                           f'{r.get("ppm_observed_total", 0):,.0f}',
+                                           help='实际超规格数据点数 / 总数 × 1M')
 
                     st.plotly_chart(r['chart'], use_container_width=True)
 
@@ -850,8 +867,54 @@ def page_capability():
                             '建议': ['可放宽抽检', '维持现状', '加强控制', '需改进', '急需改进'],
                         }))
 
-    # --- Tab2: Cg/Cgk ---
+    # --- Tab2: Box-Cox 非正态能力 ---
     with tab2:
+        st.caption('数据非正态时，使用 Box-Cox 变换后计算能力指数 (Minitab 兼容)')
+        dc_bc = st.selectbox('数据列', numeric_cols, key='cpk_boxcox_col')
+        data_bc = df[dc_bc].dropna().values
+        if len(data_bc) < 5:
+            st.error('Box-Cox 变换至少需要 5 个数据点')
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                usl_bc = st.text_input('规格上限 USL', key='bc_usl', placeholder='留空=不设')
+            with c2:
+                lsl_bc = st.text_input('规格下限 LSL', key='bc_lsl', placeholder='留空=不设')
+            with c3:
+                ss_bc = st.number_input('子组大小', 1, 10, 1, key='bc_ss',
+                                        help='1=单值, >1=子组法')
+            with c4:
+                wm_bc = st.selectbox('组内σ方法', ['Rbar', 'Sbar'], key='bc_wm')
+
+            usl_bc_f = float(usl_bc) if usl_bc else None
+            lsl_bc_f = float(lsl_bc) if lsl_bc else None
+
+            if usl_bc_f is None and lsl_bc_f is None:
+                st.info('请至少输入一个规格限')
+            elif usl_bc_f is not None and lsl_bc_f is not None and usl_bc_f <= lsl_bc_f:
+                st.error('USL 必须大于 LSL')
+            else:
+                r_bc = capability.process_capability_boxcox(
+                    data_bc, usl_bc_f, lsl_bc_f, subgroup_size=ss_bc, within_method=wm_bc)
+                if 'error' in r_bc:
+                    st.error(r_bc['error'])
+                else:
+                    trans = r_bc.get('transformation', {})
+                    st.info(f'Box-Cox λ = {trans.get("lambda", "N/A")} '
+                            f'{trans.get("shift", "")}')
+                    st.subheader('📊 变换后能力指标')
+                    cs_bc = st.columns(6)
+                    with cs_bc[0]: st.metric('Cp', f'{r_bc["Cp"]:.2f}' if r_bc['Cp'] is not None else 'N/A')
+                    with cs_bc[1]: st.metric('Cpk', f'{r_bc["Cpk"]:.2f}' if r_bc['Cpk'] is not None else 'N/A')
+                    with cs_bc[2]: st.metric('Pp', f'{r_bc["Pp"]:.2f}' if r_bc['Pp'] is not None else 'N/A')
+                    with cs_bc[3]: st.metric('Ppk', f'{r_bc["Ppk"]:.2f}' if r_bc['Ppk'] is not None else 'N/A')
+                    with cs_bc[4]: st.metric('Cpk 评级', r_bc.get('cpk_level', 'N/A'))
+                    with cs_bc[5]: st.metric('预计 PPM', f'{r_bc["ppm_total"]:,.0f}',
+                                             help=f'实测PPM: {r_bc.get("ppm_observed_total", 0):,.0f}')
+                    st.plotly_chart(r_bc['chart'], use_container_width=True)
+
+    # --- Tab3: Cg/Cgk ---
+    with tab3:
         st.caption('MSA Type 1 — 检具能力指数评估')
         dc = st.selectbox('重复测量列', numeric_cols, key='cg_col')
         data = df[dc].dropna().values
@@ -1147,17 +1210,22 @@ def page_msa():
     # --- 计量型 GRR ---
     with t1:
         st.caption('交叉型 (Crossed) 平均值-极差法')
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
             pc = st.selectbox('部件列', all_cols, key='grr_part')
         with c2:
             oc = st.selectbox('操作员列', all_cols, key='grr_op')
         with c3:
             mc = st.selectbox('测量值列', numeric_cols, key='grr_meas')
+        with c4:
+            tol_val = st.text_input('公差 (USL-LSL)', placeholder='留空=不计算%Tol',
+                                     key='grr_tol',
+                                     help='用于计算 %Tolerance: 5.15σ/Tol×100')
 
         parts = df[pc].values
         ops = df[oc].values
         meas = df[mc].values
+        tolerance = float(tol_val) if tol_val else None
         n_parts = len(np.unique(parts))
         n_ops = len(np.unique(ops))
         st.info(f'📋 {n_parts} 部件 × {n_ops} 操作员 × {len(meas)} 次测量')
@@ -1165,7 +1233,7 @@ def page_msa():
         if n_parts < 2 or n_ops < 2:
             st.error('需至少 2 部件 2 操作员')
         else:
-            r = gage_rr.gage_rr_crossed(parts, ops, meas)
+            r = gage_rr.gage_rr_crossed(parts, ops, meas, tolerance)
             if 'error' in r:
                 st.error(r['error'])
             else:
@@ -1186,9 +1254,19 @@ def page_msa():
                 with cs2[1]: st.metric('%GRR (贡献率)', contribs['%GRR'],
                                        help='方差比值: σ²_GRR / σ²_TV × 100')
                 with cs2[2]: st.metric('评级', r['evaluation'])
-                with cs2[3]: st.metric('%P/T (StudyVar)',
-                                       f'{float(pcts["%PV"].replace("%","")):.1f}%',
+                with cs2[3]: st.metric('%PV (StudyVar)',
+                                       pcts['%PV'],
                                        help='部件间标准差占比')
+
+                # %Tolerance (如果提供了公差)
+                pct_tol = r.get('percent_tolerance')
+                if pct_tol:
+                    st.subheader('📏 公差占比 (%Tolerance = 5.15σ / Tol × 100)')
+                    cs3 = st.columns(4)
+                    with cs3[0]: st.metric('%Tol EV', pct_tol['%Tol EV'])
+                    with cs3[1]: st.metric('%Tol AV', pct_tol['%Tol AV'])
+                    with cs3[2]: st.metric('%Tol GRR', pct_tol['%Tol GRR'])
+                    with cs3[3]: st.metric('%Tol PV', pct_tol['%Tol PV'])
 
                 grr_pct = float(r['percent_contributions']['GRR占比 %GRR'].replace('%', ''))
                 st.plotly_chart(r['chart'], use_container_width=True)

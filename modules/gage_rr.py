@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 
-def gage_rr_crossed(parts, operators, measurements):
+def gage_rr_crossed(parts, operators, measurements, tolerance=None):
     """
     交叉型 Gage R&R (平均值-极差法)
     
@@ -16,6 +16,7 @@ def gage_rr_crossed(parts, operators, measurements):
         parts: 部件编号列表
         operators: 操作员列表  
         measurements: 测量值列表
+        tolerance: 公差 (USL-LSL), 可选, 用于计算 %Tolerance
     
     返回包含方差分量和图形的字典
     """
@@ -102,6 +103,20 @@ def gage_rr_crossed(parts, operators, measurements):
     # 区分数 (Number of Distinct Categories, ndc)
     ndc = int(np.floor(1.41 * PV / GRR)) if GRR > 0 else np.inf
 
+    # %Tolerance (Minitab: 5.15σ / Tolerance × 100, 5.15σ 覆盖99%测量变异)
+    pct_tol = None
+    if tolerance is not None and tolerance > 0:
+        tol_EV = 5.15 * EV / tolerance * 100
+        tol_AV = 5.15 * AV / tolerance * 100
+        tol_GRR = 5.15 * GRR / tolerance * 100
+        tol_PV = 5.15 * PV / tolerance * 100
+        pct_tol = {
+            '%Tol EV': f'{tol_EV:.2f}%',
+            '%Tol AV': f'{tol_AV:.2f}%',
+            '%Tol GRR': f'{tol_GRR:.2f}%',
+            '%Tol PV': f'{tol_PV:.2f}%',
+        }
+
     # 评估
     def evaluate_grr(pct):
         if pct < 10:
@@ -140,6 +155,7 @@ def gage_rr_crossed(parts, operators, measurements):
             '%GRR': f'{contrib_GRR:.2f}%',
             '%PV': f'{contrib_PV:.2f}%',
         },
+        'percent_tolerance': pct_tol,  # %Tolerance = 100 × 5.15σ / Tolerance
         # 向后兼容: 保留旧键名
         'percent_contributions': {
             '重复性占比 %EV': f'{pct_EV:.2f}%',
