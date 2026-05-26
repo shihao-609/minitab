@@ -1977,25 +1977,53 @@ def _show_analysis_detail(analysis, data_dict, file_idx):
     elif atype in ('component', 'mechanics', 'continuous'):
         results = analysis.get('results', {})
 
-        # SPC 汇总
-        spc_list = results.get('spc', [])
-        if spc_list:
-            st.caption('**SPC 控制图分析**')
-            st.dataframe(pd.DataFrame(spc_list), use_container_width=True, hide_index=True)
-            bad_spc = [s for s in spc_list if '超限' in s.get('受控状态', '')]
-            if bad_spc:
-                st.warning(f'{len(bad_spc)} 个变量存在超限点')
-                df = data_dict.get(fname)
-                if df is not None:
-                    for s in bad_spc[:2]:
-                        col = s['列名']
-                        if col in df.columns:
-                            data = df[col].dropna().values
-                            if len(data) >= 2:
-                                r = spc_charts.imr_chart(data)
-                                st.caption(f'{col} — I-MR 控制图')
-                                st.plotly_chart(r['chart'], use_container_width=True,
-                                               key=f'batch_imr_{file_idx}_{col}')
+        # ---- SPC 休哈特控制图（支持全部7种子类型）----
+        spc_result = results.get('spc', {})
+        if isinstance(spc_result, dict) and spc_result:
+            # 汇总表
+            spc_summary = spc_result.get('summary', [])
+            if spc_summary:
+                st.caption('**SPC 控制图分析**')
+                st.dataframe(pd.DataFrame(spc_summary), use_container_width=True, hide_index=True)
+                bad_spc = [s for s in spc_summary if '超限' in s.get('受控状态', '')]
+                if bad_spc:
+                    st.warning(f'{len(bad_spc)} 个变量存在超限点')
+
+            # 各子类型的图表（I-MR, X-bar R, X-bar S, P, NP, C, U）
+            sub_keys = ['imr', 'xbar_r', 'xbar_s', 'p', 'np', 'c', 'u']
+            for sk in sub_keys:
+                sub_data = spc_result.get(sk, {})
+                sub_charts = sub_data.get('charts', {}) if isinstance(sub_data, dict) else {}
+                sub_summary = sub_data.get('summary', []) if isinstance(sub_data, dict) else []
+                if sub_charts:
+                    label = batch_analysis.SPC_SUB_MODES.get(sk, {}).get('label', sk)
+                    if sub_summary:
+                        st.caption(f'**{label}**')
+                        st.dataframe(pd.DataFrame(sub_summary), use_container_width=True, hide_index=True)
+                    for chart_key, chart in sub_charts.items():
+                        if chart:
+                            st.plotly_chart(chart, use_container_width=True,
+                                           key=f'batch_spc_{sk}_{file_idx}_{chart_key}')
+        elif isinstance(spc_result, list):
+            # 向后兼容：旧格式（普通列表）
+            spc_list = spc_result
+            if spc_list:
+                st.caption('**SPC 控制图分析**')
+                st.dataframe(pd.DataFrame(spc_list), use_container_width=True, hide_index=True)
+                bad_spc = [s for s in spc_list if '超限' in s.get('受控状态', '')]
+                if bad_spc:
+                    st.warning(f'{len(bad_spc)} 个变量存在超限点')
+                    df = data_dict.get(fname)
+                    if df is not None:
+                        for s in bad_spc[:2]:
+                            col = s['列名']
+                            if col in df.columns:
+                                data = df[col].dropna().values
+                                if len(data) >= 2:
+                                    r = spc_charts.imr_chart(data)
+                                    st.caption(f'{col} — I-MR 控制图')
+                                    st.plotly_chart(r['chart'], use_container_width=True,
+                                                   key=f'batch_imr_{file_idx}_{col}')
 
         # 过程能力
         cap_list = results.get('capability', [])
@@ -2405,6 +2433,97 @@ def page_batch_analysis():
                                                                 default=numeric_cols[:min(8, len(numeric_cols))],
                                                                 key=f'cols_{i}')
 
+                                # ----- SPC 休哈特控制图子类型（多选）-----
+                                if 'spc' in new_modules:
+                                    st.caption('▸ **SPC 控制图 — 休哈特类型**')
+                                    default_spc = st.session_state.get(f'spc_sub_default_{i}', ['imr'])
+                                    spc_options = list(batch_analysis.SPC_SUB_MODES.keys())
+                                    spc_sub_modes = st.multiselect(
+                                        '选择控制图类型 (可多选)',
+                                        options=spc_options,
+                                        format_func=lambda k: batch_analysis.SPC_SUB_MODES[k]['label'],
+                                        default=default_spc,
+                                        key=f'spc_sub_{i}',
+                                        help='连续型(I-MR/X̄-R/X̄-S)自动按列分析；计数型需配置列映射'
+                                    )
+                                    st.session_state[f'spc_sub_default_{i}'] = spc_sub_modes
+                                    params['spc_sub_modes'] = spc_sub_modes
+
+                                    # 连续型子类型的子组参数
+                                    if any(m in spc_sub_modes for m in ('xbar_r', 'xbar_s')):
+                                        c_sub1, c_sub2 = st.columns(2)
+                                        with c_sub1:
+                                            params['spc_subgroup_size'] = st.number_input(
+                                                '子组大小', 2, 25, 5, key=f'spc_ss_{i}',
+                                                help='用于 X-bar R / X-bar S')
+                                        with c_sub2:
+                                            spc_tgt = st.text_input('目标值 (可选)', placeholder='留空=不设',
+                                                                    key=f'spc_tgt_{i}',
+                                                                    help='目标线，适用于 I-MR/X-bar/C/P/NP/C/U')
+                                            if spc_tgt:
+                                                try:
+                                                    params['spc_target'] = float(spc_tgt)
+                                                except ValueError:
+                                                    pass
+                                    elif any(m in spc_sub_modes for m in ('p', 'np', 'c', 'u')):
+                                        spc_tgt = st.text_input('目标值 (可选)', placeholder='留空=不设',
+                                                                 key=f'spc_tgt_{i}',
+                                                                 help='目标线，适用于所有控制图类型')
+                                        if spc_tgt:
+                                            try:
+                                                params['spc_target'] = float(spc_tgt)
+                                            except ValueError:
+                                                pass
+                                    else:
+                                        spc_tgt = st.text_input('目标值 (可选)', placeholder='留空=不设',
+                                                                 key=f'spc_tgt_{i}',
+                                                                 help='目标线 (I-MR)')
+                                        if spc_tgt:
+                                            try:
+                                                params['spc_target'] = float(spc_tgt)
+                                            except ValueError:
+                                                pass
+
+                                    # 计数型 SPC 的列配置（仅当选中时显示）
+                                    has_attr_spc = any(m in spc_sub_modes for m in ('p', 'np', 'c', 'u'))
+                                    if has_attr_spc:
+                                        st.caption('▸ **计数型 SPC 列映射** (自动尝试，也可手动指定)')
+                                        attr_cfg = {}
+                                        ac1, ac2 = st.columns(2)
+                                        if 'p' in spc_sub_modes:
+                                            with ac1:
+                                                attr_cfg['p_defect_col'] = st.selectbox(
+                                                    'P图-不良品数列', numeric_cols, index=0,
+                                                    key=f'spc_p_def_{i}')
+                                            with ac2:
+                                                remain_p = [c for c in numeric_cols if c != attr_cfg.get('p_defect_col')]
+                                                idx2 = 0 if remain_p else 0
+                                                attr_cfg['p_size_col'] = st.selectbox(
+                                                    'P图-样本量列', remain_p if remain_p else numeric_cols,
+                                                    index=idx2, key=f'spc_p_sz_{i}')
+                                        if 'np' in spc_sub_modes:
+                                            attr_cfg['np_col'] = st.selectbox(
+                                                'NP图-不良品数列', numeric_cols, index=0,
+                                                key=f'spc_np_col_{i}')
+                                            params['spc_np_size'] = st.number_input(
+                                                'NP图-固定样本量', 10, 100000, 100, key=f'spc_np_sz_{i}')
+                                        if 'c' in spc_sub_modes:
+                                            attr_cfg['c_col'] = st.selectbox(
+                                                'C图-缺陷数列', numeric_cols, index=0,
+                                                key=f'spc_c_col_{i}')
+                                        if 'u' in spc_sub_modes:
+                                            uc1, uc2 = st.columns(2)
+                                            with uc1:
+                                                attr_cfg['u_defect_col'] = st.selectbox(
+                                                    'U图-缺陷数列', numeric_cols, index=0,
+                                                    key=f'spc_u_def_{i}')
+                                            with uc2:
+                                                remain_u = [c for c in numeric_cols if c != attr_cfg.get('u_defect_col')]
+                                                attr_cfg['u_size_col'] = st.selectbox(
+                                                    'U图-样本量列', remain_u if remain_u else numeric_cols,
+                                                    index=0, key=f'spc_u_sz_{i}')
+                                        params['spc_attr_cols'] = attr_cfg
+
                                 # 能力分析参数
                                 has_cap = any(m in new_modules for m in ('capability', 'box_cox', 'cg_cgk'))
                                 if has_cap:
@@ -2434,9 +2553,12 @@ def page_batch_analysis():
 
                                 # Cg/Cgk 参数
                                 if 'cg_cgk' in new_modules:
-                                    tol_val = params.get('tolerance', global_tolerance if global_tolerance else '')
+                                    tol_val = global_tolerance if global_tolerance else ''
                                     if tol_val:
-                                        params['cg_tolerance'] = float(tol_val)
+                                        try:
+                                            params['cg_tolerance'] = float(tol_val)
+                                        except ValueError:
+                                            pass
                                     params['cg_pct'] = global_cg_pct
 
                                 # Weibull / 不确定度 / Box-Cox 无需额外参数
@@ -2579,7 +2701,7 @@ def page_batch_analysis():
                 | 分类 | 分析模块 | 说明 |
                 |------|---------|------|
                 | 📊 基础图形 | 帕累托图、直方图、箱线图、运行图 | 缺陷/分布/异常值/趋势分析 |
-                | 📈 SPC 控制 | I-MR、EWMA、CUSUM | 过程稳定性和小偏移检测 |
+                | 📈 SPC 控制 | SPC控制图(7种)、EWMA、CUSUM | 过程稳定性和小偏移检测 |
                 | 🎯 能力分析 | Cp/Cpk、Box-Cox、Cg/Cgk | 过程能力/非正态/检具评估 |
                 | 🔢 统计推断 | 正态性检验、相关性、回归、描述性统计 | 分布检验/关联分析/回归建模 |
                 | 🔬 测量系统 | 计量型GRR、计数型GRR、测量不确定度 | MSA 全面评估 |

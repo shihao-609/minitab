@@ -518,14 +518,18 @@ def generate_report(all_analyses: List[dict], filenames: List[str]) -> str:
             results = analysis.get('results', {})
 
             # SPC 汇总
-            spc_list = results.get('spc', [])
+            spc_result = results.get('spc', {})
+            spc_list = spc_result.get('summary', []) if isinstance(spc_result, dict) else spc_result
             if spc_list:
                 lines.append(f'### SPC 控制图分析')
                 lines.append(f'')
-                lines.append(f'| 变量 | 均值 | 标准差 | 超限点 | 状态 |')
-                lines.append(f'|------|------|--------|--------|------|')
+                lines.append(f'| 变量 | 图表类型 | 均值 | 标准差 | 超限点 | 状态 |')
+                lines.append(f'|------|---------|------|--------|--------|------|')
                 for s in spc_list:
-                    lines.append(f'| {s["列名"]} | {s["均值"]:.3f} | {s["标准差"]:.4f} | {s["超限点数"]} | {s["受控状态"]} |')
+                    chart_type = s.get('图表类型', 'I-MR')
+                    mean_val = s.get('均值', 0)
+                    std_val = s.get('标准差', 0)
+                    lines.append(f'| {s["列名"]} | {chart_type} | {mean_val:.3f} | {std_val:.4f} | {s["超限点数"]} | {s["受控状态"]} |')
                 lines.append(f'')
 
             # 过程能力
@@ -681,7 +685,8 @@ def generate_report(all_analyses: List[dict], filenames: List[str]) -> str:
 
         elif atype in ('component', 'mechanics', 'continuous'):
             results = analysis.get('results', {})
-            spc_list = results.get('spc', [])
+            spc_result = results.get('spc', {})
+            spc_list = spc_result.get('summary', []) if isinstance(spc_result, dict) else spc_result
             bad = [s for s in spc_list if '超限' in s.get('受控状态', '')]
             if bad:
                 spc_issues.append(f'⚠️ {len(bad)}个变量SPC异常')
@@ -763,7 +768,7 @@ ALL_MODULES = {
     'boxplot':       {'label': '箱线图',             'group': 'quality_graph', 'desc': '分布特征 + 异常值'},
     'run_chart':     {'label': '运行图',             'group': 'quality_graph', 'desc': '时序趋势 + 游程检验'},
     # ---- SPC 控制 ----
-    'spc':           {'label': 'I-MR 控制图',        'group': 'spc_control',  'desc': '单值-移动极差'},
+    'spc':           {'label': 'SPC 控制图',         'group': 'spc_control',  'desc': '7种休哈特控制图 (多选子类型)'},
     'ewma':          {'label': 'EWMA 控制图',        'group': 'spc_control',  'desc': '指数加权移动平均'},
     'cusum':         {'label': 'CUSUM 控制图',       'group': 'spc_control',  'desc': '累积和 (灵敏检测小偏移)'},
     # ---- 能力分析 ----
@@ -782,6 +787,17 @@ ALL_MODULES = {
     # ---- 特殊分析 ----
     'dimension':     {'label': '型材尺寸分析',       'group': 'special',      'desc': '批次多测量值 SPC'},
     'weibull':       {'label': 'Weibull 可靠性',     'group': 'special',      'desc': '失效时间/寿命分析'},
+}
+
+# 休哈特控制图子类型（在勾选"SPC 控制图"后可多选）
+SPC_SUB_MODES = {
+    'imr':    {'label': 'I-MR (单值-移动极差)',   'func': 'imr',        'cat': 'continuous', 'desc': '单值+移动极差，n≥2'},
+    'xbar_r': {'label': 'X-bar R (均值-极差)',    'func': 'xbar_r',     'cat': 'continuous', 'desc': '需子组≥2，n≥10'},
+    'xbar_s': {'label': 'X-bar S (均值-标准差)',  'func': 'xbar_s',     'cat': 'continuous', 'desc': '需子组≥6，n≥10'},
+    'p':      {'label': 'P 图 (不合格品率)',      'func': 'p',          'cat': 'attribute',  'desc': '需不良品数+样本量两列'},
+    'np':     {'label': 'NP 图 (不合格品数)',     'func': 'np',         'cat': 'attribute',  'desc': '需不良品数+固定样本量'},
+    'c':      {'label': 'C 图 (缺陷数)',          'func': 'c',          'cat': 'attribute',  'desc': '需缺陷数单列，n≥5'},
+    'u':      {'label': 'U 图 (单位缺陷数)',      'func': 'u',          'cat': 'attribute',  'desc': '需缺陷数+样本量两列'},
 }
 
 # 模块分组（用于设置界面按组展示）
@@ -810,27 +826,227 @@ _CONTINUOUS_ANALYZERS = {
 }
 
 
-def _analyze_spc_only(df: pd.DataFrame, numeric_cols: list = None) -> list:
-    """仅执行 SPC I-MR 分析"""
+def _analyze_spc_shewhart(df: pd.DataFrame, numeric_cols: list = None,
+                           spc_sub_modes: list = None,
+                           extra_params: dict = None) -> dict:
+    """执行所有选中的休哈特控制图分析。
+
+    参数:
+        df: 数据 DataFrame
+        numeric_cols: 要分析的数值列，None=自动检测
+        spc_sub_modes: 子类型列表，如 ['imr','xbar_r','xbar_s','p','np','c','u']
+        extra_params: 额外参数，如 subgroup_size, spc_target, spc_attr_cols
+
+    返回:
+        dict: {
+            'summary': [{列名, 均值, 标准差, 超限点数, 受控状态, 图表类型}, ...],
+            'imr': {'charts': {col: fig}, 'summary': [...]},  # 各子类型结果
+            'xbar_r': ...,
+        }
+    """
     if numeric_cols is None:
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    spc_results = []
+    if spc_sub_modes is None:
+        spc_sub_modes = ['imr']
+    ep = extra_params or {}
+    subgroup_size = ep.get('spc_subgroup_size', 5)
+    spc_target = ep.get('spc_target')
+    if spc_target is not None:
+        try:
+            spc_target = float(spc_target)
+        except (ValueError, TypeError):
+            spc_target = None
+
+    # ---- 分离连续型子类型和计数型子类型 ----
+    cont_modes = [m for m in spc_sub_modes if SPC_SUB_MODES.get(m, {}).get('cat') == 'continuous']
+    attr_modes = [m for m in spc_sub_modes if SPC_SUB_MODES.get(m, {}).get('cat') == 'attribute']
+
+    results = {}
+    overall_summary = []  # 统一的汇总表
+
+    # ======== 连续型 SPC (I-MR / X-bar R / X-bar S) ========
     for col in numeric_cols:
         data = df[col].dropna().values
-        if len(data) >= 3:
+        if len(data) < 2:
+            continue
+        n = len(data)
+
+        # --- I-MR ---
+        if 'imr' in cont_modes:
+            if 'imr' not in results:
+                results['imr'] = {'charts': {}, 'summary': []}
             try:
-                r = spc_charts.imr_chart(data)
+                r = spc_charts.imr_chart(data, target=spc_target)
                 ooc = sum(r.get('ooc_points', {}).values()) if isinstance(r.get('ooc_points'), dict) else 0
-                spc_results.append({
-                    '列名': col,
-                    '均值': np.mean(data),
-                    '标准差': np.std(data, ddof=1),
+                results['imr']['charts'][col] = r.get('chart')
+                results['imr']['summary'].append({
+                    '列名': col, '均值': np.mean(data), '标准差': np.std(data, ddof=1),
+                    '超限点': ooc, '状态': '✅ 受控' if ooc == 0 else f'⚠️ {ooc}个超限点',
+                })
+                overall_summary.append({
+                    '列名': col, '图表类型': 'I-MR',
+                    '均值': np.mean(data), '标准差': np.std(data, ddof=1),
+                    '超限点数': ooc, '受控状态': '✅ 受控' if ooc == 0 else f'⚠️ {ooc}个超限点',
+                })
+            except Exception:
+                pass
+
+        # --- X-bar R ---
+        if 'xbar_r' in cont_modes:
+            if 'xbar_r' not in results:
+                results['xbar_r'] = {'charts': {}, 'summary': []}
+            if n >= subgroup_size * 2:  # 至少需要2个子组
+                try:
+                    r = spc_charts.xbar_r_chart(data, subgroup_size=subgroup_size, target=spc_target)
+                    ooc = sum(r.get('ooc_points', {}).values()) if isinstance(r.get('ooc_points'), dict) else 0
+                    stats = r.get('stats', {})
+                    results['xbar_r']['charts'][col] = r.get('chart')
+                    results['xbar_r']['summary'].append({
+                        '列名': col, '子组大小': subgroup_size,
+                        'X̄̄': f"{stats.get('X_bar_bar', 0):.4f}", 'R̄': f"{stats.get('R_bar', 0):.4f}",
+                        '超限点': ooc, '状态': '✅ 受控' if ooc == 0 else f'⚠️ {ooc}个超限点',
+                    })
+                    overall_summary.append({
+                        '列名': col, '图表类型': f'X-bar R(n={subgroup_size})',
+                        '均值': stats.get('X_bar_bar', np.mean(data)),
+                        '标准差': stats.get('sigma_estimate', np.std(data, ddof=1)),
+                        '超限点数': ooc, '受控状态': '✅ 受控' if ooc == 0 else f'⚠️ {ooc}个超限点',
+                    })
+                except Exception:
+                    pass
+
+        # --- X-bar S ---
+        if 'xbar_s' in cont_modes:
+            if 'xbar_s' not in results:
+                results['xbar_s'] = {'charts': {}, 'summary': []}
+            if n >= subgroup_size * 2:
+                try:
+                    r = spc_charts.xbar_s_chart(data, subgroup_size=subgroup_size, target=spc_target)
+                    ooc = sum(r.get('ooc_points', {}).values()) if isinstance(r.get('ooc_points'), dict) else 0
+                    stats = r.get('stats', {})
+                    results['xbar_s']['charts'][col] = r.get('chart')
+                    results['xbar_s']['summary'].append({
+                        '列名': col, '子组大小': subgroup_size,
+                        'X̄̄': f"{stats.get('X_bar_bar', 0):.4f}", 'S̄': f"{stats.get('S_bar', 0):.4f}",
+                        '超限点': ooc, '状态': '✅ 受控' if ooc == 0 else f'⚠️ {ooc}个超限点',
+                    })
+                    overall_summary.append({
+                        '列名': col, '图表类型': f'X-bar S(n={subgroup_size})',
+                        '均值': stats.get('X_bar_bar', np.mean(data)),
+                        '标准差': stats.get('sigma_estimate', np.std(data, ddof=1)),
+                        '超限点数': ooc, '受控状态': '✅ 受控' if ooc == 0 else f'⚠️ {ooc}个超限点',
+                    })
+                except Exception:
+                    pass
+
+    # ======== 计数型 SPC (P / NP / C / U) ========
+    # 计数型需要特殊列匹配：尝试从 numeric_cols 中选择合适的列
+    if attr_modes and len(numeric_cols) >= 1:
+        # 检查 ep 中是否有指定的计数型列映射
+        attr_cols = ep.get('spc_attr_cols', {})
+        # 智能猜测：如果 numeric_cols 的第1列是小整数，可能是缺陷/不良数据
+        first_col = numeric_cols[0] if numeric_cols else None
+        second_col = numeric_cols[1] if len(numeric_cols) >= 2 else None
+        first_data = df[first_col].dropna() if first_col else pd.Series()
+
+        def _is_count_like(s: pd.Series) -> bool:
+            """判断是否像计数数据 (非负整数，范围较小)"""
+            if len(s) == 0:
+                return False
+            is_int_like = (s == s.round()).all() or s.dtype in (np.int32, np.int64)
+            is_nonneg = (s >= 0).all()
+            return is_int_like and is_nonneg
+
+        def _analyze_attr_chart(mode: str, chart_func, col_defect: str,
+                                 col_size: str = None, fixed_size: int = None):
+            """通用计数型图表分析"""
+            if mode not in results:
+                results[mode] = {'charts': {}, 'summary': []}
+            try:
+                defects = df[col_defect].dropna().values
+                if col_size:
+                    sizes = df[col_size].dropna().values
+                    ml = min(len(defects), len(sizes))
+                    defects, sizes = defects[:ml], sizes[:ml]
+                    if len(defects) < 3:
+                        return
+                    if mode == 'p':
+                        r = chart_func(defects, sizes, target=spc_target)
+                    else:  # u
+                        r = chart_func(defects, sizes, target=spc_target)
+                else:
+                    defects = defects.astype(float)
+                    if len(defects) < 5:
+                        return
+                    if mode == 'np':
+                        r = chart_func(defects, fixed_size, target=spc_target)
+                    else:  # c
+                        r = chart_func(defects, target=spc_target)
+
+                ooc = sum(r.get('ooc_points', {}).values()) if isinstance(r.get('ooc_points'), dict) else 0
+                chart_label = col_defect if not col_size else f'{col_defect} / {col_size}'
+                results[mode]['charts'][chart_label] = r.get('chart')
+                results[mode]['summary'].append({
+                    '列': chart_label,
+                    '超限点': ooc,
+                    '状态': '✅ 受控' if ooc == 0 else f'⚠️ {ooc}个超限点',
+                })
+                overall_summary.append({
+                    '列名': chart_label, '图表类型': SPC_SUB_MODES[mode]['label'],
+                    '均值': np.mean(defects),
+                    '标准差': np.std(defects, ddof=1) if len(defects) > 1 else 0,
                     '超限点数': ooc,
                     '受控状态': '✅ 受控' if ooc == 0 else f'⚠️ {ooc}个超限点',
                 })
             except Exception:
                 pass
-    return spc_results
+
+        # P 图：需要缺陷数 + 样本量
+        if 'p' in attr_modes:
+            p_col = attr_cols.get('p_defect_col', first_col)
+            p_size_col = attr_cols.get('p_size_col', second_col)
+            if p_col and p_size_col and p_col in df.columns and p_size_col in df.columns:
+                _analyze_attr_chart('p', spc_charts.p_chart, p_col, col_size=p_size_col)
+            elif _is_count_like(first_data) and len(numeric_cols) >= 2:
+                # 智能猜测
+                _analyze_attr_chart('p', spc_charts.p_chart, first_col, col_size=second_col)
+
+        # NP 图：需要缺陷数 + 固定样本量
+        if 'np' in attr_modes:
+            np_col = attr_cols.get('np_col', first_col)
+            np_size = ep.get('spc_np_size', 100)
+            if np_col and np_col in df.columns and first_data is not None and len(first_data) >= 5:
+                if _is_count_like(df[np_col].dropna()):
+                    _analyze_attr_chart('np', spc_charts.np_chart, np_col, fixed_size=np_size)
+
+        # C 图：需要缺陷数单列
+        if 'c' in attr_modes:
+            c_col = attr_cols.get('c_col', first_col)
+            if c_col and c_col in df.columns:
+                c_data = df[c_col].dropna()
+                if len(c_data) >= 5 and _is_count_like(c_data):
+                    _analyze_attr_chart('c', spc_charts.c_chart, c_col)
+
+        # U 图：需要缺陷数 + 样本量
+        if 'u' in attr_modes:
+            u_col = attr_cols.get('u_defect_col', first_col)
+            u_size_col = attr_cols.get('u_size_col', second_col)
+            if u_col and u_size_col and u_col in df.columns and u_size_col in df.columns:
+                _analyze_attr_chart('u', spc_charts.u_chart, u_col, col_size=u_size_col)
+            elif _is_count_like(first_data) and len(numeric_cols) >= 2:
+                _analyze_attr_chart('u', spc_charts.u_chart, first_col, col_size=second_col)
+
+    return {
+        'summary': overall_summary,
+        **results,  # imr, xbar_r, xbar_s, p, np, c, u
+    }
+
+
+# 保留旧函数的向后兼容包装
+def _analyze_spc_only(df: pd.DataFrame, numeric_cols: list = None) -> list:
+    """仅执行 SPC I-MR 分析（向后兼容）"""
+    result = _analyze_spc_shewhart(df, numeric_cols, spc_sub_modes=['imr'])
+    return result.get('summary', [])
 
 
 def _analyze_capability_only(df: pd.DataFrame, numeric_cols: list = None) -> list:
@@ -1193,9 +1409,12 @@ def analyze_process_selective(df: pd.DataFrame, data_label: str = '',
     results = {}
     ep = extra_params or {}
 
-    # 基础图形
+    # 基础图形 — SPC 休哈特控制图（支持子类型多选）
     if 'spc' in modules:
-        results['spc'] = _analyze_spc_only(df, numeric_cols)
+        spc_sub = ep.get('spc_sub_modes', ['imr'])
+        results['spc'] = _analyze_spc_shewhart(df, numeric_cols,
+                                                spc_sub_modes=spc_sub,
+                                                extra_params=ep)
     if 'histogram' in modules:
         results['histogram'] = _analyze_histogram(df, numeric_cols)
     if 'boxplot' in modules:
@@ -1250,7 +1469,8 @@ def analyze_process_selective(df: pd.DataFrame, data_label: str = '',
     if 'weibull' in modules:
         results['weibull'] = _analyze_weibull(df, numeric_cols)
 
-    spc_results = results.get('spc', [])
+    spc_result = results.get('spc', {})
+    spc_results = spc_result.get('summary', []) if isinstance(spc_result, dict) else spc_result
     reg_results = results.get('regression', [])
     normality_results = results.get('normality', [])
 
