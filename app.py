@@ -14,11 +14,13 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from io import BytesIO
+from datetime import datetime
 from dotenv import load_dotenv
 
 from modules import spc_charts, capability, pareto_histogram, gage_rr, supabase_helper
 from modules import spc_advanced, msa_advanced, stats_tools, quality_tools, advanced_analysis
-from modules import auth
+from modules import auth, batch_analysis
 
 load_dotenv()
 
@@ -79,6 +81,7 @@ st.sidebar.caption('Quality Management System v2.0')
 menu = st.sidebar.radio(
     '选择分析模块',
     ['📁 数据导入',
+     '📋 批量分析报告',
      '📈 SPC 控制图',
      '🎯 过程能力分析',
      '📊 质量图形工具',
@@ -1866,10 +1869,574 @@ def page_advanced():
     show_data_info()
 
 
+# ==================== 批量分析与报告 ====================
+
+# 各数据类型推荐的分析模块映射
+TYPE_MODULE_MAP = {
+    'pareto':     [('📊 质量图形工具', '帕累托图/直方图')],
+    'grr':        [('🔬 测量系统分析 MSA', 'Gage R&R')],
+    'component':  [('📈 SPC 控制图', 'SPC/EWMA/CUSUM'),
+                   ('🎯 过程能力分析', 'Cp/Cpk'),
+                   ('🔢 统计推断', '相关性/回归')],
+    'mechanics':  [('📈 SPC 控制图', 'SPC/EWMA/CUSUM'),
+                   ('🎯 过程能力分析', 'Cp/Cpk'),
+                   ('🔢 统计推断', '相关性/回归')],
+    'dimension':  [('📈 SPC 控制图', 'SPC/EWMA/CUSUM'),
+                   ('🎯 过程能力分析', 'Cp/Cpk')],
+    'continuous': [('📈 SPC 控制图', 'SPC/EWMA/CUSUM'),
+                   ('🎯 过程能力分析', 'Cp/Cpk')],
+}
+
+
+def _parse_preview_df(uploaded_file):
+    """解析上传文件为 DataFrame 用于预览，返回 (df, None) 或 (None, error_msg)"""
+    raw_bytes = uploaded_file.getvalue()
+    df = None
+    for enc in ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'gb18030', 'latin-1']:
+        try:
+            df = pd.read_csv(BytesIO(raw_bytes), encoding=enc)
+            break
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return df, None if df is not None else '无法解析编码'
+
+
+def _show_analysis_detail(analysis, data_dict, file_idx):
+    """渲染单个文件的分析详情（复用于上传分析和历史报告查看）"""
+    atype = analysis.get('type', 'unknown')
+    fname = analysis.get('filename', '')
+    dtype_label = batch_analysis.DATA_TYPES.get(analysis.get('detected_type', atype), atype)
+    is_override = analysis.get('manual_override', False)
+
+    if atype == 'error':
+        st.error(f'❌ {analysis.get("error", "分析错误")}')
+        return
+
+    st.caption(
+        f'🔍 数据类型: {dtype_label} | '
+        f'{"✏️ 手动指定" if is_override else f"自动识别 (置信度: {analysis.get("detection_confidence", 0):.0%})"}'
+    )
+
+    # ---- 推荐跳转模块 ----
+    recommended = TYPE_MODULE_MAP.get(analysis.get('detected_type', atype), [])
+    if recommended:
+        with st.expander('🚀 跳转到分析模块', expanded=False):
+            st.caption('点击下方按钮，将数据加载到工作区，然后用侧边栏切换到对应模块：')
+            cols = st.columns(len(recommended))
+            df = data_dict.get(fname)
+            for idx, (mod_name, mod_desc) in enumerate(recommended):
+                with cols[idx]:
+                    if st.button(f'📂 预加载数据\n→ {mod_name}',
+                                 key=f'jump_{file_idx}_{idx}',
+                                 use_container_width=True,
+                                 help=f'数据已加载，请在侧边栏选择「{mod_name}」查看'):
+                        if df is not None:
+                            set_new_data(df)
+                            st.success(f'✅ 数据已加载！请在左侧侧边栏选择「{mod_name}」模块进行深度分析')
+                            st.info(f'👈 左侧菜单 → {mod_name}')
+
+    # ===== 各类型分析详情 =====
+    if atype == 'pareto':
+        result = analysis.get('result', {})
+        if 'chart' in result:
+            st.plotly_chart(result['chart'], use_container_width=True)
+        st.caption(f"总缺陷数: {analysis['summary'].get('总缺陷数', 'N/A')}")
+
+    elif atype == 'grr':
+        grr_method = st.radio(
+            '分析方法', ['平均值-极差法 (X-bar R)', 'ANOVA 法 (方差分析)'],
+            horizontal=True, key=f'batch_grr_method_{file_idx}'
+        )
+        result_key = 'result_anova' if 'ANOVA' in grr_method else 'result_xbar'
+        result = analysis.get(result_key, {})
+
+        if 'chart' in result:
+            st.plotly_chart(result['chart'], use_container_width=True)
+
+        std_contrib = result.get('stddev_contributions', {})
+        if std_contrib:
+            st.caption('**方差分量**')
+            cs = st.columns(5)
+            with cs[0]: st.metric('重复性 EV', std_contrib.get('重复性 (EV)', 'N/A'))
+            with cs[1]: st.metric('再现性 AV', std_contrib.get('再现性 (AV)', 'N/A'))
+            with cs[2]: st.metric('GRR σ', std_contrib.get('GRR', 'N/A'))
+            with cs[3]: st.metric('部件 PV', std_contrib.get('部件间 (PV)', 'N/A'))
+            with cs[4]: st.metric('ndc', result.get('ndc', 'N/A'))
+
+        pcts = result.get('percent_studyvar', {})
+        contribs = result.get('percent_contribution', {})
+        if pcts:
+            cs2 = st.columns(4)
+            with cs2[0]: st.metric('%GRR (StudyVar)', pcts.get('%GRR', 'N/A'))
+            with cs2[1]: st.metric('%GRR (贡献率)', contribs.get('%GRR', 'N/A'))
+            with cs2[2]: st.metric('评级', result.get('evaluation', 'N/A'))
+            with cs2[3]: st.metric('%PV', pcts.get('%PV', 'N/A'))
+
+        if 'ANOVA' in grr_method and 'anova_table' in result:
+            with st.expander('ANOVA 方差分析表'):
+                st.table(result['anova_table'])
+
+    elif atype in ('component', 'mechanics', 'continuous'):
+        results = analysis.get('results', {})
+
+        # SPC 汇总
+        spc_list = results.get('spc', [])
+        if spc_list:
+            st.caption('**SPC 控制图分析**')
+            st.dataframe(pd.DataFrame(spc_list), use_container_width=True, hide_index=True)
+            bad_spc = [s for s in spc_list if '超限' in s.get('受控状态', '')]
+            if bad_spc:
+                st.warning(f'{len(bad_spc)} 个变量存在超限点')
+                df = data_dict.get(fname)
+                if df is not None:
+                    for s in bad_spc[:2]:
+                        col = s['列名']
+                        if col in df.columns:
+                            data = df[col].dropna().values
+                            if len(data) >= 2:
+                                r = spc_charts.imr_chart(data)
+                                st.caption(f'{col} — I-MR 控制图')
+                                st.plotly_chart(r['chart'], use_container_width=True,
+                                               key=f'batch_imr_{file_idx}_{col}')
+
+        # 过程能力
+        cap_list = results.get('capability', [])
+        if cap_list:
+            st.caption('**过程能力分析**')
+            st.dataframe(pd.DataFrame(cap_list), use_container_width=True, hide_index=True)
+
+        # 相关性矩阵
+        corr = results.get('correlation')
+        if corr and 'chart' in corr:
+            st.caption('**相关性矩阵**')
+            st.plotly_chart(corr['chart'], use_container_width=True, key=f'batch_corr_{file_idx}')
+
+        # 回归关系
+        reg_list = results.get('regression', [])
+        if reg_list:
+            st.caption('**显著回归关系 (p < 0.05)**')
+            st.dataframe(pd.DataFrame(reg_list), use_container_width=True, hide_index=True)
+
+        # 分布直方图
+        st.caption('**数据分布**')
+        df = data_dict.get(fname)
+        if df is not None:
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            cols_per_row = min(3, len(numeric_cols))
+            if cols_per_row > 0:
+                rows = (len(numeric_cols) + cols_per_row - 1) // cols_per_row
+                for ri in range(rows):
+                    cs = st.columns(cols_per_row)
+                    for ci in range(cols_per_row):
+                        vi = ri * cols_per_row + ci
+                        if vi < len(numeric_cols):
+                            col = numeric_cols[vi]
+                            with cs[ci]:
+                                data = df[col].dropna().values
+                                if len(data) >= 3:
+                                    try:
+                                        hist_r = pareto_histogram.histogram_with_stats(data, title=col)
+                                        if 'chart' in hist_r:
+                                            st.plotly_chart(hist_r['chart'], use_container_width=True,
+                                                           key=f'batch_hist_{file_idx}_{col}')
+                                    except Exception:
+                                        pass
+
+    elif atype == 'dimension':
+        summary = analysis.get('summary', {})
+        cs = st.columns(4)
+        with cs[0]: st.metric('批次数', summary.get('批次数', 'N/A'))
+        with cs[1]: st.metric('测量点/批', summary.get('每批测量次数', 'N/A'))
+        with cs[2]: st.metric('整体均值', summary.get('整体均值', 'N/A'))
+        with cs[3]: st.metric('整体标准差', summary.get('整体标准差', 'N/A'))
+
+        for spc_key, spc_title in [('spc_overall', '整体 I-MR'), ('spc_means', '批次均值 I-MR')]:
+            spc = analysis.get(spc_key)
+            if spc and 'chart' in spc:
+                st.caption(f'**{spc_title} 控制图**')
+                st.plotly_chart(spc['chart'], use_container_width=True, key=f'batch_{spc_key}_{file_idx}')
+
+        cap = analysis.get('capability')
+        if cap and 'chart' in cap:
+            st.caption('**过程能力分析**')
+            st.plotly_chart(cap['chart'], use_container_width=True, key=f'batch_cap_{file_idx}')
+
+
+def page_batch_analysis():
+    st.header('📋 批量导入与自动分析报告')
+
+    # ---- 初始化 session 状态 ----
+    for key in ['batch_files_status', 'batch_type_overrides']:
+        if key not in st.session_state:
+            st.session_state[key] = {} if 'overrides' in key else []
+
+    tab_upload, tab_history = st.tabs(['📤 上传与手动分析', '📂 历史报告'])
+
+    # ================================================================
+    # Tab 1: 上传与手动分析
+    # ================================================================
+    with tab_upload:
+        uploaded_files = st.file_uploader(
+            '📤 选择 CSV 文件（支持多选）',
+            type=['csv'],
+            accept_multiple_files=True,
+            key='batch_uploader',
+            help='支持自动识别 + 手动覆盖数据类型'
+        )
+
+        if uploaded_files:
+            st.info(f'📁 已选择 **{len(uploaded_files)}** 个文件')
+
+            # ---- 文件预览 + 手动类型选择 ----
+            st.subheader('🔧 数据类型设置')
+            st.caption('💡 系统自动识别后可手动修改，识别错误时请在此调整')
+
+            preview_data = []
+            override_changed = False
+
+            for i, uf in enumerate(uploaded_files):
+                df_preview, err = _parse_preview_df(uf)
+                if df_preview is None:
+                    preview_data.append({
+                        '文件名': uf.name, '识别类型': f'❌ {err}', '行数': '-', '列数': '-', '列名': '-'
+                    })
+                    continue
+
+                # 自动识别
+                auto_dtype, auto_conf = batch_analysis.detect_data_type(df_preview, uf.name)
+                auto_label = batch_analysis.DATA_TYPES.get(auto_dtype, auto_dtype)
+
+                # 当前选中的类型（默认 = 自动识别）
+                current_override = st.session_state.batch_type_overrides.get(uf.name, None)
+                all_type_options = ['（自动）'] + list(batch_analysis.DATA_TYPES.keys())
+
+                # 显示文件信息 + 手动选择
+                c1, c2 = st.columns([3, 1])
+                with c1:
+                    st.caption(
+                        f'**{uf.name}** · {len(df_preview)}行×{len(df_preview.columns)}列 · '
+                        f'列: {", ".join(df_preview.columns[:3])}'
+                        f'{"..." if len(df_preview.columns) > 3 else ""}'
+                    )
+                    st.caption(f'🔍 自动识别: **{auto_label}** (置信度: {auto_conf:.0%})')
+
+                with c2:
+                    selected_idx = 0  # 默认 = (自动)
+                    if current_override:
+                        try:
+                            selected_idx = list(batch_analysis.DATA_TYPES.keys()).index(current_override) + 1
+                        except ValueError:
+                            pass
+
+                    new_selection = st.selectbox(
+                        '手动指定类型',
+                        options=all_type_options,
+                        index=selected_idx,
+                        key=f'type_override_{i}',
+                        label_visibility='collapsed',
+                        format_func=lambda x: batch_analysis.DATA_TYPES.get(x, x) if x != '（自动）' else f'自动 ({auto_label})'
+                    )
+
+                    if new_selection != '（自动）':
+                        if current_override != new_selection:
+                            st.session_state.batch_type_overrides[uf.name] = new_selection
+                            override_changed = True
+                    elif current_override is not None:
+                        del st.session_state.batch_type_overrides[uf.name]
+                        override_changed = True
+
+                preview_data.append({
+                    '文件名': uf.name,
+                    '识别类型': f'{"✏️ " + batch_analysis.DATA_TYPES.get(st.session_state.batch_type_overrides.get(uf.name, ""), "") if uf.name in st.session_state.batch_type_overrides else "🤖 " + auto_label}',
+                    '行数': len(df_preview),
+                    '列数': len(df_preview.columns),
+                    '列名': ', '.join(df_preview.columns[:5]) + ('...' if len(df_preview.columns) > 5 else ''),
+                })
+
+            with st.expander('📋 汇总预览', expanded=False):
+                st.dataframe(pd.DataFrame(preview_data), use_container_width=True, hide_index=True)
+
+            # GRR 公差
+            with st.expander('⚙️ 分析参数', expanded=False):
+                grr_tol = st.text_input('GRR 公差 (USL-LSL)', placeholder='留空=不计算 %Tolerance', key='batch_grr_tol')
+                grr_tolerance = float(grr_tol) if grr_tol else None
+
+            # ---- 分析按钮 ----
+            st.divider()
+            c1, c2, c3 = st.columns([2, 1, 2])
+            with c2:
+                analyze_btn = st.button('🚀 开始分析', use_container_width=True, type='primary', key='batch_analyze_btn')
+
+            if analyze_btn:
+                with st.spinner('正在导入和分析...'):
+                    data_dict, analyses, report = batch_analysis.batch_import_and_analyze(
+                        uploaded_files, grr_tolerance,
+                        type_overrides=st.session_state.batch_type_overrides
+                    )
+                    st.session_state.batch_data = data_dict
+                    st.session_state.batch_analyses = analyses
+                    st.session_state.batch_report = report
+                    # 保存上传文件引用（用于后续保存到数据库）
+                    st.session_state.batch_uploaded_files = uploaded_files
+                    st.session_state.batch_type_overrides_snapshot = dict(st.session_state.batch_type_overrides)
+                    # 预加载第一个数据
+                    for fname, df in data_dict.items():
+                        set_new_data(df)
+                        break
+                st.success(f'分析完成！共处理 {len(analyses)} 个文件')
+                st.rerun()
+
+        # ---- 显示分析结果 ----
+        if 'batch_analyses' in st.session_state and st.session_state.batch_analyses:
+            analyses = st.session_state.batch_analyses
+            data_dict = st.session_state.get('batch_data', {})
+
+            st.divider()
+            st.subheader('📊 分析结果')
+
+            result_tabs = st.tabs(
+                ['📝 综合报告'] +
+                [f'📊 {a.get("filename", f"文件{i+1}")}' for i, a in enumerate(analyses)]
+            )
+
+            # === 综合报告 ===
+            with result_tabs[0]:
+                report = st.session_state.get('batch_report', '')
+                if report:
+                    st.markdown(report)
+                    c1, c2, c3 = st.columns([1, 1, 2])
+                    with c1:
+                        st.download_button('📥 下载报告 (MD)', report.encode('utf-8-sig'),
+                                          '质量综合分析报告.md', 'text/markdown',
+                                          key='download_report', use_container_width=True)
+                    with c2:
+                        if st.button('💾 保存到数据库', key='save_report_db', use_container_width=True, type='primary'):
+                            # 构建存储数据
+                            type_map = st.session_state.get('batch_type_overrides_snapshot', {})
+                            # 补充自动识别的类型
+                            for a in analyses:
+                                fn = a.get('filename', '')
+                                if fn not in type_map:
+                                    type_map[fn] = a.get('detected_type', 'continuous')
+
+                            files_data = batch_analysis.build_files_data(
+                                st.session_state.get('batch_uploaded_files', []), type_map)
+                            analyses_summary = batch_analysis.build_analyses_summary(analyses)
+
+                            report_name = f'质量分析报告_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+                            result = supabase_helper.save_report(
+                                report_name, report, analyses_summary, files_data, len(analyses))
+
+                            if result:
+                                st.success(f'✅ 已保存报告: {report_name}')
+                                st.session_state.pop('_db_reports', None)  # 清除缓存
+                            else:
+                                # 表可能不存在，提示创建
+                                st.error('保存失败，可能数据库表未创建')
+                                with st.expander('📋 建表 SQL（请在 Supabase SQL Editor 中执行）'):
+                                    st.code(supabase_helper.get_create_reports_table_sql(), language='sql')
+
+            # === 各文件详情 ===
+            for i, (analysis, t) in enumerate(zip(analyses, result_tabs[1:])):
+                with t:
+                    _show_analysis_detail(analysis, data_dict, i)
+
+            # 清除 + 导航提示
+            st.divider()
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                if st.button('🗑️ 清除分析结果', key='clear_batch'):
+                    for k in ['batch_data', 'batch_analyses', 'batch_report',
+                              'batch_uploaded_files', 'batch_type_overrides_snapshot']:
+                        st.session_state.pop(k, None)
+                    st.rerun()
+            with c2:
+                st.caption('💡 分析完成后，可使用侧边栏其他模块对预加载的数据做深度分析')
+
+        # 空状态
+        if 'batch_analyses' not in st.session_state or not st.session_state.batch_analyses:
+            st.info('👆 上传 CSV 文件，可自动识别或手动指定类型，然后点击「开始分析」')
+            with st.expander('📖 支持的数据类型', expanded=False):
+                st.markdown("""
+                | 数据类型 | 典型列名 | 自动分析 |
+                |---------|---------|---------|
+                | **缺陷数据** | 不良类型, 数量 | 帕累托图, TOP分析 |
+                | **GRR数据** | Part, Operator, Measurement | X-barR + ANOVA, ndc |
+                | **化学成分** | 批次, Si含量, Mg含量... | SPC, 能力, 相关性 |
+                | **力学性能** | 批次, 抗拉强度, 屈服强度... | SPC, 能力, 回归 |
+                | **型材尺寸** | 批次, 测量值1, 测量值2... | SPC, 能力, 批次分析 |
+                """)
+
+        # 当前数据预览
+        show_data_info()
+
+    # ================================================================
+    # Tab 2: 历史报告
+    # ================================================================
+    with tab_history:
+        st.subheader('📂 已保存的分析报告')
+
+        # 确保表存在
+        table_ok = supabase_helper.ensure_reports_table()
+
+        if st.button('🔄 刷新列表', key='refresh_reports'):
+            st.session_state.pop('_db_reports', None)
+            st.rerun()
+
+        if '_db_reports' not in st.session_state:
+            st.session_state._db_reports = supabase_helper.list_reports()
+
+        reports = st.session_state.get('_db_reports', [])
+
+        if not reports:
+            if not table_ok:
+                st.warning('⚠️ 数据库表 `analysis_reports` 尚未创建')
+                st.info('请在 Supabase Dashboard → SQL Editor 中执行以下 SQL 创建表：')
+                st.code(supabase_helper.get_create_reports_table_sql(), language='sql')
+            else:
+                st.info('暂无已保存的报告。上传分析后点击「💾 保存到数据库」即可。')
+        else:
+            # 已选中的报告（用于查看详情）
+            if 'selected_report_id' not in st.session_state:
+                st.session_state.selected_report_id = None
+
+            for rpt in reports:
+                rid = rpt.get('id', '')
+                rname = rpt.get('name', '未命名')
+                fcount = rpt.get('file_count', 0)
+                created = str(rpt.get('created_at', ''))[:19]
+                analyses_summary = rpt.get('analyses_summary', [])
+
+                # 构建摘要文本
+                summary_parts = []
+                if isinstance(analyses_summary, list):
+                    for a in analyses_summary:
+                        fn = a.get('filename', '?')
+                        dt = a.get('detected_type', 'unknown')
+                        summary_parts.append(f'{fn} [{batch_analysis.DATA_TYPES.get(dt, dt)}]')
+
+                with st.expander(f'📋 {rname}  ({created})', expanded=(rid == st.session_state.selected_report_id)):
+                    st.caption(f'包含 {fcount} 个文件: {"; ".join(summary_parts[:3])}'
+                              f'{"..." if len(summary_parts) > 3 else ""}')
+
+                    c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+                    with c1:
+                        if st.button('📖 查看报告', key=f'view_{rid}', use_container_width=True):
+                            with st.spinner('加载报告...'):
+                                full_rpt = supabase_helper.load_report(rid)
+                                if full_rpt:
+                                    st.session_state.viewed_report = full_rpt
+                                    st.session_state.selected_report_id = rid
+                            st.rerun()
+                    with c2:
+                        if st.button('🔄 重新分析', key=f'reanalyze_{rid}', use_container_width=True):
+                            with st.spinner('正在重新分析...'):
+                                full_rpt = supabase_helper.load_report(rid)
+                                if full_rpt:
+                                    files_data = full_rpt.get('files_data', [])
+                                    if isinstance(files_data, str):
+                                        import json
+                                        files_data = json.loads(files_data)
+                                    data_dict, analyses = batch_analysis.restore_analyses_from_files(files_data)
+                                    if analyses:
+                                        report_md = batch_analysis.generate_report(
+                                            [a for a in analyses if a.get('type') != 'error'],
+                                            [a.get('filename', '') for a in analyses if a.get('type') != 'error']
+                                        )
+                                        st.session_state.batch_data = data_dict
+                                        st.session_state.batch_analyses = analyses
+                                        st.session_state.batch_report = report_md
+                                        st.session_state.selected_report_id = rid
+                                        for fname, df in data_dict.items():
+                                            set_new_data(df)
+                                            break
+                                        st.success(f'已重新分析 {len(analyses)} 个文件')
+                            st.rerun()
+                    with c3:
+                        if st.button('🗑️ 删除', key=f'del_{rid}', use_container_width=True):
+                            if supabase_helper.delete_report(rid):
+                                st.session_state.pop('_db_reports', None)
+                                st.session_state.selected_report_id = None
+                                st.session_state.pop('viewed_report', None)
+                                st.success('已删除')
+                                st.rerun()
+                    with c4:
+                        # 在每个报告的 expander 里提供快速跳转到各模块的快捷方式
+                        if analyses_summary and isinstance(analyses_summary, list) and len(analyses_summary) > 0:
+                            first_type = analyses_summary[0].get('detected_type', '')
+                            recommended = TYPE_MODULE_MAP.get(first_type, [])
+                            if recommended:
+                                mod_name = recommended[0][0]
+                                if st.button(f'🚀 {mod_name}', key=f'nav_{rid}', use_container_width=True,
+                                            help='加载数据并跳转到对应模块'):
+                                    full_rpt = supabase_helper.load_report(rid)
+                                    if full_rpt:
+                                        files_data = full_rpt.get('files_data', [])
+                                        if isinstance(files_data, str):
+                                            import json
+                                            files_data = json.loads(files_data)
+                                        if files_data:
+                                            from io import StringIO
+                                            csv_str = files_data[0].get('csv_data', '')
+                                            try:
+                                                df = pd.read_csv(StringIO(csv_str))
+                                                set_new_data(df)
+                                                st.success(f'✅ 数据已加载！请在左侧侧边栏选择「{mod_name}」模块进行深度分析')
+                                                st.info(f'👈 左侧菜单 → {mod_name}')
+                                            except Exception:
+                                                pass
+
+            st.divider()
+
+            # ---- 查看选中的报告详情 ----
+            if 'viewed_report' in st.session_state and st.session_state.viewed_report:
+                viewed = st.session_state.viewed_report
+                st.subheader(f'📝 {viewed.get("name", "报告详情")}')
+
+                detail_tabs = st.tabs(['📝 Markdown 报告', '📊 交互式分析'])
+
+                with detail_tabs[0]:
+                    report_md = viewed.get('report_md', '')
+                    if report_md:
+                        st.markdown(report_md)
+                        st.download_button('📥 下载报告', report_md.encode('utf-8-sig'),
+                                          f'{viewed.get("name", "report")}.md', 'text/markdown',
+                                          key='dl_history_report')
+                    else:
+                        st.info('报告中无文字内容')
+
+                with detail_tabs[1]:
+                    st.caption('基于已保存数据重新生成交互式图表')
+                    if st.button('🔄 加载交互式分析', key='load_interactive', use_container_width=True, type='primary'):
+                        with st.spinner('正在分析...'):
+                            files_data = viewed.get('files_data', [])
+                            if isinstance(files_data, str):
+                                import json
+                                files_data = json.loads(files_data)
+                            data_dict, analyses = batch_analysis.restore_analyses_from_files(files_data)
+                            if analyses:
+                                valid = [a for a in analyses if a.get('type') != 'error']
+                                st.session_state.batch_data = data_dict
+                                st.session_state.batch_analyses = analyses
+                                st.session_state.batch_report = batch_analysis.generate_report(
+                                    valid, [a.get('filename', '') for a in valid]) if valid else ''
+                                for fname, df in data_dict.items():
+                                    set_new_data(df)
+                                    break
+                                st.success(f'已加载 {len(analyses)} 个文件的交互分析')
+                                st.rerun()
+
+                if st.button('❌ 关闭', key='close_report_view'):
+                    st.session_state.pop('viewed_report', None)
+                    st.rerun()
+
+
 # ==================== 主路由 ====================
 def main():
     if menu == '📁 数据导入':
         page_data_import()
+    elif menu == '📋 批量分析报告':
+        page_batch_analysis()
     elif menu == '📈 SPC 控制图':
         page_spc()
     elif menu == '🎯 过程能力分析':

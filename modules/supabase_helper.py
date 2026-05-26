@@ -306,3 +306,174 @@ def delete_fishbone_config(config_id: str) -> bool:
     except Exception as e:
         st.error(f"删除鱼骨图配置失败: {e}")
         return False
+
+
+# ==================== 分析报告 CRUD ====================
+
+def ensure_reports_table() -> bool:
+    """
+    自动创建 analysis_reports 表（如果不存在）。
+    使用 Supabase REST API 的 rpc 或直接尝试插入来判断。
+
+    注意：Supabase REST API 不支持 DDL，此函数通过
+    尝试查询来检测表是否存在，不存在时提示用户执行 SQL。
+    """
+    try:
+        client = _get_client()
+        _check_client(client)
+        # 尝试查询一行，看表是否存在
+        client.table("analysis_reports").select("id").limit(1).execute()
+        return True
+    except Exception:
+        # 表不存在，尝试创建
+        try:
+            client = _get_client()
+            _check_client(client)
+            # 使用 REST API 无法直接创建表，返回 False 让调用方提示
+            pass
+        except Exception:
+            pass
+        return False
+
+
+def get_create_reports_table_sql() -> str:
+    """返回创建 analysis_reports 表的 SQL 语句"""
+    return """
+CREATE TABLE IF NOT EXISTS analysis_reports (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES auth.users(id),
+    name TEXT NOT NULL,
+    report_md TEXT,
+    analyses_summary JSONB DEFAULT '[]'::jsonb,
+    files_data JSONB DEFAULT '[]'::jsonb,
+    file_count INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 启用 RLS
+ALTER TABLE analysis_reports ENABLE ROW LEVEL SECURITY;
+
+-- RLS 策略：用户只能访问自己的报告
+CREATE POLICY "Users can view own reports"
+    ON analysis_reports FOR SELECT
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert own reports"
+    ON analysis_reports FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update own reports"
+    ON analysis_reports FOR UPDATE
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete own reports"
+    ON analysis_reports FOR DELETE
+    USING (auth.uid() = user_id);
+
+-- 创建索引
+CREATE INDEX IF NOT EXISTS idx_reports_user_id ON analysis_reports(user_id);
+CREATE INDEX IF NOT EXISTS idx_reports_created_at ON analysis_reports(created_at DESC);
+"""
+
+
+def save_report(name: str, report_md: str, analyses_summary: list,
+                files_data: list, file_count: int = 0) -> Optional[dict]:
+    """
+    保存分析报告到 Supabase
+
+    Args:
+        name: 报告名称
+        report_md: Markdown 格式的综合报告
+        analyses_summary: 各文件分析摘要 [{filename, type, summary}, ...]
+        files_data: 原始文件数据 [{filename, csv_data, data_type}, ...]
+        file_count: 文件数量
+
+    Returns:
+        保存的记录，或 None
+    """
+    try:
+        client = _get_client()
+        _check_client(client)
+        data = {
+            "name": name,
+            "report_md": report_md,
+            "analyses_summary": json.loads(json.dumps(analyses_summary, ensure_ascii=False, default=str)),
+            "files_data": json.loads(json.dumps(files_data, ensure_ascii=False)),
+            "file_count": file_count,
+        }
+        uid = _get_user_id()
+        if uid:
+            data["user_id"] = uid
+
+        result = client.table("analysis_reports").insert(data).execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        st.error(f"保存报告失败: {e}")
+        return None
+
+
+def list_reports() -> list:
+    """
+    列出当前用户的所有分析报告（按时间倒序）
+
+    Returns:
+        报告列表（不含 files_data 大字段，提升加载速度）
+    """
+    try:
+        client = _get_client()
+        _check_client(client)
+        result = client.table("analysis_reports").select(
+            "id,name,file_count,analyses_summary,created_at"
+        ).order("created_at", desc=True).execute()
+
+        uid = _get_user_id()
+        if uid and result.data:
+            result.data = [r for r in result.data if r.get("user_id") == uid]
+
+        return result.data
+    except Exception as e:
+        st.error(f"获取报告列表失败: {e}")
+        return []
+
+
+def load_report(report_id: str) -> Optional[dict]:
+    """
+    加载完整的分析报告（包含 report_md 和 files_data）
+
+    Args:
+        report_id: 报告 UUID
+
+    Returns:
+        报告完整记录，或 None
+    """
+    try:
+        client = _get_client()
+        _check_client(client)
+        result = client.table("analysis_reports").select("*").eq("id", report_id).execute()
+        if result.data:
+            record = result.data[0]
+            rid = record.get("user_id")
+            uid = _get_user_id()
+            if uid and rid and rid != uid:
+                st.error("无权访问此报告")
+                return None
+            return record
+        return None
+    except Exception as e:
+        st.error(f"加载报告失败: {e}")
+        return None
+
+
+def delete_report(report_id: str) -> bool:
+    """
+    删除指定的分析报告
+    """
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("analysis_reports").delete().eq("id", report_id).execute()
+        return True
+    except Exception as e:
+        st.error(f"删除报告失败: {e}")
+        return False
