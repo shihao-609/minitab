@@ -7,15 +7,58 @@ v2 关键变更（应对"增加账号密码"的影响）：
   1. 所有写操作自动注入 user_id，插入时携带当前用户身份
   2. 读取操作优先使用用户 JWT 客户端，Supabase RLS 策略自动过滤数据
   3. 兼容旧版 anon key 客户端（非认证模式，用于注册/登录阶段）
+
+v3: 添加数据库冷启动重试机制（解决 Supabase 免费版暂停后唤醒慢的问题）
 """
 
 import os
+import time
 from datetime import datetime, timezone
 from supabase import create_client, Client
 import pandas as pd
 import json
 import streamlit as st
 from typing import Optional, List
+from functools import wraps
+
+# ==================== 重试机制 ====================
+
+RETRY_MAX = 3           # 最大重试次数
+RETRY_DELAY = 3         # 每次重试间隔（秒），Supabase 冷启动通常需要 2-5 秒
+RETRY_DELAY_BACKOFF = 2  # 退避倍数（3s → 6s → 12s）
+
+
+def _with_retry(func):
+    """
+    数据库操作重试装饰器
+    当 Supabase 免费版项目处于暂停状态时，首次请求会触发冷启动，
+    需要等待 2-5 秒后重试。此装饰器自动处理该场景。
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        last_error = None
+        delay = RETRY_DELAY
+        for attempt in range(RETRY_MAX):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_error = e
+                msg = str(e).lower()
+                # 判断是否是需要重试的错误类型
+                retryable = any(kw in msg for kw in [
+                    "connection", "timeout", "timed out",
+                    "failed to connect", "refused",
+                    "server terminated", "unexpected",
+                    "network", "reset", "broken pipe",
+                    "could not connect", "sslerror",
+                ])
+                if not retryable or attempt >= RETRY_MAX - 1:
+                    raise last_error
+                st.warning(f"⏳ 数据库正在唤醒中，{delay}秒后重试...（第{attempt + 1}次）")
+                time.sleep(delay)
+                delay *= RETRY_DELAY_BACKOFF
+        raise last_error
+    return wrapper
 
 
 # ==================== 客户端初始化 ====================
@@ -86,21 +129,18 @@ def _check_client(client: Optional[Client]):
 
 # ==================== 数据集 CRUD ====================
 
+@_with_retry
+def _do_save_dataset(client, data):
+    result = client.table("datasets").insert(data).execute()
+    return result.data[0] if result.data else None
+
+
 def save_dataset(name: str, df: pd.DataFrame, columns_info: dict = None) -> Optional[dict]:
     """
     将 DataFrame 保存到 Supabase 数据集表
 
-    v2 变更：
-      - 自动注入 user_id（登录状态下）
-      - 使用 JWT 客户端调用（RLS 策略确保数据隔离）
-
-    Args:
-        name: 数据集名称
-        df: 要保存的 DataFrame
-        columns_info: 可选的列信息
-
-    Returns:
-        保存的记录，或 None（失败时）
+    v3 变更：
+      - 添加重试机制，处理 Supabase 免费版冷启动
     """
     try:
         client = _get_client()
@@ -111,39 +151,33 @@ def save_dataset(name: str, df: pd.DataFrame, columns_info: dict = None) -> Opti
             "columns_info": columns_info or list(df.columns),
             "row_count": len(df),
         }
-        # 注入用户 ID
         uid = _get_user_id()
         if uid:
             data["user_id"] = uid
 
-        result = client.table("datasets").insert(data).execute()
-        return result.data[0] if result.data else None
+        return _do_save_dataset(client, data)
     except Exception as e:
         st.error(f"保存数据集失败: {e}")
         return None
+
+
+@_with_retry
+def _do_load_dataset(client, dataset_id):
+    return client.table("datasets").select("*").eq("id", dataset_id).execute()
 
 
 def load_dataset(dataset_id: str) -> Optional[pd.DataFrame]:
     """
     从 Supabase 加载指定的数据集
 
-    v2 变更：
-      - 使用 JWT 客户端调用，RLS 自动限制只能读取自己的数据
-      - 即使 RLS 未配置，也会回退到手动 user_id 过滤
-
-    Args:
-        dataset_id: 数据集 UUID
-
-    Returns:
-        DataFrame，或 None（失败时）
+    v3 变更：添加重试机制，处理 Supabase 免费版冷启动
     """
     try:
         client = _get_client()
         _check_client(client)
-        result = client.table("datasets").select("*").eq("id", dataset_id).execute()
+        result = _do_load_dataset(client, dataset_id)
         if result.data:
             record = result.data[0]
-            # RLS 回退：如果记录有 user_id 且与当前用户不匹配，拒绝访问
             rid = record.get("user_id")
             uid = _get_user_id()
             if uid and rid and rid != uid:
@@ -157,26 +191,24 @@ def load_dataset(dataset_id: str) -> Optional[pd.DataFrame]:
         return None
 
 
+@_with_retry
+def _do_list_datasets(client):
+    return client.table("datasets").select("*").order("created_at", desc=True).execute()
+
+
 def list_datasets() -> list:
     """
     列出当前用户的所有数据集
 
-    v2 变更：
-      - RLS 策略自动按 user_id 过滤
-      - 如果未配置 RLS，客户端 fallback 手动过滤
-
-    Returns:
-        数据集列表（按创建时间倒序）
+    v3 变更：添加重试机制
     """
     try:
         client = _get_client()
         _check_client(client)
-        result = client.table("datasets").select("*").order("created_at", desc=True).execute()
+        result = _do_list_datasets(client)
 
         uid = _get_user_id()
         if uid and result.data:
-            # RLS 回退过滤：只返回属于当前用户的记录
-            # （如果 RLS 正确配置，这一步是冗余的但无害）
             result.data = [r for r in result.data if r.get("user_id") == uid]
 
         return result.data
@@ -208,16 +240,21 @@ def update_dataset(dataset_id: str, name: str = None, df: pd.DataFrame = None) -
         return False
 
 
+@_with_retry
+def _do_delete_dataset(client, dataset_id):
+    return client.table("datasets").delete().eq("id", dataset_id).execute()
+
+
 def delete_dataset(dataset_id: str) -> bool:
     """
     删除数据集
 
-    v2 变更：使用 JWT 客户端，RLS 确保只能删除自己的数据
+    v3 变更：添加重试机制
     """
     try:
         client = _get_client()
         _check_client(client)
-        client.table("datasets").delete().eq("id", dataset_id).execute()
+        _do_delete_dataset(client, dataset_id)
         return True
     except Exception as e:
         st.error(f"删除数据集失败: {e}")
@@ -226,11 +263,17 @@ def delete_dataset(dataset_id: str) -> bool:
 
 # ==================== 鱼骨图配置 CRUD ====================
 
+@_with_retry
+def _do_save_fishbone(client, data):
+    result = client.table("fishbone_configs").insert(data).execute()
+    return result.data[0] if result.data else None
+
+
 def save_fishbone(name: str, problem: str, raw_input: str) -> Optional[dict]:
     """
     将鱼骨图配置保存到独立的 fishbone_configs 表
 
-    v2 变更：自动注入 user_id
+    v3 变更：添加重试机制
     """
     try:
         client = _get_client()
@@ -244,23 +287,27 @@ def save_fishbone(name: str, problem: str, raw_input: str) -> Optional[dict]:
         if uid:
             data["user_id"] = uid
 
-        result = client.table("fishbone_configs").insert(data).execute()
-        return result.data[0] if result.data else None
+        return _do_save_fishbone(client, data)
     except Exception as e:
         st.error(f"保存鱼骨图配置失败: {e}")
         return None
+
+
+@_with_retry
+def _do_list_fishbone(client):
+    return client.table("fishbone_configs").select("*").order("created_at", desc=True).execute()
 
 
 def list_fishbone_configs() -> list:
     """
     列出当前用户的所有鱼骨图配置
 
-    v2 变更：RLS + fallback 过滤
+    v3 变更：添加重试机制
     """
     try:
         client = _get_client()
         _check_client(client)
-        result = client.table("fishbone_configs").select("*").order("created_at", desc=True).execute()
+        result = _do_list_fishbone(client)
 
         uid = _get_user_id()
         if uid and result.data:
@@ -272,14 +319,20 @@ def list_fishbone_configs() -> list:
         return []
 
 
+@_with_retry
+def _do_load_fishbone(client, config_id):
+    return client.table("fishbone_configs").select("*").eq("id", config_id).execute()
+
+
 def load_fishbone_config(config_id: str) -> Optional[dict]:
     """
     加载指定鱼骨图配置
+    v3 变更：添加重试机制
     """
     try:
         client = _get_client()
         _check_client(client)
-        result = client.table("fishbone_configs").select("*").eq("id", config_id).execute()
+        result = _do_load_fishbone(client, config_id)
         if result.data:
             record = result.data[0]
             rid = record.get("user_id")
@@ -294,14 +347,20 @@ def load_fishbone_config(config_id: str) -> Optional[dict]:
         return None
 
 
+@_with_retry
+def _do_delete_fishbone(client, config_id):
+    return client.table("fishbone_configs").delete().eq("id", config_id).execute()
+
+
 def delete_fishbone_config(config_id: str) -> bool:
     """
     删除指定的鱼骨图配置
+    v3 变更：添加重试机制
     """
     try:
         client = _get_client()
         _check_client(client)
-        client.table("fishbone_configs").delete().eq("id", config_id).execute()
+        _do_delete_fishbone(client, config_id)
         return True
     except Exception as e:
         st.error(f"删除鱼骨图配置失败: {e}")
@@ -384,20 +443,18 @@ CREATE INDEX IF NOT EXISTS idx_reports_created_at ON analysis_reports(created_at
 """
 
 
+@_with_retry
+def _do_save_report(client, data):
+    result = client.table("analysis_reports").insert(data).execute()
+    return result.data[0] if result.data else None
+
+
 def save_report(name: str, report_md: str, analyses_summary: list,
                 files_data: list, file_count: int = 0) -> Optional[dict]:
     """
     保存分析报告到 Supabase
 
-    Args:
-        name: 报告名称
-        report_md: Markdown 格式的综合报告
-        analyses_summary: 各文件分析摘要 [{filename, type, summary}, ...]
-        files_data: 原始文件数据 [{filename, csv_data, data_type}, ...]
-        file_count: 文件数量
-
-    Returns:
-        保存的记录，或 None
+    v3 变更：添加重试机制，处理冷启动
     """
     try:
         client = _get_client()
@@ -417,8 +474,7 @@ def save_report(name: str, report_md: str, analyses_summary: list,
             "user_id": uid,
         }
 
-        result = client.table("analysis_reports").insert(data).execute()
-        return result.data[0] if result.data else None
+        return _do_save_report(client, data)
     except Exception as e:
         err_msg = str(e)
         if "row-level security" in err_msg.lower() or "42501" in err_msg:
@@ -430,19 +486,23 @@ def save_report(name: str, report_md: str, analyses_summary: list,
         return None
 
 
+@_with_retry
+def _do_list_reports(client):
+    return client.table("analysis_reports").select(
+        "id,name,file_count,analyses_summary,created_at,user_id"
+    ).order("created_at", desc=True).execute()
+
+
 def list_reports() -> list:
     """
     列出当前用户的所有分析报告（按时间倒序）
 
-    Returns:
-        报告列表（不含 files_data 大字段，提升加载速度）
+    v3 变更：添加重试机制
     """
     try:
         client = _get_client()
         _check_client(client)
-        result = client.table("analysis_reports").select(
-            "id,name,file_count,analyses_summary,created_at,user_id"
-        ).order("created_at", desc=True).execute()
+        result = _do_list_reports(client)
 
         uid = _get_user_id()
         if uid and result.data:
@@ -454,20 +514,26 @@ def list_reports() -> list:
         return []
 
 
+@_with_retry
+def _do_load_report(client, report_id):
+    return client.table("analysis_reports").select("*").eq("id", report_id).execute()
+
+
+@_with_retry
+def _do_delete_report(client, report_id):
+    return client.table("analysis_reports").delete().eq("id", report_id).execute()
+
+
 def load_report(report_id: str) -> Optional[dict]:
     """
     加载完整的分析报告（包含 report_md 和 files_data）
 
-    Args:
-        report_id: 报告 UUID
-
-    Returns:
-        报告完整记录，或 None
+    v3 变更：添加重试机制
     """
     try:
         client = _get_client()
         _check_client(client)
-        result = client.table("analysis_reports").select("*").eq("id", report_id).execute()
+        result = _do_load_report(client, report_id)
         if result.data:
             record = result.data[0]
             rid = record.get("user_id")
@@ -485,11 +551,13 @@ def load_report(report_id: str) -> Optional[dict]:
 def delete_report(report_id: str) -> bool:
     """
     删除指定的分析报告
+
+    v3 变更：添加重试机制
     """
     try:
         client = _get_client()
         _check_client(client)
-        client.table("analysis_reports").delete().eq("id", report_id).execute()
+        _do_delete_report(client, report_id)
         return True
     except Exception as e:
         st.error(f"删除报告失败: {e}")
