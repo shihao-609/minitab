@@ -102,16 +102,47 @@ def get_authenticated_client() -> Optional[Client]:
     - anon key 客户端：匿名访问，RLS 策略无法识别用户
     - JWT 客户端：携带用户身份，RLS 策略可正确过滤数据
     
-    每次调用都重新创建，因为 JWT 可能会过期；
-    如果 JWT 过期，Supabase 会自动 refresh。
+    注意：JWT 默认约 1 小时过期。直接把 JWT 当 API key 传入时，
+    supabase-py 不会自动刷新（没有 refresh_token 机制）。
+    因此这里先检查过期时间，快过期时用 refresh_token 手动刷新，
+    并把新会话写回 session_state，再创建客户端。
     """
-    jwt = get_user_jwt()
-    if not jwt:
+    import time
+
+    session = st.session_state.session
+    if not session:
+        return None
+    access_token = getattr(session, "access_token", None)
+    if not access_token:
         return None
     url = _get_supabase_url()
     if not url:
         return None
-    return create_client(url, jwt)
+
+    expires_at = getattr(session, "expires_at", None)
+    if expires_at and time.time() > float(expires_at) - 60:
+        # access token 即将/已经过期 → 用 refresh_token 刷新
+        refresh_token = getattr(session, "refresh_token", None)
+        anon = get_anon_client()
+        if not refresh_token or anon is None:
+            return None
+        try:
+            resp = anon.auth.refresh_session(refresh_token)
+            new_session = getattr(resp, "session", None)
+            if not new_session:
+                st.session_state.auth_error = "登录会话已过期，请重新登录"
+                return None
+            st.session_state.session = new_session
+            st.session_state.user = getattr(new_session, "user", None)
+            session = new_session
+            access_token = getattr(new_session, "access_token", None)
+        except Exception as e:
+            st.session_state.auth_error = f"登录会话刷新失败: {e}"
+            return None
+
+    if not access_token:
+        return None
+    return create_client(url, access_token)
 
 
 # ==================== 认证操作 ====================
@@ -202,8 +233,8 @@ def logout():
     st.session_state.session = None
     st.session_state.auth_error = None
     
-    # 清除与用户相关的数据
-    keys_to_clear = ["user_data", "saved_data"]
+    # 清除与用户相关的数据及免密登录标记（登出后再次带邮箱跳转需重新触发 SSO）
+    keys_to_clear = ["user_data", "saved_data", "sso_attempted", "login_email"]
     for key in keys_to_clear:
         if key in st.session_state:
             del st.session_state[key]
