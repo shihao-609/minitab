@@ -211,36 +211,40 @@ def logout():
 
 # ==================== 免密静默登录（从知识库跳转） ====================
 
-def _to_dict(x):
-    """把 supabase 返回的对象或 dict 统一转成 dict，便于取值"""
-    if isinstance(x, dict):
-        return x
-    d = {}
-    if x is not None:
-        for attr in ("id", "email", "email_otp", "properties", "users"):
-            if hasattr(x, attr):
-                v = getattr(x, attr)
-                if v is not None:
-                    d[attr] = v
-    return d
-
-
-def _generate_magiclink_otp(admin, email) -> Optional[str]:
+def _generate_magiclink_otp(url, service_key, email) -> Optional[str]:
     """
     后台生成 magiclink 令牌（不发邮件），返回可用的 email_otp（6 位数字）。
-    新版 Supabase 的 action_link 里是 hash 后的 token（verify 不认），
-    email_otp 才是能被 verify_otp 接受的令牌。
+    直接用 GoTrue REST API 调用：
+      - 新版 Supabase 的 action_link 里是 hash 后的 token（verify 不认），
+        email_otp 才是能被 verify_otp 接受的令牌；
+      - supabase-py 的 generate_link 只解析 user 对象，email_otp/action_link
+        会被丢弃，所以必须用 REST 方式拿原始返回。
     """
     try:
-        res = admin.auth.admin.generate_link({
-            "type": "magiclink",
-            "email": email,
-            "options": {"should_send_link": False},
-        })
-        d = _to_dict(res)
-        email_otp = d.get("email_otp")
+        import httpx
+    except Exception:
+        return None
+    try:
+        resp = httpx.post(
+            f"{url}/auth/v1/admin/generate_link",
+            headers={
+                "apikey": service_key,
+                "Authorization": f"Bearer {service_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "type": "magiclink",
+                "email": email,
+                "options": {"should_send_link": False},
+            },
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json() or {}
+        email_otp = data.get("email_otp")
         if not email_otp:
-            props = d.get("properties")
+            props = data.get("properties") or {}
             if isinstance(props, dict):
                 email_otp = props.get("email_otp")
         return str(email_otp) if email_otp else None
@@ -333,7 +337,7 @@ def sso_login(email: str) -> bool:
         anon = get_anon_client()
 
         # 第一步：直接尝试登录（已注册且已确认的邮箱）
-        otp = _generate_magiclink_otp(admin, email)
+        otp = _generate_magiclink_otp(url, service_key, email)
         if otp and _verify_otp_login(anon, email, otp):
             return True
 
@@ -361,7 +365,7 @@ def sso_login(email: str) -> bool:
                 raise ce
 
         # 第三步：再次尝试登录
-        otp = _generate_magiclink_otp(admin, email)
+        otp = _generate_magiclink_otp(url, service_key, email)
         if otp and _verify_otp_login(anon, email, otp):
             return True
 
