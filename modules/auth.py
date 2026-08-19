@@ -224,7 +224,6 @@ def sso_login(email: str) -> bool:
     Returns:
         True 表示登录成功，False 表示失败（错误信息在 st.session_state.auth_error）
     """
-    import re
     try:
         url = _get_supabase_url()
         service_key = _get_supabase_service_key()
@@ -239,28 +238,27 @@ def sso_login(email: str) -> bool:
             "options": {"should_send_link": False},
         })
 
-        # 兼容 supabase-py 不同版本的返回结构（对象属性 / dict）
+        # 新版 Supabase 返回的 action_link 里是 hash 后的 token（verify 不认），
+        # 真正可用的是 email_otp（6 位数字）。兼容对象 / dict 两种结构提取。
+        email_otp = None
         if isinstance(res, dict):
-            props = res.get("properties", {}) or {}
-            action_link = props.get("action_link", "") if isinstance(props, dict) else str(props)
+            props = res.get("properties") or {}
+            email_otp = res.get("email_otp")
+            if not email_otp and isinstance(props, dict):
+                email_otp = props.get("email_otp")
         else:
             props = getattr(res, "properties", None) or {}
-            action_link = getattr(props, "action_link", "") if props else ""
-
-        # 从 action_link 中提取 token（形如 ?token=xxx&type=magiclink）
-        token = ""
-        if action_link:
-            m = re.search(r"[?&]token=([^&]+)", str(action_link))
-            if m:
-                token = m.group(1)
-        if not token:
+            email_otp = getattr(res, "email_otp", None)
+            if not email_otp and props:
+                email_otp = getattr(props, "email_otp", None)
+        if not email_otp:
             st.session_state.auth_error = "自动登录失败：无法获取登录令牌"
             return False
 
         anon = get_anon_client()
         resp = anon.auth.verify_otp({
             "email": email,
-            "token": token,
+            "token": str(email_otp),
             "type": "magiclink",
         })
 
