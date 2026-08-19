@@ -248,15 +248,38 @@ def _generate_magiclink_otp(admin, email) -> Optional[str]:
         return None
 
 
-def _find_user_id(admin, email) -> Optional[str]:
-    """按邮箱查找用户 ID，找不到返回 None"""
+def _find_user_id(url, service_key, email) -> Optional[str]:
+    """
+    按邮箱查找用户 ID（直接调 GoTrue Admin API 分页遍历）。
+    不用 supabase-py 的 list_users：不同版本返回结构不一致（列表 / 对象），
+    解析失败会导致误判邮箱不存在。REST 调用已实测可靠。
+    """
     try:
-        res = admin.auth.admin.list_users(page=1, per_page=1000)
-        d = _to_dict(res)
-        for u in d.get("users") or []:
-            u = _to_dict(u)
-            if u.get("email") == email:
-                return u.get("id")
+        import httpx
+    except Exception:
+        return None
+    try:
+        headers = {
+            "apikey": service_key,
+            "Authorization": f"Bearer {service_key}",
+        }
+        page = 1
+        while page <= 50:
+            resp = httpx.get(
+                f"{url}/auth/v1/admin/users?page={page}&per_page=1000",
+                headers=headers,
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json() or {}
+            users = data.get("users") or []
+            for u in users:
+                if u.get("email") == email:
+                    return u.get("id")
+            if len(users) < 1000:
+                break
+            page += 1
         return None
     except Exception:
         return None
@@ -315,15 +338,27 @@ def sso_login(email: str) -> bool:
             return True
 
         # 第二步：确保用户存在且已确认（未注册邮箱也能登录）
-        uid = _find_user_id(admin, email)
+        uid = _find_user_id(url, service_key, email)
         if uid:
             admin.auth.admin.update_user_by_id(uid, {"email_confirm": True})
         else:
-            admin.auth.admin.create_user({
-                "email": email,
-                "password": _secrets.token_urlsafe(16),
-                "email_confirm": True,
-            })
+            # 用户不存在 → 创建已确认账号
+            created = False
+            try:
+                admin.auth.admin.create_user({
+                    "email": email,
+                    "password": _secrets.token_urlsafe(16),
+                    "email_confirm": True,
+                })
+                created = True
+            except Exception as ce:
+                # 并发/重复创建：邮箱其实已存在 → 再查一次拿到 ID
+                uid = _find_user_id(url, service_key, email)
+                if uid:
+                    admin.auth.admin.update_user_by_id(uid, {"email_confirm": True})
+                    created = True
+            if not created:
+                raise ce
 
         # 第三步：再次尝试登录
         otp = _generate_magiclink_otp(admin, email)
