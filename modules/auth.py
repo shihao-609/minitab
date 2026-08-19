@@ -211,19 +211,94 @@ def logout():
 
 # ==================== 免密静默登录（从知识库跳转） ====================
 
+def _to_dict(x):
+    """把 supabase 返回的对象或 dict 统一转成 dict，便于取值"""
+    if isinstance(x, dict):
+        return x
+    d = {}
+    if x is not None:
+        for attr in ("id", "email", "email_otp", "properties", "users"):
+            if hasattr(x, attr):
+                v = getattr(x, attr)
+                if v is not None:
+                    d[attr] = v
+    return d
+
+
+def _generate_magiclink_otp(admin, email) -> Optional[str]:
+    """
+    后台生成 magiclink 令牌（不发邮件），返回可用的 email_otp（6 位数字）。
+    新版 Supabase 的 action_link 里是 hash 后的 token（verify 不认），
+    email_otp 才是能被 verify_otp 接受的令牌。
+    """
+    try:
+        res = admin.auth.admin.generate_link({
+            "type": "magiclink",
+            "email": email,
+            "options": {"should_send_link": False},
+        })
+        d = _to_dict(res)
+        email_otp = d.get("email_otp")
+        if not email_otp:
+            props = d.get("properties")
+            if isinstance(props, dict):
+                email_otp = props.get("email_otp")
+        return str(email_otp) if email_otp else None
+    except Exception:
+        return None
+
+
+def _find_user_id(admin, email) -> Optional[str]:
+    """按邮箱查找用户 ID，找不到返回 None"""
+    try:
+        res = admin.auth.admin.list_users(page=1, per_page=1000)
+        d = _to_dict(res)
+        for u in d.get("users") or []:
+            u = _to_dict(u)
+            if u.get("email") == email:
+                return u.get("id")
+        return None
+    except Exception:
+        return None
+
+
+def _verify_otp_login(anon, email, otp) -> bool:
+    """用 OTP 验证登录，成功则写入 session_state"""
+    if anon is None:
+        return False
+    try:
+        resp = anon.auth.verify_otp({
+            "email": email,
+            "token": otp,
+            "type": "magiclink",
+        })
+        st.session_state.authenticated = True
+        st.session_state.user = resp.user
+        st.session_state.session = resp.session
+        st.session_state.auth_error = None
+        return True
+    except Exception:
+        return False
+
+
 def sso_login(email: str) -> bool:
     """
-    知识库跳转免密登录：后台用 service_role 生成 magiclink 令牌（不发邮件），
-    再通过 verify_otp 完成验证，直接建立登录会话。
+    知识库跳转免密登录（支持未注册邮箱自动创建账号）。
 
-    说明：
-      - 邮箱已存在 → 直接生成令牌登录
-      - 邮箱不存在 → magiclink 类型的 generate_link 会自动创建用户并登录
-      - 需要 Streamlit Secrets 配置 SUPABASE_SERVICE_ROLE_KEY
+    流程：
+      1. 先直接 magiclink 登录（已注册且已确认的邮箱）
+      2. 失败则检查邮箱：
+         - 不存在 → 后台自动创建已确认账号（无需邮箱验证）
+         - 存在但未确认 → 后台直接标记为已确认
+      3. 再次 magiclink 登录
+
+    需要 Streamlit Secrets 配置 SUPABASE_SERVICE_ROLE_KEY。
 
     Returns:
         True 表示登录成功，False 表示失败（错误信息在 st.session_state.auth_error）
     """
+    import secrets as _secrets
+
     try:
         url = _get_supabase_url()
         service_key = _get_supabase_service_key()
@@ -232,41 +307,31 @@ def sso_login(email: str) -> bool:
             return False
 
         admin = create_client(url, service_key)
-        res = admin.auth.admin.generate_link({
-            "type": "magiclink",
-            "email": email,
-            "options": {"should_send_link": False},
-        })
-
-        # 新版 Supabase 返回的 action_link 里是 hash 后的 token（verify 不认），
-        # 真正可用的是 email_otp（6 位数字）。兼容对象 / dict 两种结构提取。
-        email_otp = None
-        if isinstance(res, dict):
-            props = res.get("properties") or {}
-            email_otp = res.get("email_otp")
-            if not email_otp and isinstance(props, dict):
-                email_otp = props.get("email_otp")
-        else:
-            props = getattr(res, "properties", None) or {}
-            email_otp = getattr(res, "email_otp", None)
-            if not email_otp and props:
-                email_otp = getattr(props, "email_otp", None)
-        if not email_otp:
-            st.session_state.auth_error = "自动登录失败：无法获取登录令牌"
-            return False
-
         anon = get_anon_client()
-        resp = anon.auth.verify_otp({
-            "email": email,
-            "token": str(email_otp),
-            "type": "magiclink",
-        })
 
-        st.session_state.authenticated = True
-        st.session_state.user = resp.user
-        st.session_state.session = resp.session
-        st.session_state.auth_error = None
-        return True
+        # 第一步：直接尝试登录（已注册且已确认的邮箱）
+        otp = _generate_magiclink_otp(admin, email)
+        if otp and _verify_otp_login(anon, email, otp):
+            return True
+
+        # 第二步：确保用户存在且已确认（未注册邮箱也能登录）
+        uid = _find_user_id(admin, email)
+        if uid:
+            admin.auth.admin.update_user_by_id(uid, {"email_confirm": True})
+        else:
+            admin.auth.admin.create_user({
+                "email": email,
+                "password": _secrets.token_urlsafe(16),
+                "email_confirm": True,
+            })
+
+        # 第三步：再次尝试登录
+        otp = _generate_magiclink_otp(admin, email)
+        if otp and _verify_otp_login(anon, email, otp):
+            return True
+
+        st.session_state.auth_error = "自动登录失败：无法获取登录令牌"
+        return False
     except Exception as e:
         st.session_state.auth_error = f"自动登录失败: {e}"
         return False
