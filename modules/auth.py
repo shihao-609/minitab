@@ -36,6 +36,14 @@ def _get_supabase_anon_key() -> str:
         return os.environ.get("SUPABASE_ANON_KEY", "")
 
 
+def _get_supabase_service_key() -> str:
+    """获取 service_role key（仅服务端使用，用于免密登录生成令牌）"""
+    try:
+        return st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    except Exception:
+        return os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+
+
 def get_anon_client() -> Optional[Client]:
     """获取使用 anon key 的客户端（仅用于注册/登录，无权读写受 RLS 保护的数据）"""
     url = _get_supabase_url()
@@ -201,6 +209,71 @@ def logout():
             del st.session_state[key]
 
 
+# ==================== 免密静默登录（从知识库跳转） ====================
+
+def sso_login(email: str) -> bool:
+    """
+    知识库跳转免密登录：后台用 service_role 生成 magiclink 令牌（不发邮件），
+    再通过 verify_otp 完成验证，直接建立登录会话。
+
+    说明：
+      - 邮箱已存在 → 直接生成令牌登录
+      - 邮箱不存在 → magiclink 类型的 generate_link 会自动创建用户并登录
+      - 需要 Streamlit Secrets 配置 SUPABASE_SERVICE_ROLE_KEY
+
+    Returns:
+        True 表示登录成功，False 表示失败（错误信息在 st.session_state.auth_error）
+    """
+    import re
+    try:
+        url = _get_supabase_url()
+        service_key = _get_supabase_service_key()
+        if not url or not service_key:
+            st.session_state.auth_error = "自动登录失败：未配置 SUPABASE_SERVICE_ROLE_KEY，请在 Streamlit Secrets 中添加"
+            return False
+
+        admin = create_client(url, service_key)
+        res = admin.auth.admin.generate_link({
+            "type": "magiclink",
+            "email": email,
+            "options": {"should_send_link": False},
+        })
+
+        # 兼容 supabase-py 不同版本的返回结构（对象属性 / dict）
+        if isinstance(res, dict):
+            props = res.get("properties", {}) or {}
+            action_link = props.get("action_link", "") if isinstance(props, dict) else str(props)
+        else:
+            props = getattr(res, "properties", None) or {}
+            action_link = getattr(props, "action_link", "") if props else ""
+
+        # 从 action_link 中提取 token（形如 ?token=xxx&type=magiclink）
+        token = ""
+        if action_link:
+            m = re.search(r"[?&]token=([^&]+)", str(action_link))
+            if m:
+                token = m.group(1)
+        if not token:
+            st.session_state.auth_error = "自动登录失败：无法获取登录令牌"
+            return False
+
+        anon = get_anon_client()
+        resp = anon.auth.verify_otp({
+            "email": email,
+            "token": token,
+            "type": "magiclink",
+        })
+
+        st.session_state.authenticated = True
+        st.session_state.user = resp.user
+        st.session_state.session = resp.session
+        st.session_state.auth_error = None
+        return True
+    except Exception as e:
+        st.session_state.auth_error = f"自动登录失败: {e}"
+        return False
+
+
 # ==================== 登录页面渲染 ====================
 
 def render_auth_page():
@@ -229,13 +302,23 @@ def render_auth_page():
     st.title("🔐 质量管理系统 QMS")
     st.caption("Quality Management System — 请登录后使用")
 
-    # 支持从知识库跳转自动填充邮箱（URL 携带 ?email=xxx@qq.com）
+    # 支持从知识库跳转：优先免密静默登录，失败则回退为邮箱已填充的登录表单
     try:
         url_email = st.query_params.get("email", "")
     except Exception:
         url_email = ""
-    if url_email and "login_email" not in st.session_state:
+    if url_email:
         st.session_state["login_email"] = str(url_email)
+        if not st.session_state.get("authenticated") and not st.session_state.get("sso_attempted"):
+            st.session_state["sso_attempted"] = True
+            st.session_state.auth_error = None
+            if sso_login(str(url_email)):
+                # 登录成功：清理 URL 参数，避免刷新重复触发
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
+                st.rerun()
 
     mode = st.session_state.get("auth_mode", "login")
 
