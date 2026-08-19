@@ -229,6 +229,14 @@ def render_auth_page():
     st.title("🔐 质量管理系统 QMS")
     st.caption("Quality Management System — 请登录后使用")
 
+    # 支持从知识库跳转自动填充邮箱（URL 携带 ?email=xxx@qq.com）
+    try:
+        url_email = st.query_params.get("email", "")
+    except Exception:
+        url_email = ""
+    if url_email and "login_email" not in st.session_state:
+        st.session_state["login_email"] = str(url_email)
+
     mode = st.session_state.get("auth_mode", "login")
 
     col1, col2, col3 = st.columns([1, 2, 1])
