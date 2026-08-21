@@ -16,6 +16,7 @@ import pandas as pd
 import numpy as np
 from io import BytesIO
 import time
+import textwrap
 from datetime import datetime, timezone, timedelta, date
 from dotenv import load_dotenv
 
@@ -25,77 +26,8 @@ from modules import auth, batch_analysis, inspection_match
 
 load_dotenv()
 
-# ==================== 登录守卫 ====================
-# 这是解决"额外注意项①"的关键：
-#   Streamlit 没有内置路由/中间件，必须在每个页面渲染前检查登录状态。
-#   未登录时，auth.login_required() 会渲染登录页并返回 False，
-#   调用方直接 return 阻止后续页面渲染。
-if not auth.login_required():
-    st.stop()
-
-# ---- 以下代码仅在已登录状态下执行 ----
-
-st.set_page_config(
-    page_title='质量管理系统 QMS',
-    page_icon='📊',
-    layout='wide',
-    initial_sidebar_state='expanded',
-)
-
-# 隐藏右上角工具栏 (Share / 编辑代码等) + 隐藏右下角 Made with Streamlit
-st.markdown("""
-<style>
-[data-testid="stToolbar"] { display: none !important; }
-footer { visibility: hidden; }
-[data-testid="manage-app-button"] { display: none !important; }
-</style>
-""", unsafe_allow_html=True)
-
-# ===== 弹窗居中样式 + 遮罩透明 =====
-st.markdown("""
-<style>
-    [data-testid="stDialog"] {
-        position: fixed !important;
-        top: 50% !important;
-        left: 50% !important;
-        transform: translate(-50%, -50%) !important;
-    }
-    [data-testid="stDialog"] > div:first-child {
-        max-height: 85vh !important;
-        overflow-y: auto !important;
-    }
-    /* 遮罩层完全透明：用 :has() 命中包含 stDialog 的 overlay 父容器 */
-    div:has(> [data-testid="stDialog"]) {
-        background: transparent !important;
-        backdrop-filter: none !important;
-    }
-    div:has(div:has(> [data-testid="stDialog"])) {
-        background: transparent !important;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# ==================== 侧边栏 ====================
-st.sidebar.title('📊 质量管理系统')
-st.sidebar.caption('Quality Management System v2.0')
-
-menu = st.sidebar.radio(
-    '选择分析模块',
-    ['📁 数据导入',
-     '🔍 送检/检验对比',
-     '📋 批量分析报告',
-     '📈 SPC 控制图',
-     '🎯 过程能力分析',
-     '📊 质量图形工具',
-     '🔬 测量系统分析 MSA',
-     '🔢 统计推断',
-     '🧪 高级分析'],
-)
-st.sidebar.divider()
-st.sidebar.caption('支持 CSV / Excel · 支持 Supabase 云存储')
-
-# 用户信息栏 + 登出按钮
-auth.render_user_bar()
+# 注：页面初始化（登录守卫、set_page_config、侧边栏）已移入 main() 中，
+#     使所有渲染阶段异常都能被同一 try/except 捕获，避免 Cloud 白屏。
 
 
 # ==================== 工具函数 ====================
@@ -3277,7 +3209,79 @@ def page_inspection_match():
 # ==================== 主路由 ====================
 def main():
     try:
-        _route_main()
+        # ==================== 登录守卫 ====================
+        # 这是解决"额外注意项①"的关键：
+        #   Streamlit 没有内置路由/中间件，必须在每个页面渲染前检查登录状态。
+        #   未登录时，auth.login_required() 会渲染登录页并返回 False，
+        #   调用方直接 return 阻止后续页面渲染。
+        if not auth.login_required():
+            st.stop()
+
+        # ---- 以下代码仅在已登录状态下执行 ----
+
+        st.set_page_config(
+            page_title='质量管理系统 QMS',
+            page_icon='📊',
+            layout='wide',
+            initial_sidebar_state='expanded',
+        )
+
+        # 隐藏右上角工具栏 (Share / 编辑代码等) + 隐藏右下角 Made with Streamlit
+        st.markdown(textwrap.dedent("""
+        <style>
+        [data-testid="stToolbar"] { display: none !important; }
+        footer { visibility: hidden; }
+        [data-testid="manage-app-button"] { display: none !important; }
+        </style>
+        """), unsafe_allow_html=True)
+
+        # ===== 弹窗居中样式 + 遮罩透明 =====
+        st.markdown(textwrap.dedent("""
+        <style>
+            [data-testid="stDialog"] {
+                position: fixed !important;
+                top: 50% !important;
+                left: 50% !important;
+                transform: translate(-50%, -50%) !important;
+            }
+            [data-testid="stDialog"] > div:first-child {
+                max-height: 85vh !important;
+                overflow-y: auto !important;
+            }
+            /* 遮罩层完全透明：用 :has() 命中包含 stDialog 的 overlay 父容器 */
+            div:has(> [data-testid="stDialog"]) {
+                background: transparent !important;
+                backdrop-filter: none !important;
+            }
+            div:has(div:has(> [data-testid="stDialog"])) {
+                background: transparent !important;
+            }
+        </style>
+        """), unsafe_allow_html=True)
+
+        # ==================== 侧边栏 ====================
+        st.sidebar.title('📊 质量管理系统')
+        st.sidebar.caption('Quality Management System v2.0')
+
+        menu = st.sidebar.radio(
+            '选择分析模块',
+            ['📁 数据导入',
+             '🔍 送检/检验对比',
+             '📋 批量分析报告',
+             '📈 SPC 控制图',
+             '🎯 过程能力分析',
+             '📊 质量图形工具',
+             '🔬 测量系统分析 MSA',
+             '🔢 统计推断',
+             '🧪 高级分析'],
+        )
+        st.sidebar.divider()
+        st.sidebar.caption('支持 CSV / Excel · 支持 Supabase 云存储')
+
+        # 用户信息栏 + 登出按钮
+        auth.render_user_bar()
+
+        _route_main(menu)
     except Exception as e:
         # 捕获所有未处理异常并在页面显示，便于用户复制反馈，避免白屏崩溃
         import traceback
@@ -3286,7 +3290,7 @@ def main():
         st.code(tb, language='text')
 
 
-def _route_main():
+def _route_main(menu):
     if menu == '📁 数据导入':
         page_data_import()
     elif menu == '🔍 送检/检验对比':
