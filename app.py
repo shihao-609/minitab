@@ -3068,7 +3068,7 @@ def _render_compare_tab():
     uploaded = st.file_uploader(
         '📤 上传检验清单 Excel（列：供应商 / 物料编码 / 规格型号 / 物料名称 / 质检日期 / 检验数量）',
         type=['xlsx', 'xls'], key='ins_upload',
-        help='检验清单仅用于本次对比，不会写入数据库')
+        help='支持用户 ERP 导出的完整表头（含单据编号、批号、检验结果等），仅抽取 6 个核心列参与比对，其余列自动忽略；检验清单仅用于本次对比，不会写入数据库')
     if uploaded is not None:
         try:
             ins_df = inspection_match.parse_sheet(uploaded, 'inspection')
