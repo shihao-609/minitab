@@ -259,24 +259,33 @@ def preview_import(df, records=None):
     if records is None:
         records = supabase_helper.fetch_submission_keys()
     keys = _existing_keys(records)
-    new_rows, dup_rows = [], []
-    for _, row in df.iterrows():
-        k = _dedup_key(row)
-        (new_rows if k not in keys else dup_rows).append(row)
-    cols = list(df.columns)
-    return pd.DataFrame(new_rows, columns=cols), pd.DataFrame(dup_rows, columns=cols)
+
+    # 向量化生成去重键，比 iterrows 快一个数量级
+    key_cols = ['供应商', '物料编码', '规格型号', '物料名称', '实收数量']
+
+    def _key(row):
+        return (row['供应商'], row['物料编码'], row['规格型号'],
+                row['物料名称'], row['实收数量'])
+
+    key_series = df[key_cols].apply(_key, axis=1)
+    is_new = ~key_series.isin(keys)
+    return df[is_new].reset_index(drop=True), df[~is_new].reset_index(drop=True)
 
 
-def import_submissions(df):
+def import_submissions(df, progress=None, batch_size=1000):
     """
     幂等入库：收料日期为空→当天；五元组重复的跳过。
     返回 (插入数, 重复数, 新增行数)
+
+    progress: 可选回调 progress(done, total)
     """
     df = df.copy()
     df['收料日期'] = df['收料日期'].map(lambda v: v or date.today())
-    new_df, dup_df = preview_import(df)
+
+    # 直接插入全部数据，由数据库 unique index 完成去重，避免再次查 keys
+    total = len(df)
     rows = []
-    for _, row in new_df.iterrows():
+    for _, row in df.iterrows():
         d = row['收料日期']
         rows.append({
             'supplier': row['供应商'],
@@ -286,8 +295,17 @@ def import_submissions(df):
             'received_date': d.isoformat() if isinstance(d, (date, datetime)) else None,
             'received_qty': row['实收数量'],
         })
-    inserted = supabase_helper.insert_inspection_submissions(rows) if rows else 0
-    return inserted, len(dup_df), len(new_df)
+
+    inserted = 0
+    if rows:
+        for i in range(0, len(rows), batch_size):
+            batch = rows[i:i + batch_size]
+            inserted += supabase_helper.insert_inspection_submissions(batch)
+            if progress:
+                progress(min(i + len(batch), total), total)
+
+    skipped = total - inserted
+    return inserted, skipped, total
 
 
 def submissions_to_df(records):
@@ -334,7 +352,7 @@ def _ins_dict(row):
     return {c: row[c] for c in INSPECTION_COLS}
 
 
-def compare(sub_df, ins_df):
+def compare(sub_df, ins_df, progress=None):
     """
     核心对比。逐批次严格匹配，返回四分类结果 dict：
       checked           ✅ 已检验（附匹配的检验记录摘要）
@@ -342,60 +360,104 @@ def compare(sub_df, ins_df):
       extra             📋 额外检验（送检清单中不存在的检验记录）
       name_mismatch     🆔 名称不一致（同编码但物料名称不同，需人工判断）
       summary           各分类计数
+
+    progress: 可选回调 progress(done, total)
     """
     sub_df = sub_df.reset_index(drop=True)
     ins_df = ins_df.reset_index(drop=True)
 
+    # 预处理：转成 dict list，避免 iterrows 开销；同时把数量/日期解析好
+    subs = []
+    for _, srow in sub_df.iterrows():
+        subs.append({
+            '供应商': _clean_text(srow['供应商']),
+            '物料编码': _normalize_code(srow['物料编码']),
+            '规格型号': _clean_text(srow['规格型号']),
+            '物料名称': _clean_text(srow['物料名称']),
+            '收料日期': _parse_date(srow['收料日期']),
+            '实收数量': _parse_qty(srow['实收数量']),
+        })
+
+    ins_rows = []
+    for _, irow in ins_df.iterrows():
+        ins_rows.append({
+            '供应商': _clean_text(irow['供应商']),
+            '物料编码': _normalize_code(irow['物料编码']),
+            '规格型号': _clean_text(irow['规格型号']),
+            '物料名称': _clean_text(irow['物料名称']),
+            '质检日期': _parse_date(irow['质检日期']),
+            '检验数量': _parse_qty(irow['检验数量']),
+        })
+
+    # 建立多级索引
     ins_by_code = {}
-    for i, row in ins_df.iterrows():
-        ins_by_code.setdefault(row['物料编码'], []).append((i, row))
+    ins_by_full_key = {}
+    for idx, c in enumerate(ins_rows):
+        code = c['物料编码']
+        ins_by_code.setdefault(code, []).append((idx, c))
+        key = (c['供应商'], code, c['规格型号'], c['物料名称'], c['检验数量'])
+        ins_by_full_key.setdefault(key, []).append((idx, c))
 
     checked, unchecked = [], []
     name_mismatch_sub, name_mismatch_ins = [], []
-    extra = []
-    matched_ins = set()  # 已被送检匹配 / 归入名称不一致的检验行索引
+    matched_ins = set()
 
-    for _, srow in sub_df.iterrows():
-        cands = ins_by_code.get(srow['物料编码'], [])
-        if not cands:
+    total_sub = len(subs)
+    report_every = max(1, total_sub // 50)  # 每 2% 进度报告一次，避免开销
+
+    for s_idx, srow in enumerate(subs):
+        code = srow['物料编码']
+        cands_code = ins_by_code.get(code, [])
+
+        if not cands_code:
             unchecked.append(_sub_dict(srow))
             continue
 
-        # 名称一致的候选
-        same_name = [(i, c) for i, c in cands
-                     if _clean_text(c['物料名称']) == srow['物料名称']]
-        if not same_name:
-            # 同编码候选名称全部不一致 → 第四类，人工判断
-            name_mismatch_sub.append(_sub_dict(srow))
-            for i, c in cands:
-                name_mismatch_ins.append({**_ins_dict(c), '对应送检编码': srow['物料编码']})
-                matched_ins.add(i)
-            continue
-
-        # 逐字段完全匹配
-        matched = None
-        for i, c in same_name:
-            if (c['供应商'] == srow['供应商']
-                    and c['规格型号'] == srow['规格型号']
-                    and _qty_eq(c['检验数量'], srow['实收数量'])
-                    and _date_ge(c['质检日期'], srow['收料日期'])):
-                matched = (i, c)
+        # 先尝试全键命中（O(1)）
+        full_key = (srow['供应商'], code, srow['规格型号'], srow['物料名称'], srow['实收数量'])
+        candidates = ins_by_full_key.get(full_key, [])
+        matched_idx = None
+        matched_ins_row = None
+        for idx, c in candidates:
+            if idx in matched_ins:
+                continue
+            if _date_ge(c['质检日期'], srow['收料日期']):
+                matched_idx = idx
+                matched_ins_row = c
                 break
-        if matched:
-            i, c = matched
+
+        if matched_idx is not None:
             d = _sub_dict(srow)
-            d['匹配检验记录'] = (f"{c['供应商']} · {c['规格型号']} · "
-                              f"检验数量 {_fmt_qty(c['检验数量'])} · "
-                              f"质检日期 {_fmt_date(c['质检日期'])}")
+            d['匹配检验记录'] = (f"{matched_ins_row['供应商']} · {matched_ins_row['规格型号']} · "
+                              f"检验数量 {_fmt_qty(matched_ins_row['检验数量'])} · "
+                              f"质检日期 {_fmt_date(matched_ins_row['质检日期'])}")
             checked.append(d)
-            matched_ins.add(i)
+            matched_ins.add(matched_idx)
         else:
-            unchecked.append(_sub_dict(srow))
+            # 是否有同编码且名称一致的候选？
+            same_name = any(c['物料名称'] == srow['物料名称']
+                            for _, c in cands_code)
+            if not same_name:
+                # 同编码但物料名称完全对不上 → 第四类
+                name_mismatch_sub.append(_sub_dict(srow))
+                for idx, c in cands_code:
+                    if idx not in matched_ins:
+                        name_mismatch_ins.append({**_ins_dict(c), '对应送检编码': code})
+                        matched_ins.add(idx)
+            else:
+                unchecked.append(_sub_dict(srow))
+
+        if progress and (s_idx + 1) % report_every == 0:
+            progress(s_idx + 1, total_sub)
+
+    if progress:
+        progress(total_sub, total_sub)
 
     # 额外检验：未被任何送检匹配的检验记录
-    sub_codes = set(sub_df['物料编码'])
-    for i, irow in ins_df.iterrows():
-        if i in matched_ins:
+    sub_codes = {s['物料编码'] for s in subs}
+    extra = []
+    for idx, irow in enumerate(ins_rows):
+        if idx in matched_ins:
             continue
         note = ''
         if irow['物料编码'] in sub_codes:
@@ -409,7 +471,7 @@ def compare(sub_df, ins_df):
     mismatch_ins_df = pd.DataFrame(name_mismatch_ins, columns=INSPECTION_COLS + ['对应送检编码'])
 
     summary = {
-        'total_sub': len(sub_df),
+        'total_sub': total_sub,
         'checked': len(checked),
         'unchecked': len(unchecked),
         'name_mismatch': len(name_mismatch_sub),

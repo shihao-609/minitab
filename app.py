@@ -3009,17 +3009,25 @@ def _render_submission_tab():
             st.error(f'❌ 文件解析失败: {e}')
         else:
             with st.spinner('正在检查重复记录...'):
+                t0 = time.monotonic()
                 new_df, dup_df = inspection_match.preview_import(df)
-            st.success(f'✅ 解析成功：共 {len(df)} 行 → 将新增 {len(new_df)} 条，重复跳过 {len(dup_df)} 条')
+                preview_dt = time.monotonic() - t0
+            st.success(f'✅ 解析成功：共 {len(df)} 行 → 将新增 {len(new_df)} 条，重复跳过 {len(dup_df)} 条（预览耗时 {preview_dt:.2f}s）')
             st.dataframe(new_df, use_container_width=True, hide_index=True)
             if st.button('🚀 确认入库', type='primary', key='sub_import_btn'):
-                with st.spinner('正在写入数据库...'):
-                    t0 = time.monotonic()
-                    inserted, skipped, _ = inspection_match.import_submissions(df)
-                    dt = time.monotonic() - t0
+                progress_bar = st.progress(0, text='准备入库...')
+                t0 = time.monotonic()
+
+                def _update(done, total):
+                    pct = min(1.0, done / total) if total else 0.0
+                    progress_bar.progress(pct, text=f'正在写入数据库... {done}/{total}')
+
+                inserted, skipped, _ = inspection_match.import_submissions(df, progress=_update, batch_size=1000)
+                dt = time.monotonic() - t0
+                progress_bar.empty()
                 if inserted > 0:
                     st.success(f'✅ 已入库 {inserted} 条记录（耗时 {dt:.2f}s）'
-                               + (f'（跳过重复 {skipped} 条）' if skipped else ''))
+                               + (f'，跳过重复 {skipped} 条' if skipped else ''))
                 else:
                     st.info(f'没有新增记录，{skipped} 条均为重复。')
                 st.session_state._sub_records = None
@@ -3079,9 +3087,18 @@ def _render_compare_tab():
         except Exception as e:
             st.error(f'❌ 文件解析失败: {e}')
         else:
-            with st.spinner('正在对比...'):
-                result = inspection_match.compare(sub_df, ins_df)
+            progress_bar = st.progress(0, text='准备对比...')
+            t0 = time.monotonic()
+
+            def _update(done, total):
+                pct = min(1.0, done / total) if total else 0.0
+                progress_bar.progress(pct, text=f'正在比对... {done}/{total}')
+
+            result = inspection_match.compare(sub_df, ins_df, progress=_update)
+            dt = time.monotonic() - t0
+            progress_bar.empty()
             st.session_state.inspection_match_result = result
+            st.session_state.inspection_match_dt = dt
             st.rerun()
 
     result = st.session_state.get('inspection_match_result')
@@ -3090,11 +3107,14 @@ def _render_compare_tab():
         return
 
     s = result['summary']
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric('✅ 已检验', s['checked'])
-    col2.metric('⚠️ 未检验', s['unchecked'])
-    col3.metric('📋 额外检验', s['extra'])
-    col4.metric('🆔 名称不一致', s['name_mismatch'])
+    dt = st.session_state.get('inspection_match_dt', 0.0)
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric('🧾 送检总数', s['total_sub'])
+    col2.metric('✅ 已检验', s['checked'])
+    col3.metric('⚠️ 未检验', s['unchecked'])
+    col4.metric('📋 额外检验', s['extra'])
+    col5.metric('🆔 名称不一致', s['name_mismatch'])
+    st.caption(f'⏱️ 本次比对耗时 {dt:.2f}s')
 
     c1, c2 = st.columns(2)
     with c1:
