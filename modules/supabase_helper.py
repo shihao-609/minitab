@@ -562,3 +562,169 @@ def delete_report(report_id: str) -> bool:
     except Exception as e:
         st.error(f"删除报告失败: {e}")
         return False
+
+
+# ==================== 送检清单 CRUD ====================
+
+def ensure_inspection_table() -> bool:
+    """检测 inspection_submissions 表是否存在"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("inspection_submissions").select("id").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def get_create_inspection_table_sql() -> str:
+    """返回创建 inspection_submissions 表的 SQL（含 RLS + 五元组唯一索引）"""
+    return """
+-- 1. 创建表（送检清单持久化）
+CREATE TABLE IF NOT EXISTS inspection_submissions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES auth.users(id),
+    supplier TEXT NOT NULL DEFAULT '',
+    material_code TEXT NOT NULL,
+    spec TEXT DEFAULT '',
+    material_name TEXT DEFAULT '',
+    received_date DATE,
+    received_qty NUMERIC,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 2. 启用 RLS
+ALTER TABLE inspection_submissions ENABLE ROW LEVEL SECURITY;
+
+-- 3. 删除旧策略（避免重复执行报错）
+DROP POLICY IF EXISTS "Users can view own inspections" ON inspection_submissions;
+DROP POLICY IF EXISTS "Users can insert own inspections" ON inspection_submissions;
+DROP POLICY IF EXISTS "Users can delete own inspections" ON inspection_submissions;
+
+-- 4. 创建 RLS 策略：用户只能访问自己的送检记录
+CREATE POLICY "Users can view own inspections"
+    ON inspection_submissions FOR SELECT
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert own inspections"
+    ON inspection_submissions FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete own inspections"
+    ON inspection_submissions FOR DELETE
+    USING (auth.uid() = user_id);
+
+-- 5. 唯一索引：按五元组去重（供应商+物料编码+规格型号+物料名称+实收数量，日期不参与）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_dedup
+    ON inspection_submissions(user_id, supplier, material_code, spec, material_name, received_qty);
+
+-- 6. 常用查询索引
+CREATE INDEX IF NOT EXISTS idx_inspection_user_date
+    ON inspection_submissions(user_id, received_date);
+"""
+
+
+@_with_retry
+def _do_list_inspections(client):
+    return client.table("inspection_submissions").select("*").order(
+        "received_date", desc=True).order("created_at", desc=True).execute()
+
+
+def list_inspection_submissions() -> list:
+    """
+    列出当前用户的所有送检记录（按收料日期倒序）
+
+    数据量不大时直接全量返回，由业务层做五元组去重与对比。
+    """
+    try:
+        client = _get_client()
+        _check_client(client)
+        result = _do_list_inspections(client)
+
+        uid = _get_user_id()
+        if uid and result.data:
+            result.data = [r for r in result.data if r.get("user_id") == uid]
+
+        return result.data
+    except Exception as e:
+        st.error(f"获取送检记录失败: {e}")
+        return []
+
+
+@_with_retry
+def _do_insert_inspections(client, rows):
+    return client.table("inspection_submissions").insert(rows).execute()
+
+
+def insert_inspection_submissions(rows: list) -> int:
+    """
+    批量插入送检记录（幂等：唯一键冲突自动跳过）。返回实际插入条数。
+    """
+    if not rows:
+        return 0
+    try:
+        client = _get_client()
+        _check_client(client)
+        uid = _get_user_id()
+        if not uid:
+            st.error("插入送检记录失败: 未获取到用户 ID，请重新登录。")
+            return 0
+
+        payload = [dict(r, user_id=uid) for r in rows]
+        try:
+            _do_insert_inspections(client, payload)
+            return len(payload)
+        except Exception as e:
+            err = str(e).lower()
+            # 并发下撞唯一索引 → 逐条插入跳过冲突
+            if any(k in err for k in ("duplicate", "unique", "23505", "conflict")):
+                inserted = 0
+                for r in payload:
+                    try:
+                        client.table("inspection_submissions").insert(r).execute()
+                        inserted += 1
+                    except Exception:
+                        pass
+                return inserted
+            raise
+    except Exception as e:
+        st.error(f"插入送检记录失败: {e}")
+        return 0
+
+
+@_with_retry
+def _do_delete_inspection(client, rid):
+    return client.table("inspection_submissions").delete().eq("id", rid).execute()
+
+
+def delete_inspection_submission(rid: str) -> bool:
+    """删除指定的送检记录"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        _do_delete_inspection(client, rid)
+        return True
+    except Exception as e:
+        st.error(f"删除送检记录失败: {e}")
+        return False
+
+
+@_with_retry
+def _do_clear_inspections(client, uid):
+    return client.table("inspection_submissions").delete().eq("user_id", uid).execute()
+
+
+def clear_inspection_submissions() -> bool:
+    """清空当前用户的全部送检记录"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        uid = _get_user_id()
+        if not uid:
+            st.error("清空送检记录失败: 未获取到用户 ID。")
+            return False
+        _do_clear_inspections(client, uid)
+        return True
+    except Exception as e:
+        st.error(f"清空送检记录失败: {e}")
+        return False

@@ -15,12 +15,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from io import BytesIO
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from dotenv import load_dotenv
 
 from modules import spc_charts, capability, pareto_histogram, gage_rr, supabase_helper
 from modules import spc_advanced, msa_advanced, stats_tools, quality_tools, advanced_analysis
-from modules import auth, batch_analysis
+from modules import auth, batch_analysis, inspection_match
 
 load_dotenv()
 
@@ -81,6 +81,7 @@ st.sidebar.caption('Quality Management System v2.0')
 menu = st.sidebar.radio(
     '选择分析模块',
     ['📁 数据导入',
+     '🔍 送检/检验对比',
      '📋 批量分析报告',
      '📈 SPC 控制图',
      '🎯 过程能力分析',
@@ -2929,10 +2930,223 @@ def page_batch_analysis():
                     st.rerun()
 
 
+# ==================== 送检/检验对比 ====================
+
+def _load_sub_records():
+    recs = st.session_state.get('_sub_records')
+    if recs is None:
+        recs = supabase_helper.list_inspection_submissions()
+        st.session_state._sub_records = recs
+    return recs
+
+
+def _style_unchecked(df):
+    """未检验行红底高亮"""
+    def _red(row):
+        return ['background-color: #fdecea'] * len(row)
+    try:
+        return df.style.apply(_red, axis=1).hide(axis='index')
+    except Exception:
+        return df
+
+
+def _render_submission_tab():
+    if '_sub_records' not in st.session_state:
+        st.session_state._sub_records = None
+
+    records = _load_sub_records()
+    total = len(records)
+    suppliers = len({r.get('supplier') for r in records})
+    codes = len({r.get('material_code') for r in records})
+    c1, c2, c3 = st.columns(3)
+    c1.metric('📦 累计送检记录', total)
+    c2.metric('🏭 供应商数', suppliers)
+    c3.metric('🔢 物料编码数', codes)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button('📄 下载送检清单模板',
+                           inspection_match.download_template('submission'),
+                           '送检清单模板.xlsx',
+                           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                           key='dl_sub_tpl', use_container_width=True)
+    with c2:
+        if total:
+            st.download_button('💾 导出全部送检记录',
+                               inspection_match.export_submissions(records),
+                               f"送检记录_{date.today()}.xlsx",
+                               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                               key='dl_sub_all', use_container_width=True)
+
+    st.divider()
+
+    uploaded = st.file_uploader(
+        '📤 上传送检清单 Excel（列：供应商 / 物料编码 / 规格型号 / 物料名称 / 收料日期 / 实收数量）',
+        type=['xlsx', 'xls'], key='sub_upload',
+        help='收料日期留空将自动填充为上传当天日期；重复记录（供应商+物料编码+规格型号+物料名称+实收数量一致）不会重复入库')
+    if uploaded is not None:
+        try:
+            df = inspection_match.parse_sheet(uploaded, 'submission', default_date=date.today())
+        except Exception as e:
+            st.error(f'❌ 文件解析失败: {e}')
+        else:
+            with st.spinner('正在检查重复记录...'):
+                new_df, dup_df = inspection_match.preview_import(df, records)
+            st.success(f'✅ 解析成功：共 {len(df)} 行 → 将新增 {len(new_df)} 条，重复跳过 {len(dup_df)} 条')
+            st.dataframe(new_df, use_container_width=True, hide_index=True)
+            if st.button('🚀 确认入库', type='primary', key='sub_import_btn'):
+                with st.spinner('正在写入数据库...'):
+                    inserted, skipped, _ = inspection_match.import_submissions(df)
+                if inserted > 0:
+                    st.success(f'✅ 已入库 {inserted} 条记录' + (f'（跳过重复 {skipped} 条）' if skipped else ''))
+                else:
+                    st.info(f'没有新增记录，{skipped} 条均为重复。')
+                st.session_state._sub_records = None
+                st.rerun()
+
+    st.divider()
+    st.subheader('📂 已入库送检记录')
+    if not records:
+        st.info('暂无送检记录，请先上传送检清单。')
+        return
+
+    df = inspection_match.submissions_to_df(records)
+    st.dataframe(df.drop(columns=['id']), use_container_width=True, hide_index=True)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        options = [
+            f"{i + 1}. [{r['物料编码']}] {r['物料名称']} · {r['供应商']} · 数量{r['实收数量']} · {r['收料日期']}"
+            for i, r in df.iterrows()
+        ]
+        sel = st.selectbox('🗑️ 选择要删除的记录', options, key='sub_del_sel')
+        if st.button('删除所选记录', key='sub_del_btn', use_container_width=True):
+            rid = df.iloc[options.index(sel)]['id']
+            if supabase_helper.delete_inspection_submission(rid):
+                st.session_state._sub_records = None
+                st.rerun()
+    with c2:
+        if st.checkbox('⚠️ 确认清空全部送检记录', key='sub_clear_ck'):
+            if st.button('🗑️ 清空全部', type='primary', key='sub_clear_btn', use_container_width=True):
+                if supabase_helper.clear_inspection_submissions():
+                    st.session_state._sub_records = None
+                    st.rerun()
+
+
+def _render_compare_tab():
+    records = _load_sub_records()
+    if not records:
+        st.info('📌 送检清单为空。请先在「📤 送检清单管理」中上传送检清单。')
+        return
+    sub_df = inspection_match.submissions_to_df(records)
+
+    uploaded = st.file_uploader(
+        '📤 上传检验清单 Excel（列：供应商 / 物料编码 / 规格型号 / 物料名称 / 质检日期 / 检验数量）',
+        type=['xlsx', 'xls'], key='ins_upload',
+        help='检验清单仅用于本次对比，不会写入数据库')
+    if uploaded is not None:
+        try:
+            ins_df = inspection_match.parse_sheet(uploaded, 'inspection')
+        except Exception as e:
+            st.error(f'❌ 文件解析失败: {e}')
+        else:
+            with st.spinner('正在对比...'):
+                result = inspection_match.compare(sub_df, ins_df)
+            st.session_state.inspection_match_result = result
+            st.rerun()
+
+    result = st.session_state.get('inspection_match_result')
+    if result is None:
+        st.info('👆 上传检验清单后自动开始对比')
+        return
+
+    s = result['summary']
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric('✅ 已检验', s['checked'])
+    col2.metric('⚠️ 未检验', s['unchecked'])
+    col3.metric('📋 额外检验', s['extra'])
+    col4.metric('🆔 名称不一致', s['name_mismatch'])
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if s['unchecked']:
+            st.download_button('⚠️ 下载未检验清单',
+                               inspection_match.export_unchecked(result),
+                               f"未检验清单_{date.today()}.xlsx",
+                               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                               key='dl_unchecked', use_container_width=True)
+    with c2:
+        st.download_button('📊 下载全部对比结果',
+                           inspection_match.export_all(result),
+                           f"检验对比_{date.today()}.xlsx",
+                           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                           key='dl_all', use_container_width=True)
+
+    st.divider()
+
+    st.subheader('⚠️ 未检验物料')
+    if s['unchecked']:
+        st.dataframe(_style_unchecked(result['unchecked']), use_container_width=True)
+    else:
+        st.success('🎉 所有送检物料均已检验！')
+
+    st.subheader('✅ 已检验物料')
+    if s['checked']:
+        st.dataframe(result['checked'], use_container_width=True, hide_index=True)
+    else:
+        st.info('无已检验记录')
+
+    st.subheader('🆔 名称不一致（需人工判断）')
+    if s['name_mismatch']:
+        st.warning('以下物料编码在送检与检验清单中的「物料名称」不一致，请人工核对确认归属：')
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown('**送检侧**')
+            st.dataframe(result['name_mismatch']['sub'], use_container_width=True, hide_index=True)
+        with c2:
+            st.markdown('**检验侧**')
+            st.dataframe(result['name_mismatch']['ins'], use_container_width=True, hide_index=True)
+    else:
+        st.info('无')
+
+    st.subheader('📋 额外检验（送检清单中不存在）')
+    if s['extra']:
+        st.dataframe(result['extra'], use_container_width=True, hide_index=True)
+    else:
+        st.info('无')
+
+    if st.button('🗑️ 清除对比结果', key='clear_compare'):
+        st.session_state.inspection_match_result = None
+        st.rerun()
+
+
+def page_inspection_match():
+    st.header('🔍 送检清单 vs 检验清单')
+    st.caption('上传送检清单持久化保存，上传检验清单进行对比，找出未检验物料')
+
+    if 'inspection_match_result' not in st.session_state:
+        st.session_state.inspection_match_result = None
+
+    tab_manage, tab_compare = st.tabs(['📤 送检清单管理', '⚖️ 检验对比'])
+
+    with tab_manage:
+        table_ok = supabase_helper.ensure_inspection_table()
+        if not table_ok:
+            st.warning('⚠️ 数据库表 `inspection_submissions` 尚未创建，请先在 Supabase SQL Editor 中执行：')
+            st.code(supabase_helper.get_create_inspection_table_sql(), language='sql')
+        else:
+            _render_submission_tab()
+
+    with tab_compare:
+        _render_compare_tab()
+
+
 # ==================== 主路由 ====================
 def main():
     if menu == '📁 数据导入':
         page_data_import()
+    elif menu == '🔍 送检/检验对比':
+        page_inspection_match()
     elif menu == '📋 批量分析报告':
         page_batch_analysis()
     elif menu == '📈 SPC 控制图':
