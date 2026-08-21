@@ -366,27 +366,27 @@ def compare(sub_df, ins_df, progress=None):
     sub_df = sub_df.reset_index(drop=True)
     ins_df = ins_df.reset_index(drop=True)
 
-    # 预处理：转成 dict list，避免 iterrows 开销；同时把数量/日期解析好
+    # 预处理：to_dict 批量转换（比 iterrows 快约 3 倍），日期/数量统一解析
     subs = []
-    for _, srow in sub_df.iterrows():
+    for r in sub_df.to_dict('records'):
         subs.append({
-            '供应商': _clean_text(srow['供应商']),
-            '物料编码': _normalize_code(srow['物料编码']),
-            '规格型号': _clean_text(srow['规格型号']),
-            '物料名称': _clean_text(srow['物料名称']),
-            '收料日期': _parse_date(srow['收料日期']),
-            '实收数量': _parse_qty(srow['实收数量']),
+            '供应商': _clean_text(r['供应商']),
+            '物料编码': _normalize_code(r['物料编码']),
+            '规格型号': _clean_text(r['规格型号']),
+            '物料名称': _clean_text(r['物料名称']),
+            '收料日期': _parse_date(r['收料日期']),
+            '实收数量': _parse_qty(r['实收数量']),
         })
 
     ins_rows = []
-    for _, irow in ins_df.iterrows():
+    for r in ins_df.to_dict('records'):
         ins_rows.append({
-            '供应商': _clean_text(irow['供应商']),
-            '物料编码': _normalize_code(irow['物料编码']),
-            '规格型号': _clean_text(irow['规格型号']),
-            '物料名称': _clean_text(irow['物料名称']),
-            '质检日期': _parse_date(irow['质检日期']),
-            '检验数量': _parse_qty(irow['检验数量']),
+            '供应商': _clean_text(r['供应商']),
+            '物料编码': _normalize_code(r['物料编码']),
+            '规格型号': _clean_text(r['规格型号']),
+            '物料名称': _clean_text(r['物料名称']),
+            '质检日期': _parse_date(r['质检日期']),
+            '检验数量': _parse_qty(r['检验数量']),
         })
 
     # 建立多级索引
@@ -403,7 +403,7 @@ def compare(sub_df, ins_df, progress=None):
     matched_ins = set()
 
     total_sub = len(subs)
-    report_every = max(1, total_sub // 50)  # 每 2% 进度报告一次，避免开销
+    report_every = max(1, total_sub // 20)  # 每 5% 进度报告一次，避免频繁重绘
 
     for s_idx, srow in enumerate(subs):
         code = srow['物料编码']

@@ -2969,8 +2969,12 @@ def _style_unchecked(df):
 
 
 def _render_submission_tab():
-    if '_sub_records' not in st.session_state:
-        st.session_state._sub_records = None
+    st.session_state.setdefault('_sub_records', None)
+    st.session_state.setdefault('_sub_fid', None)
+    st.session_state.setdefault('_sub_parse_err', None)
+    st.session_state.setdefault('_sub_df', None)
+    st.session_state.setdefault('_sub_preview', None)
+    st.session_state.setdefault('_sub_imported', False)
 
     records = _load_sub_records()
     total = _load_sub_total()
@@ -3003,37 +3007,58 @@ def _render_submission_tab():
         type=['xlsx', 'xls'], key='sub_upload',
         help='收料日期留空将自动填充为上传当天日期；重复记录（供应商+物料编码+规格型号+物料名称+实收数量一致）不会重复入库')
     if uploaded is not None:
-        try:
-            df = inspection_match.parse_sheet(uploaded, 'submission', default_date=date.today())
-        except Exception as e:
-            st.error(f'❌ 文件解析失败: {e}')
-        else:
-            with st.spinner('正在检查重复记录...'):
-                t0 = time.monotonic()
-                new_df, dup_df = inspection_match.preview_import(df)
-                preview_dt = time.monotonic() - t0
-            st.success(f'✅ 解析成功：共 {len(df)} 行 → 将新增 {len(new_df)} 条，重复跳过 {len(dup_df)} 条（预览耗时 {preview_dt:.2f}s）')
-            st.dataframe(new_df, use_container_width=True, hide_index=True)
-            if st.button('🚀 确认入库', type='primary', key='sub_import_btn'):
-                progress_bar = st.progress(0, text='准备入库...')
-                t0 = time.monotonic()
+        # 用文件 ID 判断是否新文件：避免每次 rerun 重新解析/查库
+        fid = getattr(uploaded, 'file_id', None) or (uploaded.name, uploaded.size)
+        if st.session_state.get('_sub_fid') != fid:
+            st.session_state._sub_fid = fid
+            st.session_state._sub_parse_err = None
+            st.session_state._sub_df = None
+            st.session_state._sub_preview = None
+            st.session_state._sub_imported = False
+            try:
+                df = inspection_match.parse_sheet(uploaded, 'submission', default_date=date.today())
+            except Exception as e:
+                st.session_state._sub_parse_err = str(e)
+            else:
+                with st.spinner('正在检查重复记录...'):
+                    t0 = time.monotonic()
+                    new_df, dup_df = inspection_match.preview_import(df)
+                    preview_dt = time.monotonic() - t0
+                st.session_state._sub_df = df
+                st.session_state._sub_preview = (new_df, dup_df, preview_dt)
 
-                def _update(done, total):
-                    pct = min(1.0, done / total) if total else 0.0
-                    progress_bar.progress(pct, text=f'正在写入数据库... {done}/{total}')
+    if st.session_state.get('_sub_parse_err'):
+        st.error(f'❌ 文件解析失败: {st.session_state._sub_parse_err}')
+    elif st.session_state.get('_sub_imported'):
+        st.success('✅ 本次上传的文件已处理完成，如需再次上传请选择新文件。')
+    elif st.session_state.get('_sub_preview') is not None:
+        new_df, dup_df, preview_dt = st.session_state._sub_preview
+        df = st.session_state._sub_df
+        st.success(f'✅ 解析成功：共 {len(df)} 行 → 将新增 {len(new_df)} 条，重复跳过 {len(dup_df)} 条（预览耗时 {preview_dt:.2f}s）')
+        st.dataframe(new_df, use_container_width=True, hide_index=True)
+        if st.button('🚀 确认入库', type='primary', key='sub_import_btn'):
+            progress_bar = st.progress(0, text='准备入库...')
+            t0 = time.monotonic()
 
-                inserted, skipped, _ = inspection_match.import_submissions(df, progress=_update, batch_size=1000)
-                dt = time.monotonic() - t0
-                progress_bar.empty()
-                if inserted > 0:
-                    st.success(f'✅ 已入库 {inserted} 条记录（耗时 {dt:.2f}s）'
-                               + (f'，跳过重复 {skipped} 条' if skipped else ''))
-                else:
-                    st.info(f'没有新增记录，{skipped} 条均为重复。')
-                st.session_state._sub_records = None
-                st.session_state._sub_total = None
-                st.session_state._sub_compare = None
-                st.rerun()
+            def _update(done, total):
+                pct = min(1.0, done / total) if total else 0.0
+                progress_bar.progress(pct, text=f'正在写入数据库... {done}/{total}')
+
+            inserted, skipped, _ = inspection_match.import_submissions(df, progress=_update, batch_size=1000)
+            dt = time.monotonic() - t0
+            progress_bar.empty()
+            if inserted > 0:
+                st.success(f'✅ 已入库 {inserted} 条记录（耗时 {dt:.2f}s）'
+                           + (f'，跳过重复 {skipped} 条' if skipped else ''))
+            else:
+                st.info(f'没有新增记录，{skipped} 条均为重复。')
+            st.session_state._sub_records = None
+            st.session_state._sub_total = None
+            st.session_state._sub_compare = None
+            st.session_state._sub_df_cache = None
+            st.session_state._sub_preview = None
+            st.session_state._sub_imported = True
+            st.rerun()
 
     st.divider()
     st.subheader('📂 已入库送检记录')
@@ -3059,6 +3084,7 @@ def _render_submission_tab():
                 st.session_state._sub_records = None
                 st.session_state._sub_total = None
                 st.session_state._sub_compare = None
+                st.session_state._sub_df_cache = None
                 st.rerun()
     with c2:
         if st.checkbox('⚠️ 确认清空全部送检记录', key='sub_clear_ck'):
@@ -3071,28 +3097,52 @@ def _render_submission_tab():
 
 
 def _render_compare_tab():
+    st.session_state.setdefault('_ins_fid', None)
+    st.session_state.setdefault('_ins_parse_err', None)
+    st.session_state.setdefault('_ins_df', None)
+
     records = _load_compare_records()
     if not records:
         st.info('📌 送检清单为空。请先在「📤 送检清单管理」中上传送检清单。')
         return
-    sub_df = inspection_match.submissions_to_df(records)
+
+    # 送检记录转 DataFrame 后缓存，避免每次 rerun 重复转换
+    sub_df = st.session_state.get('_sub_df_cache')
+    if sub_df is None:
+        sub_df = inspection_match.submissions_to_df(records)
+        st.session_state._sub_df_cache = sub_df
 
     uploaded = st.file_uploader(
         '📤 上传检验清单 Excel（列：供应商 / 物料编码 / 规格型号 / 物料名称 / 质检日期 / 检验数量）',
         type=['xlsx', 'xls'], key='ins_upload',
         help='支持用户 ERP 导出的完整表头（含单据编号、批号、检验结果等），仅抽取 6 个核心列参与比对，其余列自动忽略；检验清单仅用于本次对比，不会写入数据库')
     if uploaded is not None:
-        try:
-            ins_df = inspection_match.parse_sheet(uploaded, 'inspection')
-        except Exception as e:
-            st.error(f'❌ 文件解析失败: {e}')
-        else:
+        # 文件 ID 判断是否新文件：避免每次 rerun 重复解析
+        fid = getattr(uploaded, 'file_id', None) or (uploaded.name, uploaded.size)
+        if st.session_state.get('_ins_fid') != fid:
+            st.session_state._ins_fid = fid
+            st.session_state._ins_parse_err = None
+            st.session_state._ins_df = None
+            st.session_state.inspection_match_result = None  # 新文件 → 旧结果作废
+            try:
+                ins_df = inspection_match.parse_sheet(uploaded, 'inspection')
+            except Exception as e:
+                st.session_state._ins_parse_err = str(e)
+            else:
+                st.session_state._ins_df = ins_df
+
+    if st.session_state.get('_ins_parse_err'):
+        st.error(f'❌ 文件解析失败: {st.session_state._ins_parse_err}')
+    elif st.session_state.get('_ins_df') is not None:
+        ins_df = st.session_state._ins_df
+        st.success(f'✅ 检验清单解析成功：共 {len(ins_df)} 行（送检库 {len(sub_df)} 条）。点击下方按钮开始比对。')
+        if st.button('🚀 开始比对', type='primary', key='ins_compare_btn'):
             progress_bar = st.progress(0, text='准备对比...')
             t0 = time.monotonic()
 
             def _update(done, total):
                 pct = min(1.0, done / total) if total else 0.0
-                progress_bar.progress(pct, text=f'正在比对... {done}/{total}')
+                progress_bar.progress(pct, text=f'正在比对... {done}/{total} 条送检记录')
 
             result = inspection_match.compare(sub_df, ins_df, progress=_update)
             dt = time.monotonic() - t0
@@ -3103,7 +3153,7 @@ def _render_compare_tab():
 
     result = st.session_state.get('inspection_match_result')
     if result is None:
-        st.info('👆 上传检验清单后自动开始对比')
+        st.info('👆 上传检验清单后点击「🚀 开始比对」')
         return
 
     s = result['summary']
