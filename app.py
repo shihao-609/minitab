@@ -3037,12 +3037,14 @@ def _render_submission_tab():
         st.success(f'✅ 解析成功：共 {len(df)} 行 → 将新增 {len(new_df)} 条，重复跳过 {len(dup_df)} 条（预览耗时 {preview_dt:.2f}s）')
         st.dataframe(new_df, use_container_width=True, hide_index=True)
         if st.button('🚀 确认入库', type='primary', key='sub_import_btn'):
-            progress_bar = st.progress(0, text='准备入库...')
+            progress_bar = st.progress(0)
+            st.info('准备入库...')
             t0 = time.monotonic()
 
             def _update(done, total):
                 pct = min(1.0, done / total) if total else 0.0
-                progress_bar.progress(pct, text=f'正在写入数据库... {done}/{total}')
+                progress_bar.progress(pct)
+                st.info(f'正在写入数据库... {done}/{total}')
 
             inserted, skipped, _ = inspection_match.import_submissions(df, progress=_update, batch_size=1000)
             dt = time.monotonic() - t0
@@ -3137,12 +3139,14 @@ def _render_compare_tab():
         ins_df = st.session_state._ins_df
         st.success(f'✅ 检验清单解析成功：共 {len(ins_df)} 行（送检库 {len(sub_df)} 条）。点击下方按钮开始比对。')
         if st.button('🚀 开始比对', type='primary', key='ins_compare_btn'):
-            progress_bar = st.progress(0, text='准备对比...')
+            progress_bar = st.progress(0)
+            st.info('准备对比...')
             t0 = time.monotonic()
 
             def _update(done, total):
                 pct = min(1.0, done / total) if total else 0.0
-                progress_bar.progress(pct, text=f'正在比对... {done}/{total} 条送检记录')
+                progress_bar.progress(pct)
+                st.info(f'正在比对... {done}/{total} 条送检记录')
 
             result = inspection_match.compare(sub_df, ins_df, progress=_update)
             dt = time.monotonic() - t0
@@ -3223,8 +3227,22 @@ def page_inspection_match():
     st.header('🔍 送检清单 vs 检验清单')
     st.caption('上传送检清单持久化保存，上传检验清单进行对比，找出未检验物料')
 
-    if 'inspection_match_result' not in st.session_state:
-        st.session_state.inspection_match_result = None
+    # 本页面所有 session_state key 统一初始化，避免分支遗漏
+    st.session_state.setdefault('inspection_match_result', None)
+    st.session_state.setdefault('inspection_match_dt', 0.0)
+    st.session_state.setdefault('_sub_records', None)
+    st.session_state.setdefault('_sub_total', None)
+    st.session_state.setdefault('_sub_compare', None)
+    st.session_state.setdefault('_sub_df_cache', None)
+    st.session_state.setdefault('_sub_fid', None)
+    st.session_state.setdefault('_sub_parse_err', None)
+    st.session_state.setdefault('_sub_df', None)
+    st.session_state.setdefault('_sub_preview', None)
+    st.session_state.setdefault('_sub_imported', False)
+    st.session_state.setdefault('_ins_fid', None)
+    st.session_state.setdefault('_ins_parse_err', None)
+    st.session_state.setdefault('_ins_df', None)
+    st.session_state.setdefault('_rpc_ok', None)
 
     tab_manage, tab_compare = st.tabs(['📤 送检清单管理', '⚖️ 检验对比'])
 
