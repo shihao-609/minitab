@@ -2976,8 +2976,8 @@ def _render_submission_tab():
     st.session_state.setdefault('_sub_preview', None)
     st.session_state.setdefault('_sub_imported', False)
 
-    records = _load_sub_records()
-    total = _load_sub_total()
+    records = _load_sub_records() or []
+    total = _load_sub_total() or 0
     suppliers = len({r.get('supplier') for r in records})
     codes = len({r.get('material_code') for r in records})
     c1, c2, c3 = st.columns(3)
@@ -3068,10 +3068,11 @@ def _render_submission_tab():
         st.info('暂无送检记录，请先上传送检清单。')
         return
 
-    if total > len(records):
+    if total and total > len(records):
         st.caption(f'💡 共 {total} 条，仅显示最近 {len(records)} 条')
     df = inspection_match.submissions_to_df(records)
-    st.dataframe(df.drop(columns=['id']), use_container_width=True, hide_index=True)
+    cols = [c for c in df.columns if c != 'id']
+    st.dataframe(df[cols], use_container_width=True, hide_index=True)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -3158,6 +3159,11 @@ def _render_compare_tab():
     result = st.session_state.get('inspection_match_result')
     if result is None:
         st.info('👆 上传检验清单后点击「🚀 开始比对」')
+        return
+    if not isinstance(result, dict) or 'summary' not in result:
+        # 旧版本残留的脏数据 → 清掉，避免渲染崩溃
+        st.session_state.inspection_match_result = None
+        st.info('检测到旧会话残留的比对结果，已清除。请重新上传检验清单并比对。')
         return
 
     s = result['summary']
@@ -3270,6 +3276,17 @@ def page_inspection_match():
 
 # ==================== 主路由 ====================
 def main():
+    try:
+        _route_main()
+    except Exception as e:
+        # 捕获所有未处理异常并在页面显示，便于用户复制反馈，避免白屏崩溃
+        import traceback
+        tb = traceback.format_exc()
+        st.error('❌ 页面渲染发生异常，请把下方错误信息复制给开发人员：')
+        st.code(tb, language='text')
+
+
+def _route_main():
     if menu == '📁 数据导入':
         page_data_import()
     elif menu == '🔍 送检/检验对比':
