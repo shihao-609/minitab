@@ -15,6 +15,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from io import BytesIO
+import time
 from datetime import datetime, timezone, timedelta, date
 from dotenv import load_dotenv
 
@@ -2935,9 +2936,22 @@ def page_batch_analysis():
 def _load_sub_records():
     recs = st.session_state.get('_sub_records')
     if recs is None:
-        recs = supabase_helper.list_inspection_submissions()
+        recs = supabase_helper.list_inspection_submissions(limit=2000)
         st.session_state._sub_records = recs
     return recs
+
+
+def _load_sub_total():
+    if '_sub_total' not in st.session_state:
+        st.session_state._sub_total = supabase_helper.count_inspection_submissions()
+    return st.session_state._sub_total
+
+
+def _load_compare_records():
+    """对比用轻量查询：全部累计送检记录（6 业务列，不含 id）"""
+    if '_sub_compare' not in st.session_state:
+        st.session_state._sub_compare = supabase_helper.fetch_submission_records()
+    return st.session_state._sub_compare
 
 
 def _style_unchecked(df):
@@ -2955,7 +2969,7 @@ def _render_submission_tab():
         st.session_state._sub_records = None
 
     records = _load_sub_records()
-    total = len(records)
+    total = _load_sub_total()
     suppliers = len({r.get('supplier') for r in records})
     codes = len({r.get('material_code') for r in records})
     c1, c2, c3 = st.columns(3)
@@ -2991,17 +3005,22 @@ def _render_submission_tab():
             st.error(f'❌ 文件解析失败: {e}')
         else:
             with st.spinner('正在检查重复记录...'):
-                new_df, dup_df = inspection_match.preview_import(df, records)
+                new_df, dup_df = inspection_match.preview_import(df)
             st.success(f'✅ 解析成功：共 {len(df)} 行 → 将新增 {len(new_df)} 条，重复跳过 {len(dup_df)} 条')
             st.dataframe(new_df, use_container_width=True, hide_index=True)
             if st.button('🚀 确认入库', type='primary', key='sub_import_btn'):
                 with st.spinner('正在写入数据库...'):
+                    t0 = time.monotonic()
                     inserted, skipped, _ = inspection_match.import_submissions(df)
+                    dt = time.monotonic() - t0
                 if inserted > 0:
-                    st.success(f'✅ 已入库 {inserted} 条记录' + (f'（跳过重复 {skipped} 条）' if skipped else ''))
+                    st.success(f'✅ 已入库 {inserted} 条记录（耗时 {dt:.2f}s）'
+                               + (f'（跳过重复 {skipped} 条）' if skipped else ''))
                 else:
                     st.info(f'没有新增记录，{skipped} 条均为重复。')
                 st.session_state._sub_records = None
+                st.session_state._sub_total = None
+                st.session_state._sub_compare = None
                 st.rerun()
 
     st.divider()
@@ -3010,6 +3029,8 @@ def _render_submission_tab():
         st.info('暂无送检记录，请先上传送检清单。')
         return
 
+    if total > len(records):
+        st.caption(f'💡 共 {total} 条，仅显示最近 {len(records)} 条')
     df = inspection_match.submissions_to_df(records)
     st.dataframe(df.drop(columns=['id']), use_container_width=True, hide_index=True)
 
@@ -3024,17 +3045,21 @@ def _render_submission_tab():
             rid = df.iloc[options.index(sel)]['id']
             if supabase_helper.delete_inspection_submission(rid):
                 st.session_state._sub_records = None
+                st.session_state._sub_total = None
+                st.session_state._sub_compare = None
                 st.rerun()
     with c2:
         if st.checkbox('⚠️ 确认清空全部送检记录', key='sub_clear_ck'):
             if st.button('🗑️ 清空全部', type='primary', key='sub_clear_btn', use_container_width=True):
                 if supabase_helper.clear_inspection_submissions():
                     st.session_state._sub_records = None
+                    st.session_state._sub_total = None
+                    st.session_state._sub_compare = None
                     st.rerun()
 
 
 def _render_compare_tab():
-    records = _load_sub_records()
+    records = _load_compare_records()
     if not records:
         st.info('📌 送检清单为空。请先在「📤 送检清单管理」中上传送检清单。')
         return
@@ -3135,6 +3160,16 @@ def page_inspection_match():
             st.warning('⚠️ 数据库表 `inspection_submissions` 尚未创建，请先在 Supabase SQL Editor 中执行：')
             st.code(supabase_helper.get_create_inspection_table_sql(), language='sql')
         else:
+            if '_rpc_ok' not in st.session_state:
+                st.session_state._rpc_ok = supabase_helper.ensure_inspection_rpc()
+            if st.session_state._rpc_ok:
+                st.caption('⚡ 高速批量入库已启用（RPC 原子去重，单请求完成）')
+            else:
+                st.warning('⚠️ 批量入库函数 `bulk_insert_inspections` 尚未创建，当前使用普通写入模式（含重复时较慢）。建议执行下方完整 SQL：')
+                st.code(supabase_helper.get_create_inspection_table_sql(), language='sql')
+                if st.button('🔄 已执行 SQL，重新检测', key='rpc_recheck'):
+                    st.session_state._rpc_ok = supabase_helper.ensure_inspection_rpc()
+                    st.rerun()
             _render_submission_tab()
 
     with tab_compare:

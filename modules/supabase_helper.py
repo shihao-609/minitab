@@ -621,25 +621,63 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_dedup
 -- 6. 常用查询索引
 CREATE INDEX IF NOT EXISTS idx_inspection_user_date
     ON inspection_submissions(user_id, received_date);
+
+-- 7. 批量入库函数（RPC）：服务端 ON CONFLICT DO NOTHING 原子去重，
+--    单次请求完成全部写入，重复记录自动跳过，无需客户端逐条重试。
+CREATE OR REPLACE FUNCTION bulk_insert_inspections(p_rows jsonb)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    inserted integer := 0;
+    r jsonb;
+BEGIN
+    FOR r IN SELECT * FROM jsonb_array_elements(p_rows) LOOP
+        INSERT INTO inspection_submissions
+            (user_id, supplier, material_code, spec, material_name, received_date, received_qty)
+        VALUES
+            (auth.uid(),
+             COALESCE(r->>'supplier', ''),
+             COALESCE(r->>'material_code', ''),
+             COALESCE(r->>'spec', ''),
+             COALESCE(r->>'material_name', ''),
+             NULLIF(r->>'received_date', '')::date,
+             (r->>'received_qty')::numeric)
+        ON CONFLICT (user_id, supplier, material_code, spec, material_name, received_qty)
+        DO NOTHING;
+        IF FOUND THEN
+            inserted := inserted + 1;
+        END IF;
+    END LOOP;
+    RETURN inserted;
+END;
+$$;
+
+-- 8. 仅允许已登录用户调用
+REVOKE ALL ON FUNCTION bulk_insert_inspections(jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION bulk_insert_inspections(jsonb) TO authenticated;
 """
 
 
 @_with_retry
-def _do_list_inspections(client):
-    return client.table("inspection_submissions").select("*").order(
-        "received_date", desc=True).order("created_at", desc=True).execute()
+def _do_list_inspections(client, limit=None):
+    q = client.table("inspection_submissions").select("*").order(
+        "received_date", desc=True).order("created_at", desc=True)
+    if limit:
+        q = q.limit(limit)
+    return q.execute()
 
 
-def list_inspection_submissions() -> list:
+def list_inspection_submissions(limit: int = None) -> list:
     """
-    列出当前用户的所有送检记录（按收料日期倒序）
-
-    数据量不大时直接全量返回，由业务层做五元组去重与对比。
+    列出当前用户的送检记录（按收料日期倒序），用于管理页展示。
+    limit 用于控制单次传输量（例如仅展示最近 2000 条）。
     """
     try:
         client = _get_client()
         _check_client(client)
-        result = _do_list_inspections(client)
+        result = _do_list_inspections(client, limit)
 
         uid = _get_user_id()
         if uid and result.data:
@@ -652,13 +690,83 @@ def list_inspection_submissions() -> list:
 
 
 @_with_retry
+def _do_fetch_submission_keys(client):
+    """只拉取五元组去重键列（不含日期、数量以外字段），用于导入预览去重"""
+    return client.table("inspection_submissions").select(
+        "supplier,material_code,spec,material_name,received_qty"
+    ).execute()
+
+
+def fetch_submission_keys() -> list:
+    """轻量查询：拉取全部送检记录的去重键（5 列），避免 SELECT * 大 payload。"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        result = _do_fetch_submission_keys(client)
+        return result.data
+    except Exception as e:
+        st.error(f"获取送检去重键失败: {e}")
+        return []
+
+
+@_with_retry
+def _do_fetch_submission_records(client):
+    """只拉取对比所需的 6 个业务列（不含 id / created_at）"""
+    return client.table("inspection_submissions").select(
+        "supplier,material_code,spec,material_name,received_date,received_qty"
+    ).order("received_date", desc=True).order("created_at", desc=True).execute()
+
+
+def fetch_submission_records() -> list:
+    """轻量查询：全部累计送检记录（6 业务列），用于检验对比。"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        result = _do_fetch_submission_records(client)
+        return result.data
+    except Exception as e:
+        st.error(f"获取送检记录失败: {e}")
+        return []
+
+
+@_with_retry
+def _do_count_inspections(client):
+    return client.table("inspection_submissions").select("id", count="exact").execute()
+
+
+def count_inspection_submissions() -> int:
+    """获取当前用户送检记录总数"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        result = _do_count_inspections(client)
+        return int(result.count or 0)
+    except Exception:
+        return 0
+
+
+def ensure_inspection_rpc() -> bool:
+    """检测 bulk_insert_inspections 函数是否已创建（空数组调用无副作用）"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.rpc("bulk_insert_inspections", {"p_rows": []}).execute()
+        return True
+    except Exception:
+        return False
+
+
+@_with_retry
 def _do_insert_inspections(client, rows):
     return client.table("inspection_submissions").insert(rows).execute()
 
 
 def insert_inspection_submissions(rows: list) -> int:
     """
-    批量插入送检记录（幂等：唯一键冲突自动跳过）。返回实际插入条数。
+    批量插入送检记录（幂等），返回实际插入条数。
+
+    优先使用 RPC 原子入库（bulk_insert_inspections，单请求 ON CONFLICT DO NOTHING）；
+    函数未创建时自动回退为普通批量插入 + 逐条跳过冲突。
     """
     if not rows:
         return 0
@@ -671,12 +779,30 @@ def insert_inspection_submissions(rows: list) -> int:
             return 0
 
         payload = [dict(r, user_id=uid) for r in rows]
+
+        # 优先 RPC：单次请求完成全部写入（含去重），性能最优
+        try:
+            data = client.rpc("bulk_insert_inspections", {"p_rows": payload}).execute().data
+            try:
+                return int(data)
+            except (TypeError, ValueError):
+                return len(payload)
+        except Exception as e:
+            msg = str(e).lower()
+            # RPC 函数未创建 → 回退普通插入
+            if any(k in msg for k in (
+                    "could not find the function", "does not exist",
+                    "pgrst202", "bulk_insert_inspections")):
+                pass
+            else:
+                raise
+
+        # 回退：普通批量插入，撞唯一索引则逐条跳过冲突
         try:
             _do_insert_inspections(client, payload)
             return len(payload)
         except Exception as e:
             err = str(e).lower()
-            # 并发下撞唯一索引 → 逐条插入跳过冲突
             if any(k in err for k in ("duplicate", "unique", "23505", "conflict")):
                 inserted = 0
                 for r in payload:

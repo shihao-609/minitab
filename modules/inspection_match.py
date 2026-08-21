@@ -234,9 +234,13 @@ def _existing_keys(records):
 
 
 def preview_import(df, records=None):
-    """返回 (新增记录 df, 重复记录 df)。去重键为五元组，不含日期"""
+    """
+    返回 (新增记录 df, 重复记录 df)。去重键为五元组，不含日期。
+
+    records 为空时走轻量查询（只拉取五元组键列），避免全量 SELECT *。
+    """
     if records is None:
-        records = supabase_helper.list_inspection_submissions()
+        records = supabase_helper.fetch_submission_keys()
     keys = _existing_keys(records)
     new_rows, dup_rows = [], []
     for _, row in df.iterrows():
