@@ -2942,16 +2942,20 @@ def _load_sub_records():
 
 
 def _load_sub_total():
-    if '_sub_total' not in st.session_state:
-        st.session_state._sub_total = supabase_helper.count_inspection_submissions()
-    return st.session_state._sub_total
+    total = st.session_state.get('_sub_total')
+    if total is None:
+        total = supabase_helper.count_inspection_submissions()
+        st.session_state._sub_total = total
+    return total
 
 
 def _load_compare_records():
     """对比用轻量查询：全部累计送检记录（6 业务列，不含 id）"""
-    if '_sub_compare' not in st.session_state:
-        st.session_state._sub_compare = supabase_helper.fetch_submission_records()
-    return st.session_state._sub_compare
+    recs = st.session_state.get('_sub_compare')
+    if recs is None:
+        recs = supabase_helper.fetch_submission_records()
+        st.session_state._sub_compare = recs
+    return recs
 
 
 def _style_unchecked(df):
