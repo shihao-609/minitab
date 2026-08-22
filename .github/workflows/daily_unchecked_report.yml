@@ -1,0 +1,36 @@
+name: 每日未检验清单邮件
+
+on:
+  # 工作日凌晨自动运行（北京时间 0:30 = UTC 前一天 16:30）
+  # cron 星期字段按 UTC 计算：周日~周四 16:30 = 北京周一~周五 0:30
+  schedule:
+    - cron: '30 16 * * 0-4'
+  # 支持手动触发（仓库 Actions 页面点 Run workflow）
+  workflow_dispatch:
+
+jobs:
+  send-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 生成并发送未检验清单
+        run: python scripts/daily_unchecked_report.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SMTP_HOST: smtp.qq.com
+          SMTP_PORT: '465'
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          REPORT_RECIPIENTS: ${{ secrets.REPORT_RECIPIENTS }}
+          REPORT_FROM_NAME: 质量管理系统
