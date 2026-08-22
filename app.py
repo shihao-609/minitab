@@ -3290,7 +3290,7 @@ def page_inspection_match():
             st.warning('⚠️ 数据库表 `inspection_submissions` 尚未创建，请先在 Supabase SQL Editor 中执行：')
             st.code(supabase_helper.get_create_inspection_table_sql(), language='sql')
         else:
-            if '_rpc_ok' not in st.session_state:
+            if st.session_state._rpc_ok is None:
                 st.session_state._rpc_ok = supabase_helper.ensure_inspection_rpc()
             if st.session_state._rpc_ok:
                 st.caption('⚡ 高速批量入库已启用（RPC 原子去重，单请求完成）')
