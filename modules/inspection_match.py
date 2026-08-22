@@ -487,6 +487,11 @@ def compare(sub_df, ins_df, progress=None):
 
     # 额外检验：未被任何送检匹配的检验记录
     sub_codes = {s['物料编码'] for s in subs}
+    # 统计检验记录的关键字段出现次数，用于识别疑似重复检验单
+    dup_counts = {}
+    for c in ins_rows:
+        _key = (c['供应商'], c['物料编码'], c['规格型号'], c['物料名称'], c['质检日期'], c['检验数量'])
+        dup_counts[_key] = dup_counts.get(_key, 0) + 1
     extra = []
     for idx, irow in enumerate(ins_rows):
         if idx in matched_ins:
@@ -500,6 +505,12 @@ def compare(sub_df, ins_df, progress=None):
                 note = f"送检清单同编码记录存在差异：{'；'.join(diffs[:2])}"
             else:
                 note = '该编码存在于送检清单，但未匹配成功（请核对名称/数量/日期/供应商）'
+        # 疑似重复检验单提示（不去重，仅提示人工确认）
+        dup_key = (irow['供应商'], irow['物料编码'], irow['规格型号'], irow['物料名称'], irow['质检日期'], irow['检验数量'])
+        if dup_counts.get(dup_key, 0) > 1:
+            dup_tip = ('该记录与另一条检验记录完全相同（同供应商/编码/规格型号/名称/质检日期/数量），'
+                       '疑似重复检验单，请人工确认')
+            note = f"{note}；{dup_tip}" if note else dup_tip
         extra.append({**_ins_dict(irow), '备注': note})
 
     checked_df = pd.DataFrame(checked, columns=SUBMISSION_COLS + ['匹配检验记录'])
