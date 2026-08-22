@@ -13,9 +13,11 @@ v3: 添加数据库冷启动重试机制（解决 Supabase 免费版暂停后唤
 
 import os
 import time
+import math
 from datetime import datetime, timezone
 from supabase import create_client, Client
 import pandas as pd
+import numpy as np
 import json
 import streamlit as st
 from typing import Optional, List
@@ -125,6 +127,46 @@ def _check_client(client: Optional[Client]):
     """检查客户端是否可用，不可用时抛出异常"""
     if client is None:
         raise ValueError("SUPABASE_URL 或 SUPABASE_ANON_KEY 未设置，请检查 .env 文件或 Streamlit Secrets")
+
+
+def _sanitize_value(v):
+    """把无法 JSON 序列化的值清洗为 Python 原生类型或 None"""
+    if v is None:
+        return None
+    # numpy 标量 / NaN / Inf
+    if isinstance(v, (np.floating, np.float64, np.float32)):
+        if np.isnan(v) or np.isinf(v):
+            return None
+        return float(v)
+    if isinstance(v, (np.integer, np.int64, np.int32)):
+        return int(v)
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    # Python float 的 NaN / Inf
+    if isinstance(v, float):
+        if math.isnan(v) or math.isinf(v):
+            return None
+        return v
+    # pandas Timestamp / NaT
+    if isinstance(v, pd.Timestamp):
+        if pd.isna(v):
+            return None
+        return v.isoformat()
+    # datetime / date
+    if isinstance(v, datetime):
+        return v.isoformat()
+    return v
+
+
+def _sanitize_rows(rows: list, uid: str) -> list:
+    """给数据注入 user_id 并清洗不可 JSON 序列化的值"""
+    cleaned = []
+    for row in rows:
+        new_row = {'user_id': uid}
+        for k, v in row.items():
+            new_row[k] = _sanitize_value(v)
+        cleaned.append(new_row)
+    return cleaned
 
 
 # ==================== 数据集 CRUD ====================
@@ -778,7 +820,7 @@ def insert_inspection_submissions(rows: list) -> int:
             st.error("插入送检记录失败: 未获取到用户 ID，请重新登录。")
             return 0
 
-        payload = [dict(r, user_id=uid) for r in rows]
+        payload = _sanitize_rows(rows, uid)
 
         # 优先 RPC：单次请求完成全部写入（含去重），性能最优
         try:
@@ -1090,7 +1132,7 @@ def insert_inspection_records(rows: list) -> int:
             st.error("插入检验记录失败: 未获取到用户 ID，请重新登录。")
             return 0
 
-        payload = [dict(r, user_id=uid) for r in rows]
+        payload = _sanitize_rows(rows, uid)
 
         try:
             data = client.rpc("bulk_insert_inspection_records", {"p_rows": payload}).execute().data
