@@ -203,7 +203,8 @@ def parse_sheet(uploaded_file, kind='submission', default_date=None):
     """
     解析上传的 Excel，返回标准化后的 DataFrame（6 标准列）。
 
-    收料日期为空时（kind='submission'）填充 default_date（调用方传当天日期）。
+    收料日期（kind='submission'）按 Excel 原样保存：为空则保持为空，不再自动填充。
+    参数 default_date 仅作向后兼容保留，已不使用。
     """
     df = pd.read_excel(uploaded_file, header=None)
     header_row = _find_header_row(df)
@@ -221,7 +222,7 @@ def parse_sheet(uploaded_file, kind='submission', default_date=None):
     df['规格型号'] = df['规格型号'].map(_clean_text)
     df['物料名称'] = df['物料名称'].map(_clean_text)
     if kind == 'submission':
-        df['收料日期'] = df['收料日期'].map(lambda v: _parse_date(v, default=default_date))
+        df['收料日期'] = df['收料日期'].map(lambda v: _parse_date(v, default=None))
         df['实收数量'] = df['实收数量'].map(_parse_qty)
     else:
         df['质检日期'] = df['质检日期'].map(lambda v: _parse_date(v, default=None))
@@ -274,13 +275,12 @@ def preview_import(df, records=None):
 
 def import_submissions(df, progress=None, batch_size=1000):
     """
-    幂等入库：收料日期为空→当天；五元组重复的跳过。
+    幂等入库：收料日期保持 Excel 原样（为空则入库为空）；五元组重复的跳过。
     返回 (插入数, 重复数, 新增行数)
 
     progress: 可选回调 progress(done, total)
     """
     df = df.copy()
-    df['收料日期'] = df['收料日期'].map(lambda v: v or date.today())
 
     # 直接插入全部数据，由数据库 unique index 完成去重，避免再次查 keys
     total = len(df)
@@ -350,6 +350,23 @@ def _sub_dict(row):
 
 def _ins_dict(row):
     return {c: row[c] for c in INSPECTION_COLS}
+
+
+def _diff_fields(sub, ins):
+    """严格核对送检记录与检验记录的字段，返回差异描述（空串表示完全一致）。
+
+    重点核对：供应商 / 规格型号 / 物料名称 / 实收数量 vs 检验数量。
+    """
+    diffs = []
+    if sub['供应商'] != ins['供应商']:
+        diffs.append(f"供应商「{sub['供应商'] or '空'}」≠「{ins['供应商'] or '空'}」")
+    if sub['规格型号'] != ins['规格型号']:
+        diffs.append(f"规格「{sub['规格型号'] or '空'}」≠「{ins['规格型号'] or '空'}」")
+    if sub['物料名称'] != ins['物料名称']:
+        diffs.append(f"名称「{sub['物料名称'] or '空'}」≠「{ins['物料名称'] or '空'}」")
+    if not _qty_eq(sub['实收数量'], ins['检验数量']):
+        diffs.append(f"实收数量 {_fmt_qty(sub['实收数量']) or '空'} ≠ 检验数量 {_fmt_qty(ins['检验数量']) or '空'}")
+    return '；'.join(diffs)
 
 
 def compare(sub_df, ins_df, progress=None):
@@ -445,7 +462,20 @@ def compare(sub_df, ins_df, progress=None):
                         name_mismatch_ins.append({**_ins_dict(c), '对应送检编码': code})
                         matched_ins.add(idx)
             else:
-                unchecked.append(_sub_dict(srow))
+                # 同编码同名称但全键未命中 → 严格核对，给出差异原因（重点：数量）
+                d = _sub_dict(srow)
+                reasons = []
+                for idx, c in cands_code:
+                    if idx in matched_ins:
+                        continue
+                    diff = _diff_fields(srow, c)
+                    if diff:
+                        reasons.append(diff)
+                    elif not _date_ge(c['质检日期'], srow['收料日期']):
+                        reasons.append(f"质检日期 {_fmt_date(c['质检日期']) or '空'} 早于收料日期 {_fmt_date(srow['收料日期']) or '空'}")
+                if reasons:
+                    d['未匹配原因'] = '；'.join(reasons[:2])
+                unchecked.append(d)
 
         if progress and (s_idx + 1) % report_every == 0:
             progress(s_idx + 1, total_sub)
@@ -461,11 +491,17 @@ def compare(sub_df, ins_df, progress=None):
             continue
         note = ''
         if irow['物料编码'] in sub_codes:
-            note = '该编码存在于送检清单，但未匹配成功（请核对名称/数量/日期/供应商）'
+            # 找出同编码的送检记录，尽量给出具体差异（重点：数量）
+            diffs = [_diff_fields(s, irow) for s in subs if s['物料编码'] == irow['物料编码']]
+            diffs = [d for d in diffs if d]
+            if diffs:
+                note = f"送检清单同编码记录存在差异：{'；'.join(diffs[:2])}"
+            else:
+                note = '该编码存在于送检清单，但未匹配成功（请核对名称/数量/日期/供应商）'
         extra.append({**_ins_dict(irow), '备注': note})
 
     checked_df = pd.DataFrame(checked, columns=SUBMISSION_COLS + ['匹配检验记录'])
-    unchecked_df = pd.DataFrame(unchecked, columns=SUBMISSION_COLS)
+    unchecked_df = pd.DataFrame(unchecked, columns=SUBMISSION_COLS + ['未匹配原因'])
     extra_df = pd.DataFrame(extra, columns=INSPECTION_COLS + ['备注'])
     mismatch_sub_df = pd.DataFrame(name_mismatch_sub, columns=SUBMISSION_COLS)
     mismatch_ins_df = pd.DataFrame(name_mismatch_ins, columns=INSPECTION_COLS + ['对应送检编码'])

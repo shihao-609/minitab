@@ -2937,7 +2937,7 @@ def _render_submission_tab():
     uploaded = st.file_uploader(
         '📤 上传送检清单 Excel（列：供应商 / 物料编码 / 规格型号 / 物料名称 / 收料日期 / 实收数量）',
         type=['xlsx', 'xls'], key='sub_upload',
-        help='收料日期留空将自动填充为上传当天日期；重复记录（供应商+物料编码+规格型号+物料名称+实收数量一致）不会重复入库')
+        help='收料日期按 Excel 原样保存，留空则保持为空；重复记录（供应商+物料编码+规格型号+物料名称+实收数量一致）不会重复入库')
     if uploaded is not None:
         # 用文件 ID 判断是否新文件：避免每次 rerun 重新解析/查库
         fid = getattr(uploaded, 'file_id', None) or (uploaded.name, uploaded.size)
@@ -2948,7 +2948,7 @@ def _render_submission_tab():
             st.session_state._sub_preview = None
             st.session_state._sub_imported = False
             try:
-                df = inspection_match.parse_sheet(uploaded, 'submission', default_date=date.today())
+                df = inspection_match.parse_sheet(uploaded, 'submission')
             except Exception as e:
                 st.session_state._sub_parse_err = str(e)
             else:
