@@ -256,9 +256,13 @@ def show_data_info():
 # ==================== 1. 数据导入 ====================
 def page_data_import():
     st.header('📁 数据导入')
-    tab1, tab2, tab3, tab4 = st.tabs(['上传文件', '示例数据', '手动输入', '☁️ Supabase'])
+    sub = st.segmented_control(
+        '数据来源', ['📤 上传文件', '📝 示例数据', '✏️ 手动输入', '☁️ Supabase'],
+        default='📤 上传文件', key='di_sub', label_visibility='collapsed')
+    if sub is None:
+        sub = '📤 上传文件'
 
-    with tab1:
+    if sub == '📤 上传文件':
         uploaded_file = st.file_uploader('选择 CSV 或 Excel 文件', type=['csv', 'xlsx', 'xls'])
         if uploaded_file:
             try:
@@ -269,7 +273,7 @@ def page_data_import():
             except Exception as e:
                 st.error(f'加载失败: {e}')
 
-    with tab2:
+    elif sub == '📝 示例数据':
         # ---- 📈 SPC 控制图 ----
         st.subheader('📈 SPC 控制图')
         c1, c2, c3 = st.columns(3)
@@ -439,7 +443,7 @@ def page_data_import():
                 st.success('已加载 5 条 FMEA 记录')
                 st.rerun()
 
-    with tab3:
+    elif sub == '✏️ 手动输入':
         st.caption('💡 在表格中直接输入，Tab 跳格；支持自动扩展行')
         if 'manual_df' not in st.session_state:
             st.session_state.manual_df = pd.DataFrame({'测量值': [''] * 10})
@@ -498,7 +502,7 @@ def page_data_import():
                 )
                 st.rerun()
 
-    with tab4:
+    else:
         st.caption('☁️ 数据持久化到 Supabase，刷新不丢失')
         c1, c2 = st.columns([3, 1])
         with c1:
@@ -2469,12 +2473,16 @@ def page_batch_analysis():
         if key not in st.session_state:
             st.session_state[key] = {}
 
-    tab_upload, tab_history = st.tabs(['📤 上传与手动分析', '📂 历史报告'])
+    sub = st.segmented_control(
+        '视图', ['📤 上传与手动分析', '📂 历史报告'],
+        default='📤 上传与手动分析', key='ba_sub', label_visibility='collapsed')
+    if sub is None:
+        sub = '📤 上传与手动分析'
 
     # ================================================================
-    # Tab 1: 上传与手动分析
+    # 视图 1: 上传与手动分析
     # ================================================================
-    with tab_upload:
+    if sub == '📤 上传与手动分析':
         uploaded_files = st.file_uploader(
             '📤 选择 CSV 文件（支持多选）',
             type=['csv'],
@@ -2732,9 +2740,9 @@ def page_batch_analysis():
         show_data_info()
 
     # ================================================================
-    # Tab 2: 历史报告（不变）
+    # 视图 2: 历史报告（不变）
     # ================================================================
-    with tab_history:
+    else:
         st.subheader('📂 已保存的分析报告')
 
         table_ok = supabase_helper.ensure_reports_table()
@@ -2917,21 +2925,6 @@ def _render_submission_tab():
     c2.metric('🏭 供应商数', suppliers)
     c3.metric('🔢 物料编码数', codes)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.download_button('📄 下载送检清单模板',
-                           inspection_match.download_template('submission'),
-                           '送检清单模板.xlsx',
-                           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                           key='dl_sub_tpl', use_container_width=True)
-    with c2:
-        if total:
-            st.download_button('💾 导出全部送检记录',
-                               inspection_match.export_submissions(records),
-                               f"送检记录_{date.today()}.xlsx",
-                               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                               key='dl_sub_all', use_container_width=True)
-
     st.divider()
 
     uploaded = st.file_uploader(
@@ -3006,29 +2999,13 @@ def _render_submission_tab():
     cols = [c for c in df.columns if c != 'id']
     st.dataframe(df[cols], use_container_width=True, hide_index=True)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        options = [
-            f"{i + 1}. [{r['物料编码']}] {r['物料名称']} · {r['供应商']} · 数量{r['实收数量']} · {r['收料日期']}"
-            for i, r in df.iterrows()
-        ]
-        sel = st.selectbox('🗑️ 选择要删除的记录', options, key='sub_del_sel')
-        if st.button('删除所选记录', key='sub_del_btn', use_container_width=True):
-            rid = df.iloc[options.index(sel)]['id']
-            if supabase_helper.delete_inspection_submission(rid):
+    if st.checkbox('⚠️ 确认清空全部送检记录', key='sub_clear_ck'):
+        if st.button('🗑️ 清空全部', type='primary', key='sub_clear_btn', use_container_width=True):
+            if supabase_helper.clear_inspection_submissions():
                 st.session_state._sub_records = None
                 st.session_state._sub_total = None
                 st.session_state._sub_compare = None
-                st.session_state._sub_df_cache = None
                 st.rerun()
-    with c2:
-        if st.checkbox('⚠️ 确认清空全部送检记录', key='sub_clear_ck'):
-            if st.button('🗑️ 清空全部', type='primary', key='sub_clear_btn', use_container_width=True):
-                if supabase_helper.clear_inspection_submissions():
-                    st.session_state._sub_records = None
-                    st.session_state._sub_total = None
-                    st.session_state._sub_compare = None
-                    st.rerun()
 
 
 def _render_compare_tab():
@@ -3393,16 +3370,9 @@ def main():
         st.sidebar.caption('Quality Management System v2.0')
 
         menu = st.sidebar.radio(
-            '选择分析模块',
-            ['📁 数据导入',
-             '🔍 送检/检验对比',
-             '📋 批量分析报告',
-             '📈 SPC 控制图',
-             '🎯 过程能力分析',
-             '📊 质量图形工具',
-             '🔬 测量系统分析 MSA',
-             '🔢 统计推断',
-             '🧪 高级分析'],
+            '选择页面',
+            ['🔍 检验对比',
+             '📊 分析模块'],
         )
         st.sidebar.divider()
         st.sidebar.caption('支持 CSV / Excel · 支持 Supabase 云存储')
@@ -3419,25 +3389,43 @@ def main():
         st.code(tb, language='text')
 
 
-def _route_main(menu):
-    if menu == '📁 数据导入':
+def page_analysis_hub():
+    """分析模块总入口：胶囊按钮切换，只渲染当前选中的模块，
+    避免 Streamlit 的 tabs 一次性渲染全部子页面导致卡顿。"""
+    st.header('📊 分析模块')
+    st.caption('点击下方胶囊按钮切换具体分析工具')
+
+    modules = ['📁 数据导入', '📋 批量分析报告', '📈 SPC 控制图', '🎯 过程能力分析',
+               '📊 质量图形工具', '🔬 测量系统分析 MSA', '🔢 统计推断', '🧪 高级分析']
+    sel = st.segmented_control(
+        '选择分析模块', modules, default='📁 数据导入',
+        key='analysis_hub_sel', label_visibility='collapsed')
+    if sel is None:
+        sel = '📁 数据导入'
+
+    if sel == '📁 数据导入':
         page_data_import()
-    elif menu == '🔍 送检/检验对比':
-        page_inspection_match()
-    elif menu == '📋 批量分析报告':
+    elif sel == '📋 批量分析报告':
         page_batch_analysis()
-    elif menu == '📈 SPC 控制图':
+    elif sel == '📈 SPC 控制图':
         page_spc()
-    elif menu == '🎯 过程能力分析':
+    elif sel == '🎯 过程能力分析':
         page_capability()
-    elif menu == '📊 质量图形工具':
+    elif sel == '📊 质量图形工具':
         page_quality_tools()
-    elif menu == '🔬 测量系统分析 MSA':
+    elif sel == '🔬 测量系统分析 MSA':
         page_msa()
-    elif menu == '🔢 统计推断':
+    elif sel == '🔢 统计推断':
         page_stats()
-    elif menu == '🧪 高级分析':
+    elif sel == '🧪 高级分析':
         page_advanced()
+
+
+def _route_main(menu):
+    if menu == '🔍 检验对比':
+        page_inspection_match()
+    elif menu == '📊 分析模块':
+        page_analysis_hub()
 
 
 if __name__ == '__main__':
