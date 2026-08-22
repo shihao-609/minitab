@@ -218,6 +218,8 @@ def parse_sheet(uploaded_file, kind='submission', default_date=None):
         raise ValueError(f'缺少必要列: {", ".join(missing)}（请使用标准列名或下载模板）')
 
     df['供应商'] = df['供应商'].map(_clean_text)
+    # 过滤 Excel 底部的「合计」汇总行（供应商列含"合计"，如 ERP 导出常见的合计行）
+    df = df[~df['供应商'].str.contains('合计', na=False)].reset_index(drop=True)
     df['物料编码'] = df['物料编码'].map(_normalize_code)
     df['规格型号'] = df['规格型号'].map(_clean_text)
     df['物料名称'] = df['物料名称'].map(_clean_text)
