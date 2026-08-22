@@ -854,3 +854,358 @@ def clear_inspection_submissions() -> bool:
     except Exception as e:
         st.error(f"清空送检记录失败: {e}")
         return False
+
+
+# ==================== 检验记录 CRUD（持久化入库） ====================
+
+def get_create_inspection_records_table_sql() -> str:
+    """返回创建检验记录表 + 供应商别名表 + 批量入库 RPC 的 SQL"""
+    return """
+-- ============ 检验记录表（持久化，跨窗口自动对账） ============
+CREATE TABLE IF NOT EXISTS inspection_records (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES auth.users(id),
+    doc_no TEXT DEFAULT '',
+    supplier TEXT NOT NULL DEFAULT '',
+    material_code TEXT NOT NULL,
+    spec TEXT DEFAULT '',
+    material_name TEXT DEFAULT '',
+    inspect_date DATE,
+    inspect_qty NUMERIC,
+    qualified_qty NUMERIC,
+    unqualified_qty NUMERIC,
+    result TEXT DEFAULT '',
+    inspector TEXT DEFAULT '',
+    batch_no TEXT DEFAULT '',
+    category TEXT DEFAULT '',
+    source_file TEXT DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE inspection_records ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can view own ins_records" ON inspection_records;
+DROP POLICY IF EXISTS "Users can insert own ins_records" ON inspection_records;
+DROP POLICY IF EXISTS "Users can delete own ins_records" ON inspection_records;
+
+CREATE POLICY "Users can view own ins_records"
+    ON inspection_records FOR SELECT
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert own ins_records"
+    ON inspection_records FOR INSERT
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete own ins_records"
+    ON inspection_records FOR DELETE
+    USING (auth.uid() = user_id);
+
+-- 去重索引（单据编号+供应商+编码+规格+名称+质检日期+检验数量；日期/数量为空时用哨兵值）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ins_records_dedup
+    ON inspection_records(user_id, doc_no, supplier, material_code, spec, material_name,
+                          COALESCE(inspect_date, '1970-01-01'::date),
+                          COALESCE(inspect_qty, -1));
+
+CREATE INDEX IF NOT EXISTS idx_ins_records_user_date
+    ON inspection_records(user_id, inspect_date);
+
+-- 批量入库函数（RPC）：服务端原子去重
+CREATE OR REPLACE FUNCTION bulk_insert_inspection_records(p_rows jsonb)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    inserted integer := 0;
+    r jsonb;
+BEGIN
+    FOR r IN SELECT * FROM jsonb_array_elements(p_rows) LOOP
+        INSERT INTO inspection_records
+            (user_id, doc_no, supplier, material_code, spec, material_name,
+             inspect_date, inspect_qty, qualified_qty, unqualified_qty,
+             result, inspector, batch_no, category, source_file)
+        VALUES
+            (auth.uid(),
+             COALESCE(r->>'doc_no', ''),
+             COALESCE(r->>'supplier', ''),
+             COALESCE(r->>'material_code', ''),
+             COALESCE(r->>'spec', ''),
+             COALESCE(r->>'material_name', ''),
+             NULLIF(r->>'inspect_date', '')::date,
+             NULLIF(r->>'inspect_qty', '')::numeric,
+             NULLIF(r->>'qualified_qty', '')::numeric,
+             NULLIF(r->>'unqualified_qty', '')::numeric,
+             COALESCE(r->>'result', ''),
+             COALESCE(r->>'inspector', ''),
+             COALESCE(r->>'batch_no', ''),
+             COALESCE(r->>'category', ''),
+             COALESCE(r->>'source_file', ''))
+        ON CONFLICT (user_id, doc_no, supplier, material_code, spec, material_name,
+                     COALESCE(inspect_date, '1970-01-01'::date),
+                     COALESCE(inspect_qty, -1))
+        DO NOTHING;
+        IF FOUND THEN
+            inserted := inserted + 1;
+        END IF;
+    END LOOP;
+    RETURN inserted;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION bulk_insert_inspection_records(jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION bulk_insert_inspection_records(jsonb) TO authenticated;
+
+-- ============ 供应商别名表（团队共享的归一化配置） ============
+CREATE TABLE IF NOT EXISTS supplier_aliases (
+    alias TEXT PRIMARY KEY,
+    canonical TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE supplier_aliases ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "All auth can view supplier_aliases" ON supplier_aliases;
+DROP POLICY IF EXISTS "All auth can manage supplier_aliases" ON supplier_aliases;
+
+CREATE POLICY "All auth can view supplier_aliases"
+    ON supplier_aliases FOR SELECT TO authenticated USING (true);
+
+CREATE POLICY "All auth can manage supplier_aliases"
+    ON supplier_aliases FOR ALL TO authenticated USING (true) WITH CHECK (true);
+"""
+
+
+def ensure_inspection_records_table() -> bool:
+    """检测 inspection_records 表是否存在"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("inspection_records").select("id").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def ensure_supplier_aliases_table() -> bool:
+    """检测 supplier_aliases 表是否存在"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("supplier_aliases").select("alias").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def ensure_inspection_records_rpc() -> bool:
+    """检测 bulk_insert_inspection_records 函数是否已创建（空数组调用无副作用）"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.rpc("bulk_insert_inspection_records", {"p_rows": []}).execute()
+        return True
+    except Exception:
+        return False
+
+
+@_with_retry
+def _do_list_inspection_records(client, limit=None):
+    q = client.table("inspection_records").select("*").order(
+        "inspect_date", desc=True).order("created_at", desc=True)
+    if limit:
+        q = q.limit(limit)
+    return q.execute()
+
+
+def list_inspection_records(limit: int = None) -> list:
+    """列出当前用户的检验记录（按质检日期倒序）"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        result = _do_list_inspection_records(client, limit)
+
+        uid = _get_user_id()
+        if uid and result.data:
+            result.data = [r for r in result.data if r.get("user_id") == uid]
+        return result.data
+    except Exception as e:
+        st.error(f"获取检验记录失败: {e}")
+        return []
+
+
+@_with_retry
+def _do_fetch_inspection_records(client):
+    """只拉取对账所需的业务列（不含 id / created_at）"""
+    return client.table("inspection_records").select(
+        "doc_no,supplier,material_code,spec,material_name,inspect_date,"
+        "inspect_qty,qualified_qty,unqualified_qty,result,inspector,batch_no,category"
+    ).order("inspect_date", desc=True).order("created_at", desc=True).execute()
+
+
+def fetch_inspection_records() -> list:
+    """轻量查询：全部累计检验记录（对账用）"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        result = _do_fetch_inspection_records(client)
+        return result.data
+    except Exception as e:
+        st.error(f"获取检验记录失败: {e}")
+        return []
+
+
+@_with_retry
+def _do_count_inspection_records(client):
+    return client.table("inspection_records").select("id", count="exact").execute()
+
+
+def count_inspection_records() -> int:
+    """获取当前用户检验记录总数"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        result = _do_count_inspection_records(client)
+        return int(result.count or 0)
+    except Exception:
+        return 0
+
+
+@_with_retry
+def _do_insert_inspection_records(client, rows):
+    return client.table("inspection_records").insert(rows).execute()
+
+
+def insert_inspection_records(rows: list) -> int:
+    """
+    批量插入检验记录（幂等），返回实际插入条数。
+    优先 RPC 原子入库；函数未创建时回退普通批量插入 + 逐条跳过冲突。
+    """
+    if not rows:
+        return 0
+    try:
+        client = _get_client()
+        _check_client(client)
+        uid = _get_user_id()
+        if not uid:
+            st.error("插入检验记录失败: 未获取到用户 ID，请重新登录。")
+            return 0
+
+        payload = [dict(r, user_id=uid) for r in rows]
+
+        try:
+            data = client.rpc("bulk_insert_inspection_records", {"p_rows": payload}).execute().data
+            try:
+                return int(data)
+            except (TypeError, ValueError):
+                return len(payload)
+        except Exception as e:
+            msg = str(e).lower()
+            if any(k in msg for k in (
+                    "could not find the function", "does not exist",
+                    "pgrst202", "bulk_insert_inspection_records")):
+                pass
+            else:
+                raise
+
+        try:
+            _do_insert_inspection_records(client, payload)
+            return len(payload)
+        except Exception as e:
+            err = str(e).lower()
+            if any(k in err for k in ("duplicate", "unique", "23505", "conflict")):
+                inserted = 0
+                for r in payload:
+                    try:
+                        client.table("inspection_records").insert(r).execute()
+                        inserted += 1
+                    except Exception:
+                        pass
+                return inserted
+            raise
+    except Exception as e:
+        st.error(f"插入检验记录失败: {e}")
+        return 0
+
+
+@_with_retry
+def _do_delete_inspection_record(client, rid):
+    return client.table("inspection_records").delete().eq("id", rid).execute()
+
+
+def delete_inspection_record(rid: str) -> bool:
+    """删除指定的检验记录"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        _do_delete_inspection_record(client, rid)
+        return True
+    except Exception as e:
+        st.error(f"删除检验记录失败: {e}")
+        return False
+
+
+@_with_retry
+def _do_clear_inspection_records(client, uid):
+    return client.table("inspection_records").delete().eq("user_id", uid).execute()
+
+
+def clear_inspection_records() -> bool:
+    """清空当前用户的全部检验记录"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        uid = _get_user_id()
+        if not uid:
+            st.error("清空检验记录失败: 未获取到用户 ID。")
+            return False
+        _do_clear_inspection_records(client, uid)
+        return True
+    except Exception as e:
+        st.error(f"清空检验记录失败: {e}")
+        return False
+
+
+# ==================== 供应商别名 CRUD ====================
+
+@_with_retry
+def _do_list_supplier_aliases(client):
+    return client.table("supplier_aliases").select("*").order("alias", desc=False).execute()
+
+
+def list_supplier_aliases() -> list:
+    """列出全部供应商别名映射（团队共享）"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        result = _do_list_supplier_aliases(client)
+        return result.data
+    except Exception as e:
+        st.error(f"获取供应商别名失败: {e}")
+        return []
+
+
+def add_supplier_alias(alias: str, canonical: str) -> bool:
+    """新增供应商别名映射（alias → canonical）"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("supplier_aliases").insert({
+            "alias": alias.strip(),
+            "canonical": canonical.strip(),
+        }).execute()
+        return True
+    except Exception as e:
+        st.error(f"新增供应商别名失败: {e}")
+        return False
+
+
+def delete_supplier_alias(alias: str) -> bool:
+    """删除供应商别名映射"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("supplier_aliases").delete().eq("alias", alias).execute()
+        return True
+    except Exception as e:
+        st.error(f"删除供应商别名失败: {e}")
+        return False

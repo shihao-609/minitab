@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 
 from modules import spc_charts, capability, pareto_histogram, gage_rr, supabase_helper
 from modules import spc_advanced, msa_advanced, stats_tools, quality_tools, advanced_analysis
-from modules import auth, batch_analysis, inspection_match
+from modules import auth, batch_analysis, inspection_match, supplier_normalize
 
 load_dotenv()
 
@@ -3035,6 +3035,7 @@ def _render_compare_tab():
     st.session_state.setdefault('_ins_fid', None)
     st.session_state.setdefault('_ins_parse_err', None)
     st.session_state.setdefault('_ins_df', None)
+    st.session_state.setdefault('_ins_db_ok', None)
 
     records = _load_compare_records()
     if not records:
@@ -3047,10 +3048,16 @@ def _render_compare_tab():
         sub_df = inspection_match.submissions_to_df(records)
         st.session_state._sub_df_cache = sub_df
 
+    # 检验记录库是否可用（惰性检测一次）
+    ins_db_ok = st.session_state.get('_ins_db_ok')
+    if ins_db_ok is None:
+        ins_db_ok = supabase_helper.ensure_inspection_records_table()
+        st.session_state._ins_db_ok = ins_db_ok
+
     uploaded = st.file_uploader(
         '📤 上传检验清单 Excel（列：供应商 / 物料编码 / 规格型号 / 物料名称 / 质检日期 / 检验数量）',
         type=['xlsx', 'xls'], key='ins_upload',
-        help='支持用户 ERP 导出的完整表头（含单据编号、批号、检验结果等），仅抽取 6 个核心列参与比对，其余列自动忽略；检验清单仅用于本次对比，不会写入数据库')
+        help='支持用户 ERP 导出的完整表头（含单据编号、批号、检验结果等），自动抽取核心列并过滤「合计」行；勾选入库后写入检验记录库，可用于跨窗口自动对账')
     if uploaded is not None:
         # 文件 ID 判断是否新文件：避免每次 rerun 重复解析
         fid = getattr(uploaded, 'file_id', None) or (uploaded.name, uploaded.size)
@@ -3060,7 +3067,7 @@ def _render_compare_tab():
             st.session_state._ins_df = None
             st.session_state.inspection_match_result = None  # 新文件 → 旧结果作废
             try:
-                ins_df = inspection_match.parse_sheet(uploaded, 'inspection')
+                ins_df = inspection_match.parse_inspection_full(uploaded)
             except Exception as e:
                 st.session_state._ins_parse_err = str(e)
             else:
@@ -3070,7 +3077,22 @@ def _render_compare_tab():
         st.error(f'❌ 文件解析失败: {st.session_state._ins_parse_err}')
     elif st.session_state.get('_ins_df') is not None:
         ins_df = st.session_state._ins_df
-        st.success(f'✅ 检验清单解析成功：共 {len(ins_df)} 行（送检库 {len(sub_df)} 条）。点击下方按钮开始比对。')
+        st.success(f'✅ 检验清单解析成功：共 {len(ins_df)} 行（送检库 {len(sub_df)} 条）。')
+
+        store_cb = st.checkbox(
+            '📥 同时写入检验记录库（持久化，供后续跨窗口对账）',
+            value=True, key='ins_store_cb',
+            help='入库后检验单会保存下来（单据编号+供应商+编码+日期+数量 去重，重复上传不叠加），下次对账可自动关联')
+        if store_cb and not ins_db_ok:
+            st.warning('⚠️ 检验记录库表 `inspection_records` 尚未创建，无法入库。请先在 Supabase SQL Editor 执行下方 SQL：')
+            st.code(supabase_helper.get_create_inspection_records_table_sql(), language='sql')
+            if st.button('🔄 已执行 SQL，重新检测', key='ins_db_recheck'):
+                st.session_state._ins_db_ok = supabase_helper.ensure_inspection_records_table()
+                st.rerun()
+        reconcile_cb = st.checkbox(
+            '🔄 使用累计检验记录对账（跨窗口，包含历史已入库的检验单）',
+            value=True, key='ins_reconcile_cb',
+            help='开启后会自动关联历史入库的检验单，解决「检验单质检日期早于/晚于本次文件范围」导致的误判')
         if st.button('🚀 开始比对', type='primary', key='ins_compare_btn'):
             progress_bar = st.progress(0)
             st.info('准备对比...')
@@ -3081,7 +3103,25 @@ def _render_compare_tab():
                 progress_bar.progress(pct)
                 st.info(f'正在比对... {done}/{total} 条送检记录')
 
-            result = inspection_match.compare(sub_df, ins_df, progress=_update)
+            # 1) 检验记录入库
+            if store_cb and ins_db_ok:
+                inserted, skipped, _total = inspection_match.import_inspection_records(
+                    ins_df, source_file=getattr(uploaded, 'name', ''))
+                st.info(f'📥 检验记录入库：新增 {inserted} 条，跳过重复 {skipped} 条')
+
+            # 2) 组装对账数据源
+            ins_src = ins_df
+            if reconcile_cb:
+                db_recs = supabase_helper.fetch_inspection_records()
+                if db_recs:
+                    db_df = inspection_match.inspection_records_to_df(db_recs)
+                    if store_cb and ins_db_ok:
+                        ins_src = db_df  # 已含本次入库记录
+                    else:
+                        ins_src = pd.concat([ins_df, db_df], ignore_index=True).drop_duplicates()
+                    st.info(f'📚 跨窗口对账：共使用 {len(ins_src)} 条检验记录（含历史入库）')
+
+            result = inspection_match.compare(sub_df, ins_src, progress=_update)
             dt = time.monotonic() - t0
             progress_bar.empty()
             st.session_state.inspection_match_result = result
@@ -3161,6 +3201,88 @@ def _render_compare_tab():
         st.rerun()
 
 
+def _render_inspection_records_tab():
+    """📋 检验记录库：查看/清空已持久化的检验记录"""
+    st.subheader('📋 检验记录库（持久化）')
+    if not supabase_helper.ensure_inspection_records_table():
+        st.warning('⚠️ 检验记录库表 `inspection_records` 尚未创建，请先在 Supabase SQL Editor 中执行：')
+        st.code(supabase_helper.get_create_inspection_records_table_sql(), language='sql')
+        return
+
+    total = supabase_helper.count_inspection_records()
+    st.caption(f'已入库检验记录：**{total}** 条。比对时勾选「🔄 跨窗口对账」即可自动关联这些累计检验单。')
+
+    if total == 0:
+        st.info('暂无检验记录。请到「⚖️ 检验对比」上传检验清单并勾选「📥 写入检验记录库」。')
+        return
+
+    records = supabase_helper.list_inspection_records(limit=1000)
+    if not records:
+        st.info('暂无检验记录')
+        return
+    df = inspection_match.inspection_records_to_df(records)
+    show_cols = ['单据编号', '供应商', '物料编码', '物料名称', '质检日期', '检验数量',
+                 '合格数', '不合格数', '检验结果', '质检员', '批号', '类别', '入库时间']
+    st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        if st.button('🗑️ 清空全部检验记录', key='clear_ins_db'):
+            if supabase_helper.clear_inspection_records():
+                st.success('已清空全部检验记录')
+                st.rerun()
+    with c2:
+        st.caption('清空后无法恢复，历史跨窗口对账将失效，请谨慎操作。')
+
+
+def _render_supplier_alias_tab():
+    """🏷️ 供应商别名：维护归一化自定义映射（团队共享）"""
+    st.subheader('🏷️ 供应商别名管理')
+    st.caption('比对/对账时自动识别同一公司的不同写法（如「塑邦模型」=「常州塑邦模型有限公司」=「常州塑邦」）。')
+    st.caption('内置规则会自动剥离省/市/区前缀与「有限公司/厂」等后缀，并对核心名做包含匹配；'
+               '下方别名用于规则覆盖不到的特殊写法，所有登录用户共享。')
+
+    if not supabase_helper.ensure_supplier_aliases_table():
+        st.warning('⚠️ 供应商别名表 `supplier_aliases` 尚未创建，请先在 Supabase SQL Editor 中执行：')
+        st.code(supabase_helper.get_create_inspection_records_table_sql(), language='sql')
+        return
+
+    with st.form('alias_form', clear_on_submit=True):
+        c1, c2, c3 = st.columns([3, 3, 1])
+        with c1:
+            alias = st.text_input('别名（如「塑邦」或「常州塑邦」）', key='alias_input')
+        with c2:
+            canonical = st.text_input('规范名（如「塑邦模型」，即归一化后的核心名）', key='canonical_input')
+        with c3:
+            submitted = st.form_submit_button('➕ 添加', use_container_width=True)
+        if submitted:
+            if alias.strip() and canonical.strip():
+                if supabase_helper.add_supplier_alias(alias, canonical):
+                    supplier_normalize.reload_aliases()
+                    st.success(f'已添加别名「{alias.strip()}」→「{canonical.strip()}」')
+                    st.rerun()
+            else:
+                st.warning('请同时填写别名与规范名')
+
+    aliases = supabase_helper.list_supplier_aliases()
+    if aliases:
+        st.divider()
+        st.markdown(f'**现有别名（{len(aliases)} 条）**')
+        for a in aliases:
+            c1, c2, c3 = st.columns([3, 3, 1])
+            with c1:
+                st.text(str(a.get('alias', '')))
+            with c2:
+                st.text(str(a.get('canonical', '')))
+            with c3:
+                if st.button('🗑️', key=f"del_alias_{a.get('alias', '')}", help='删除该别名'):
+                    if supabase_helper.delete_supplier_alias(a.get('alias', '')):
+                        supplier_normalize.reload_aliases()
+                        st.rerun()
+    else:
+        st.info('暂无自定义别名，当前全部依赖内置归一化规则。')
+
+
 def page_inspection_match():
     st.header('🔍 送检清单 vs 检验清单')
     st.caption('上传送检清单持久化保存，上传检验清单进行对比，找出未检验物料')
@@ -3182,7 +3304,8 @@ def page_inspection_match():
     st.session_state.setdefault('_ins_df', None)
     st.session_state.setdefault('_rpc_ok', None)
 
-    tab_manage, tab_compare = st.tabs(['📤 送检清单管理', '⚖️ 检验对比'])
+    tab_manage, tab_compare, tab_ins_db, tab_alias = st.tabs(
+        ['📤 送检清单管理', '⚖️ 检验对比', '📋 检验记录库', '🏷️ 供应商别名'])
 
     with tab_manage:
         table_ok = supabase_helper.ensure_inspection_table()
@@ -3204,6 +3327,12 @@ def page_inspection_match():
 
     with tab_compare:
         _render_compare_tab()
+
+    with tab_ins_db:
+        _render_inspection_records_tab()
+
+    with tab_alias:
+        _render_supplier_alias_tab()
 
 
 # ==================== 主路由 ====================
