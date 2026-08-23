@@ -907,12 +907,15 @@ def delete_inspection_submission(rid: str) -> bool:
 
 
 @_with_retry
-def _do_clear_inspections(client, uid):
-    return client.table("inspection_submissions").delete().eq("user_id", uid).execute()
+def _do_clear_inspections(client, uid, inspect_type=None):
+    q = client.table("inspection_submissions").delete().eq("user_id", uid)
+    if inspect_type:
+        q = q.eq("inspect_type", inspect_type)
+    return q.execute()
 
 
-def clear_inspection_submissions() -> bool:
-    """清空当前用户的全部送检记录"""
+def clear_inspection_submissions(inspect_type: str = None) -> bool:
+    """清空当前用户的送检记录（inspect_type 传入工序名则只清空该工序）"""
     try:
         client = _get_client()
         _check_client(client)
@@ -920,7 +923,7 @@ def clear_inspection_submissions() -> bool:
         if not uid:
             st.error("清空送检记录失败: 未获取到用户 ID。")
             return False
-        _do_clear_inspections(client, uid)
+        _do_clear_inspections(client, uid, inspect_type)
         return True
     except Exception as e:
         st.error(f"清空送检记录失败: {e}")
@@ -1312,12 +1315,15 @@ def delete_inspection_record(rid: str) -> bool:
 
 
 @_with_retry
-def _do_clear_inspection_records(client, uid):
-    return client.table("inspection_records").delete().eq("user_id", uid).execute()
+def _do_clear_inspection_records(client, uid, inspect_type=None):
+    q = client.table("inspection_records").delete().eq("user_id", uid)
+    if inspect_type:
+        q = q.eq("inspect_type", inspect_type)
+    return q.execute()
 
 
-def clear_inspection_records() -> bool:
-    """清空当前用户的全部检验记录"""
+def clear_inspection_records(inspect_type: str = None) -> bool:
+    """清空当前用户的检验记录（inspect_type 传入工序名则只清空该工序）"""
     try:
         client = _get_client()
         _check_client(client)
@@ -1325,7 +1331,7 @@ def clear_inspection_records() -> bool:
         if not uid:
             st.error("清空检验记录失败: 未获取到用户 ID。")
             return False
-        _do_clear_inspection_records(client, uid)
+        _do_clear_inspection_records(client, uid, inspect_type)
         return True
     except Exception as e:
         st.error(f"清空检验记录失败: {e}")

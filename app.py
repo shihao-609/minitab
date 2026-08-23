@@ -2925,20 +2925,16 @@ def _style_unchecked(df):
         return df
 
 
-def _render_submission_tab():
-    st.session_state.setdefault('_sub_records', None)
+def _render_submission_tab(inspect_type):
     st.session_state.setdefault('_sub_fid', None)
     st.session_state.setdefault('_sub_parse_err', None)
     st.session_state.setdefault('_sub_df', None)
     st.session_state.setdefault('_sub_preview', None)
     st.session_state.setdefault('_sub_imported', False)
 
-    show_type = st.selectbox(
-        '🗂️ 显示工序（本页统计与记录列表按工序区分）', INSPECT_TYPES + ['全部'], index=0,
-        key='sub_show_type',
-        help='默认只显示「来料检」的数据；以后新增工序（过程检等）后各工序数据互不混淆，可在此下拉切换查看')
-    records = _load_sub_records(show_type) or []
-    total = _load_sub_total(show_type) or 0
+    st.caption(f'🧪 当前工序：**{inspect_type}**（顶部按钮切换工序）')
+    records = _load_sub_records(inspect_type) or []
+    total = _load_sub_total(inspect_type) or 0
     suppliers = len({r.get('supplier') for r in records})
     codes = len({r.get('material_code') for r in records})
     c1, c2, c3 = st.columns(3)
@@ -2948,13 +2944,10 @@ def _render_submission_tab():
 
     st.divider()
 
-    inspect_type = st.selectbox('🧪 检验类型（这批复检属于哪个工序）', INSPECT_TYPES, index=0,
-                                key='sub_inspect_type',
-                                help='送检单按检验工序分类存储与去重，同一物料可在不同工序分别送检')
     uploaded = st.file_uploader(
-        '📤 上传送检清单 Excel（列：供应商 / 物料编码 / 规格型号 / 物料名称 / 收料日期 / 实收数量）',
-        type=['xlsx', 'xls'], key='sub_upload',
-        help='收料日期按 Excel 原样保存，留空则保持为空；重复记录（检验类型+供应商+物料编码+规格型号+物料名称+实收数量一致）不会重复入库')
+        f'📤 上传「{inspect_type}」送检清单 Excel（列：供应商 / 物料编码 / 规格型号 / 物料名称 / 收料日期 / 实收数量）',
+        type=['xlsx', 'xls'], key=f'sub_upload_{inspect_type}',
+        help='收料日期按 Excel 原样保存，留空则保持为空；重复记录（工序+供应商+物料编码+规格型号+物料名称+实收数量一致）不会重复入库')
     if uploaded is not None:
         # 用文件 ID 判断是否新文件：避免每次 rerun 重新解析/查库
         fid = getattr(uploaded, 'file_id', None) or (uploaded.name, uploaded.size)
@@ -2986,7 +2979,7 @@ def _render_submission_tab():
         df = st.session_state._sub_df
         st.success(f'✅ 解析成功：共 {len(df)} 行 → 将新增 {len(new_df)} 条，重复跳过 {len(dup_df)} 条（预览耗时 {preview_dt:.2f}s）')
         st.dataframe(new_df, use_container_width=True, hide_index=True)
-        if st.button('🚀 确认入库', type='primary', key='sub_import_btn'):
+        if st.button('🚀 确认入库', type='primary', key=f'sub_import_btn_{inspect_type}'):
             progress_bar = st.progress(0)
             st.info('准备入库...')
             t0 = time.monotonic()
@@ -2998,7 +2991,7 @@ def _render_submission_tab():
 
             inserted, skipped, _ = inspection_match.import_submissions(
                 df, progress=_update, batch_size=1000,
-                inspect_type=st.session_state.get('_sub_type', '来料检'))
+                inspect_type=inspect_type)
             dt = time.monotonic() - t0
             progress_bar.empty()
             if inserted > 0:
@@ -3012,7 +3005,7 @@ def _render_submission_tab():
             st.rerun()
 
     st.divider()
-    st.subheader('📂 已入库送检记录')
+    st.subheader(f'📂「{inspect_type}」已入库送检记录')
     if not records:
         st.info('暂无送检记录，请先上传送检清单。')
         return
@@ -3023,14 +3016,22 @@ def _render_submission_tab():
     cols = [c for c in df.columns if c != 'id']
     st.dataframe(df[cols], use_container_width=True, hide_index=True)
 
-    if st.checkbox('⚠️ 确认清空全部送检记录', key='sub_clear_ck'):
-        if st.button('🗑️ 清空全部', type='primary', key='sub_clear_btn', use_container_width=True):
-            if supabase_helper.clear_inspection_submissions():
+    clear_ck_key = f'sub_clear_ck_{inspect_type}'
+    clear_btn_key = f'sub_clear_btn_{inspect_type}'
+    if st.checkbox(f'⚠️ 确认清空「{inspect_type}」的全部送检记录', key=clear_ck_key):
+        if st.button(f'🗑️ 清空「{inspect_type}」送检记录', type='primary', key=clear_btn_key, use_container_width=True):
+            if supabase_helper.clear_inspection_submissions(inspect_type=inspect_type):
                 _clear_sub_caches()
                 st.rerun()
 
 
-def _render_compare_tab():
+def _render_compare_tab(inspect_type):
+    # 工序切换后重置本 tab 的临时状态，避免不同工序文件/结果串扰
+    if st.session_state.get('_ins_active_type') != inspect_type:
+        st.session_state._ins_active_type = inspect_type
+        for k in ['_ins_fid', '_ins_parse_err', '_ins_df', 'inspection_match_result']:
+            st.session_state[k] = None
+
     st.session_state.setdefault('_ins_fid', None)
     st.session_state.setdefault('_ins_parse_err', None)
     st.session_state.setdefault('_ins_df', None)
@@ -3053,13 +3054,11 @@ def _render_compare_tab():
         ins_db_ok = supabase_helper.ensure_inspection_records_table()
         st.session_state._ins_db_ok = ins_db_ok
 
-    inspect_type = st.selectbox('🧪 检验类型（本次比对的工序）', INSPECT_TYPES, index=0,
-                                key='ins_inspect_type',
-                                help='只会拿「同一检验类型」的送检单和检验单做比对，不同工序互不干扰')
+    st.caption(f'🧪 当前工序：**{inspect_type}**（只会用「{inspect_type}」的送检单和检验单做比对）')
 
     uploaded = st.file_uploader(
-        '📤 上传检验清单 Excel（列：供应商 / 物料编码 / 规格型号 / 物料名称 / 质检日期 / 检验数量）',
-        type=['xlsx', 'xls'], key='ins_upload',
+        f'📤 上传「{inspect_type}」检验清单 Excel（列：供应商 / 物料编码 / 规格型号 / 物料名称 / 质检日期 / 检验数量）',
+        type=['xlsx', 'xls'], key=f'ins_upload_{inspect_type}',
         help='支持用户 ERP 导出的完整表头（含单据编号、批号、检验结果等），自动抽取核心列并过滤「合计」行；勾选入库后写入检验记录库，可用于跨窗口自动对账')
     if uploaded is not None:
         # 文件 ID 判断是否新文件：避免每次 rerun 重复解析
@@ -3208,24 +3207,23 @@ def _render_compare_tab():
         st.rerun()
 
 
-def _render_inspection_records_tab():
+def _render_inspection_records_tab(inspect_type):
     """📋 检验记录库：查看/清空已持久化的检验记录"""
-    st.subheader('📋 检验记录库（持久化）')
+    st.subheader(f'📋「{inspect_type}」检验记录库（持久化）')
     if not supabase_helper.ensure_inspection_records_table():
         st.warning('⚠️ 检验记录库表 `inspection_records` 尚未创建，请先在 Supabase SQL Editor 中执行：')
         st.code(supabase_helper.get_create_inspection_records_table_sql(), language='sql')
         return
 
-    show_type = st.selectbox('🗂️ 显示工序', INSPECT_TYPES + ['全部'], index=0, key='rec_show_type',
-                             help='只显示所选工序的检验记录，不同工序互不混淆')
-    total = supabase_helper.count_inspection_records(inspect_type=show_type)
-    st.caption(f'已入库检验记录：**{total}** 条（工序：{show_type}）。比对时勾选「🔄 跨窗口对账」即可自动关联这些累计检验单。')
+    st.caption(f'🧪 当前工序：**{inspect_type}**')
+    total = supabase_helper.count_inspection_records(inspect_type=inspect_type)
+    st.caption(f'已入库检验记录：**{total}** 条。比对时勾选「🔄 跨窗口对账」即可自动关联这些累计检验单。')
 
     if total == 0:
         st.info('暂无检验记录。请到「⚖️ 检验对比」上传检验清单并勾选「📥 写入检验记录库」。')
         return
 
-    records = supabase_helper.list_inspection_records(limit=1000, inspect_type=show_type)
+    records = supabase_helper.list_inspection_records(limit=1000, inspect_type=inspect_type)
     if not records:
         st.info('暂无检验记录')
         return
@@ -3236,12 +3234,12 @@ def _render_inspection_records_tab():
 
     c1, c2 = st.columns([1, 3])
     with c1:
-        if st.button('🗑️ 清空全部检验记录', key='clear_ins_db'):
-            if supabase_helper.clear_inspection_records():
-                st.success('已清空全部检验记录')
+        if st.button(f'🗑️ 清空「{inspect_type}」检验记录', key=f'clear_ins_db_{inspect_type}'):
+            if supabase_helper.clear_inspection_records(inspect_type=inspect_type):
+                st.success(f'已清空「{inspect_type}」检验记录')
                 st.rerun()
     with c2:
-        st.caption('⚠️ 该按钮会清空所有工序的检验记录，清空后无法恢复，历史跨窗口对账将失效，请谨慎操作。')
+        st.caption('⚠️ 该按钮只清空当前工序的检验记录，清空后无法恢复，历史跨窗口对账将失效，请谨慎操作。')
 
 
 def _render_supplier_alias_tab():
@@ -3292,10 +3290,10 @@ def _render_supplier_alias_tab():
         st.info('暂无自定义别名，当前全部依赖内置归一化规则。')
 
 
-def _render_report_recipients_tab():
+def _render_report_recipients_tab(inspect_type):
     """📮 未检验清单邮件收件人：团队共享，页面增删，按工序分别发送"""
-    st.subheader('📮 未检验清单邮件收件人')
-    st.caption('工作日凌晨自动发送的「未检验清单」**按检验工序分别发送**：「全部」收件人收到所有工序的邮件，指定工序的只收到该工序邮件。可在页面直接增删，无需修改代码或 GitHub 配置。所有登录用户共享。')
+    st.subheader(f'📮「{inspect_type}」未检验清单邮件收件人')
+    st.caption(f'工作日凌晨自动发送「{inspect_type}」未检验清单的收件人。可在页面直接增删，无需修改代码或 GitHub 配置。所有登录用户共享。')
 
     if not supabase_helper.ensure_report_recipients_table():
         st.warning('⚠️ 收件人表 `report_recipients` 尚未创建，请先在 Supabase SQL Editor 中执行：')
@@ -3306,17 +3304,18 @@ def _render_report_recipients_tab():
         st.code(supabase_helper.get_report_recipients_migration_sql(), language='sql')
 
     import re as _re
-    with st.form('recipient_form', clear_on_submit=True):
+    st.caption(f'🧪 当前工序：**{inspect_type}**')
+    with st.form(f'recipient_form_{inspect_type}', clear_on_submit=True):
         c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
         with c1:
-            email = st.text_input('邮箱地址（多个请逐个添加）', key='recipient_input',
+            email = st.text_input('邮箱地址（多个请逐个添加）', key=f'recipient_input_{inspect_type}',
                                   placeholder='例如：someone@qq.com')
         with c2:
-            rtype = st.radio('类型', ['收件人', '抄送人'], horizontal=True, key='recipient_type_input')
+            rtype = st.radio('类型', ['收件人', '抄送人'], horizontal=True, key=f'recipient_type_input_{inspect_type}')
         with c3:
-            insp_type = st.selectbox('适用工序', ['全部'] + INSPECT_TYPES, index=0,
-                                     key='recipient_inspect_type_input',
-                                     help='「全部」= 所有工序的未检验清单都发给他；指定工序则只发该工序')
+            insp_type = st.selectbox('适用工序', ['全部', inspect_type], index=1,
+                                     key=f'recipient_inspect_type_input_{inspect_type}',
+                                     help='「全部」= 所有工序的未检验清单都发给他；当前工序则只发本工序')
         with c4:
             submitted = st.form_submit_button('➕ 添加', use_container_width=True)
         if submitted:
@@ -3332,6 +3331,7 @@ def _render_report_recipients_tab():
                     st.rerun()
 
     recipients = supabase_helper.list_report_recipients()
+    recipients = [r for r in recipients if str(r.get('inspect_type', '全部')) in ('全部', inspect_type)]
     if recipients:
         st.divider()
         to_n = sum(1 for r in recipients if str(r.get('recipient_type', 'to')) != 'cc')
@@ -3348,18 +3348,18 @@ def _render_report_recipients_tab():
             with c3:
                 st.text(str(r.get('email', '')))
             with c4:
-                if st.button('🗑️', key=f"del_recipient_{r.get('id')}", help='删除该邮箱'):
+                if st.button('🗑️', key=f"del_recipient_{inspect_type}_{r.get('id')}", help='删除该邮箱'):
                     if supabase_helper.delete_report_recipient(str(r.get('id'))):
                         st.rerun()
-        st.caption('说明：同一邮箱可为不同工序分别配置角色（如：张三=来料检收件人 + 过程检抄送人）。'
+        st.caption('说明：「全部」收件人会收到所有工序邮件，在当前工序页面也可看到。'
                    '至少保留 1 个收件人，否则对应工序的邮件不会发送。')
     else:
         st.info('暂无收件人，添加后每天凌晨的未检验清单才会发送。')
 
 
 def page_inspection_match():
-    st.header('🔍 送检清单 vs 检验清单')
-    st.caption('上传送检清单持久化保存，上传检验清单进行对比，找出未检验物料')
+    st.header('🔍 质量管理')
+    st.caption('按工序管理送检、检验对比、记录库及相关配置。当前只启用已配置的工序，以后新增工序会自动扩展。')
 
     if not supabase_helper.ensure_inspect_type_columns():
         st.warning('⚠️ 检测到数据库缺少「检验类型」字段（老库升级）。请先在 Supabase SQL Editor 执行下方迁移 SQL，'
@@ -3370,8 +3370,6 @@ def page_inspection_match():
     # 本页面所有 session_state key 统一初始化，避免分支遗漏
     st.session_state.setdefault('inspection_match_result', None)
     st.session_state.setdefault('inspection_match_dt', 0.0)
-    st.session_state.setdefault('_sub_records', None)
-    st.session_state.setdefault('_sub_total', None)
     st.session_state.setdefault('_sub_compare', None)
     st.session_state.setdefault('_sub_df_cache', None)
     st.session_state.setdefault('_sub_fid', None)
@@ -3383,6 +3381,21 @@ def page_inspection_match():
     st.session_state.setdefault('_ins_parse_err', None)
     st.session_state.setdefault('_ins_df', None)
     st.session_state.setdefault('_rpc_ok', None)
+
+    # 顶层工序导航：从配置中心读取已配置工序，以后新增工序 = 加一段配置即可
+    inspect_types = list(inspection_match.INSPECT_TYPE_CONFIGS.keys())
+    if not inspect_types:
+        inspect_types = ['来料检']
+    selected_type = st.segmented_control(
+        '选择工序',
+        options=inspect_types,
+        default=inspect_types[0],
+        key='match_inspect_type',
+        label_visibility='collapsed'
+    )
+    if not selected_type:
+        selected_type = inspect_types[0]
+    st.caption(f'当前工序：**{selected_type}**')
 
     tab_manage, tab_compare, tab_ins_db, tab_alias, tab_recipients = st.tabs(
         ['📤 送检清单管理', '⚖️ 检验对比', '📋 检验记录库', '🏷️ 供应商别名', '📮 邮件收件人'])
@@ -3403,19 +3416,19 @@ def page_inspection_match():
                 if st.button('🔄 已执行 SQL，重新检测', key='rpc_recheck'):
                     st.session_state._rpc_ok = supabase_helper.ensure_inspection_rpc()
                     st.rerun()
-            _render_submission_tab()
+            _render_submission_tab(selected_type)
 
     with tab_compare:
-        _render_compare_tab()
+        _render_compare_tab(selected_type)
 
     with tab_ins_db:
-        _render_inspection_records_tab()
+        _render_inspection_records_tab(selected_type)
 
     with tab_alias:
         _render_supplier_alias_tab()
 
     with tab_recipients:
-        _render_report_recipients_tab()
+        _render_report_recipients_tab(selected_type)
 
 
 # ==================== 主路由 ====================
