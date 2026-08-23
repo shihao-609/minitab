@@ -2928,7 +2928,7 @@ def _render_submission_tab(inspect_type):
     # 工序切换后重置本 tab 的临时状态，避免把上一工序预览的文件误入库到当前工序
     if st.session_state.get('_sub_active_type') != inspect_type:
         st.session_state._sub_active_type = inspect_type
-        for k in ['_sub_fid', '_sub_type', '_sub_df', '_sub_preview']:
+        for k in ['_sub_fid', '_sub_type', '_sub_df', '_sub_preview', '_sub_import_result']:
             st.session_state[k] = None
         st.session_state._sub_imported = False
 
@@ -2963,6 +2963,7 @@ def _render_submission_tab(inspect_type):
             st.session_state._sub_parse_err = None
             st.session_state._sub_df = None
             st.session_state._sub_preview = None
+            st.session_state._sub_import_result = None
             st.session_state._sub_imported = False
             try:
                 df = inspection_match.parse_sheet(uploaded, 'submission')
@@ -2980,6 +2981,15 @@ def _render_submission_tab(inspect_type):
         st.error(f'❌ 文件解析失败: {st.session_state._sub_parse_err}')
     elif st.session_state.get('_sub_imported'):
         st.success('✅ 本次上传的文件已处理完成，如需再次上传请选择新文件。')
+        res = st.session_state.get('_sub_import_result')
+        if res:
+            inserted, skipped, total = res
+            if inserted > 0:
+                st.success(f'已入库 {inserted} 条，跳过重复 {skipped} 条（共解析 {total} 条）')
+            elif skipped > 0:
+                st.info(f'没有新增记录，{skipped} 条均为重复（共解析 {total} 条）')
+            else:
+                st.error('入库失败：未写入任何记录，请检查数据库权限或联系管理员')
     elif st.session_state.get('_sub_preview') is not None:
         new_df, dup_df, preview_dt = st.session_state._sub_preview
         df = st.session_state._sub_df
@@ -3007,6 +3017,7 @@ def _render_submission_tab(inspect_type):
                 st.info(f'没有新增记录，{skipped} 条均为重复。')
             _clear_sub_caches()
             st.session_state._sub_preview = None
+            st.session_state._sub_import_result = (inserted, skipped, len(df))
             st.session_state._sub_imported = True
             st.rerun()
 
@@ -3382,6 +3393,7 @@ def page_inspection_match():
     st.session_state.setdefault('_sub_parse_err', None)
     st.session_state.setdefault('_sub_df', None)
     st.session_state.setdefault('_sub_preview', None)
+    st.session_state.setdefault('_sub_import_result', None)
     st.session_state.setdefault('_sub_imported', False)
     st.session_state.setdefault('_ins_fid', None)
     st.session_state.setdefault('_ins_parse_err', None)
