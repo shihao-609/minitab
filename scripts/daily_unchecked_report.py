@@ -28,6 +28,7 @@ from datetime import date, datetime, timedelta
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr
 from io import BytesIO
 
 import pandas as pd
@@ -267,9 +268,11 @@ def build_report():
         filename = f'未检验清单_{t}_{today.isoformat()}.xlsx'
         print(f'[输出] 工序「{t}」生成 {filename}，未检验 {len(t_keys)} 条')
 
-        # 发送
+        # 发送（From 头用 formataddr 做 RFC2047 编码，避免中文显示名被 QQ 拒收 550）
+        smtp_sender = str(smtp_user).strip().strip('"').strip("'")
+        display_name = str(from_name or '').strip().strip('"').strip("'")
         msg = MIMEMultipart()
-        msg['From'] = f'{from_name} <{smtp_user}>'
+        msg['From'] = formataddr((display_name, smtp_sender))
         msg['To'] = ', '.join(to_list)
         if cc_list:
             msg['Cc'] = ', '.join(cc_list)
@@ -282,9 +285,16 @@ def build_report():
 
         smtp_recipients = to_list + cc_list
         print(f'[邮件] 工序「{t}」连接 {smtp_host}:{smtp_port} ...')
-        with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as server:
-            server.login(smtp_user, smtp_pass)
-            server.sendmail(smtp_user, smtp_recipients, msg.as_string())
+        try:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as server:
+                server.login(smtp_user, smtp_pass)
+                server.sendmail(smtp_sender, smtp_recipients, msg.as_string())
+        except smtplib.SMTPDataError:
+            # 个别邮件服务商拒绝带非 ASCII 显示名的 From 头 → 降级为纯邮箱地址重试一次
+            msg.replace_header('From', smtp_sender)
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as server:
+                server.login(smtp_user, smtp_pass)
+                server.sendmail(smtp_sender, smtp_recipients, msg.as_string())
         cc_txt = f'，抄送 {len(cc_list)} 人' if cc_list else ''
         print(f'[邮件] 工序「{t}」已发送给 {len(to_list)} 个收件人{cc_txt}: {", ".join(smtp_recipients)}')
         sent_emails.append(filename)
