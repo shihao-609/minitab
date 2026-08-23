@@ -3013,13 +3013,20 @@ def _render_submission_tab(inspect_type):
             if inserted > 0:
                 st.success(f'✅ 已入库 {inserted} 条记录（耗时 {dt:.2f}s）'
                            + (f'，跳过重复 {skipped} 条' if skipped else ''))
-            else:
+                _clear_sub_caches()
+                st.session_state._sub_preview = None
+                st.session_state._sub_import_result = (inserted, skipped, len(df))
+                st.session_state._sub_imported = True
+                st.rerun()
+            elif skipped > 0:
                 st.info(f'没有新增记录，{skipped} 条均为重复。')
-            _clear_sub_caches()
-            st.session_state._sub_preview = None
-            st.session_state._sub_import_result = (inserted, skipped, len(df))
-            st.session_state._sub_imported = True
-            st.rerun()
+                _clear_sub_caches()
+                st.session_state._sub_preview = None
+                st.session_state._sub_import_result = (inserted, skipped, len(df))
+                st.session_state._sub_imported = True
+                st.rerun()
+            else:
+                st.error('❌ 入库失败：未写入任何记录。可能是未获取到登录身份，请重新登录后再试。')
 
     st.divider()
     st.subheader(f'📂「{inspect_type}」已入库送检记录')

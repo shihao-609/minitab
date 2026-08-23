@@ -91,14 +91,14 @@ def _get_client() -> Optional[Client]:
     获取 Supabase 客户端（自动选择认证模式）
 
     优先级：
-      1. 已登录 → 用 anon key 创建后注入 session，SDK 自动将 JWT 附加到请求头
+      1. 已登录 → 使用携带用户 JWT 的认证客户端，确保 RLS 策略能识别当前用户
       2. 未登录 → 使用 anon key（匿名访问，RLS 策略下只能读公开数据）
 
-    这是解决"额外注意项②"的关键设计：
-      - 不能用 `create_client(url, raw_jwt)` —— 原始 JWT 方式不会自动刷新
-      - 必须用 `client.auth.set_session(access_token, refresh_token)` 注入 session
-      - 注入后 supabase-py SDK 会自动在每次请求附加 Authorization: Bearer <jwt>
-      - JWT 默认有效期 1 小时，SDK 通过 refresh_token 自动续期
+    关键点：
+      - 认证客户端直接通过 auth.get_authenticated_client() 获取，它会在 token 即将过期时
+        用 refresh_token 自动刷新，并返回携带有效 JWT 的客户端。
+      - 已登录但无法获取认证客户端时（session 失效），返回 None，让上层提示重新登录，
+        而不是静默降级为匿名客户端导致 RLS 过滤全部数据。
 
     Supabase RLS 通过 JWT 中的 auth.uid() 识别用户身份，确保数据隔离。
     """
@@ -107,20 +107,20 @@ def _get_client() -> Optional[Client]:
     if not url or not key:
         return None
 
-    client = create_client(url, key)
-
-    # 已登录：注入用户 session（SDK 自动附加 JWT + 自动刷新）
+    # 已登录：优先使用携带 JWT 的认证客户端
     if st.session_state.get("authenticated") and st.session_state.get("session"):
-        session = st.session_state.session
         try:
-            client.auth.set_session(
-                session.access_token,
-                session.refresh_token
-            )
+            from modules import auth
+            client = auth.get_authenticated_client()
+            if client is not None:
+                return client
+            # 已登录但 session 失效，不能降级为匿名，否则 RLS 会隐藏所有数据
+            return None
         except Exception:
-            pass  # session 可能已过期，降级为匿名访问
+            return None
 
-    return client
+    # 未登录：使用 anon key 匿名客户端
+    return create_client(url, key)
 
 
 def _check_client(client: Optional[Client]):
