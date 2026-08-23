@@ -66,6 +66,8 @@ def one_way_anova(groups_dict):
     """单因素方差分析 (ANOVA)"""
     groups = [np.array(v, dtype=float) for v in groups_dict.values()]
     groups = [g[~np.isnan(g)] for g in groups]
+    if len(groups) < 2:
+        return {'error': '至少需要 2 个分组才能进行方差分析'}
     if any(len(g) < 2 for g in groups):
         return {'error': '每组至少需要 2 个数据点'}
 

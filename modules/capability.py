@@ -181,13 +181,14 @@ def estimate_within_sigma(data, subgroup_size=1, method='Rbar'):
         # S̄ / c₄ 方法：每子组样本标准差，修正为无偏估计
         S = np.std(subgroups, axis=1, ddof=1)
         S_bar = np.mean(S)
-        c4 = C4_CONSTANTS.get(subgroup_size, 0.9400)
+        # 超出常数表范围时使用 n=10 的常数（最接近的近似值，避免静默使用 n=5 造成更大偏差）
+        c4 = C4_CONSTANTS.get(subgroup_size, 0.9727)
         return S_bar / c4
     else:
         # R̄ / d₂ 方法（默认）
         R = np.ptp(subgroups, axis=1)
         R_bar = np.mean(R)
-        d2 = D2_CONSTANTS.get(subgroup_size, 2.326)
+        d2 = D2_CONSTANTS.get(subgroup_size, 3.078)
         return R_bar / d2
 
 
@@ -204,7 +205,7 @@ def capability_chart(data, mean, std_overall, std_within, usl, lsl, target, subg
     x_range = np.linspace(min(data) - 3*std_overall, max(data) + 3*std_overall, 200)
     normal_fit = stats.norm.pdf(x_range, mean, std_overall)
 
-    fig.add_trace(go.Histogram(x=data, nbinsx=min(int(len(data)/5), 30),
+    fig.add_trace(go.Histogram(x=data, nbinsx=min(max(int(len(data)/5), 1), 30),
                                histnorm='probability density', name='数据分布',
                                marker=dict(color='#4472C4', opacity=0.6)), row=1, col=1)
     fig.add_trace(go.Scatter(x=x_range, y=normal_fit, mode='lines',

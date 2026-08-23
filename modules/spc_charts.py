@@ -24,7 +24,9 @@ def get_control_chart_constants(subgroup_size):
         9:  {'A2': 0.337, 'D3': 0.184, 'D4': 1.816, 'A3': 1.032, 'B3': 0.239, 'B4': 1.761, 'd2': 2.970, 'c4': 0.9693},
         10: {'A2': 0.308, 'D3': 0.223, 'D4': 1.777, 'A3': 0.975, 'B3': 0.284, 'B4': 1.716, 'd2': 3.078, 'c4': 0.9727},
     }
-    return constants.get(subgroup_size, constants[5])
+    if subgroup_size not in constants:
+        raise ValueError(f'子组大小 {subgroup_size} 超出支持范围(2~10)，请将子组大小调整为 2~10')
+    return constants[subgroup_size]
 
 
 def xbar_r_chart(data, subgroup_size=5, target=None):
@@ -34,6 +36,8 @@ def xbar_r_chart(data, subgroup_size=5, target=None):
         target: 目标值，用于计算中心线偏差
     """
     n_samples = len(data)
+    if n_samples < subgroup_size:
+        raise ValueError(f'数据不足：至少需要 {subgroup_size} 个数据点才能绘制 X-bar R 图')
     n_subgroups = n_samples // subgroup_size
     data = data[:n_subgroups * subgroup_size]
     subgroups = data.reshape(n_subgroups, subgroup_size)
@@ -133,6 +137,8 @@ def xbar_s_chart(data, subgroup_size=5, target=None):
         target: 目标值，用于计算中心线偏差
     """
     n_samples = len(data)
+    if n_samples < subgroup_size:
+        raise ValueError(f'数据不足：至少需要 {subgroup_size} 个数据点才能绘制 X-bar S 图')
     n_subgroups = n_samples // subgroup_size
     data = data[:n_subgroups * subgroup_size]
     subgroups = data.reshape(n_subgroups, subgroup_size)
@@ -225,8 +231,10 @@ def imr_chart(data, target=None):
         target: 目标值，用于计算中心线偏差
     """
     n = len(data)
-    I = data
-    MR = np.abs(np.diff(data))
+    if n < 2:
+        raise ValueError('I-MR 图至少需要 2 个数据点')
+    I = np.asarray(data, dtype=float)
+    MR = np.abs(np.diff(I))
     MR = np.insert(MR, 0, np.nan)
 
     I_bar = np.mean(I[~np.isnan(I)])
@@ -311,19 +319,27 @@ def p_chart(defectives, sample_sizes, target=None):
     参数:
         target: 目标不合格率
     """
-    n = len(defectives)
-    proportions = np.array(defectives) / np.array(sample_sizes)
-    p_bar = np.sum(defectives) / np.sum(sample_sizes)
+    ss_arr = np.asarray(sample_sizes, dtype=float)
+    d_arr = np.asarray(defectives, dtype=float)
+    valid = np.isfinite(ss_arr) & (ss_arr > 0)
+    if not np.any(valid):
+        raise ValueError('样本量全部为 0 或缺失，无法绘制 P 图')
+    d_arr = d_arr[valid]
+    ss_arr = ss_arr[valid]
+    n = len(d_arr)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        proportions = d_arr / ss_arr
+    p_bar = np.sum(d_arr) / np.sum(ss_arr)
 
     ucl = []
     lcl = []
-    for ni in sample_sizes:
+    for ni in ss_arr:
         sigma_p = np.sqrt(p_bar * (1 - p_bar) / ni)
         ucl.append(max(p_bar + 3 * sigma_p, 0))
         lcl.append(max(p_bar - 3 * sigma_p, 0))
 
     # 平均 sigma (使用平均样本量)
-    avg_n = np.mean(sample_sizes)
+    avg_n = np.mean(ss_arr)
     sigma_est = np.sqrt(p_bar * (1 - p_bar) / avg_n)
 
     # 目标偏差
@@ -363,8 +379,8 @@ def p_chart(defectives, sample_sizes, target=None):
         'chart': fig,
         'stats': {
             'p_bar': p_bar,
-            'total_samples': np.sum(sample_sizes),
-            'total_defectives': np.sum(defectives),
+            'total_samples': np.sum(ss_arr),
+            'total_defectives': np.sum(d_arr),
             'sigma_estimate': sigma_est,
         },
         'weco': weco_result,
@@ -380,9 +396,11 @@ def np_chart(defectives, sample_size, target=None):
     参数:
         target: 目标不合格品数
     """
+    defectives = np.asarray(defectives, dtype=float)
     n = len(defectives)
     np_bar = np.mean(defectives)
-    sigma = np.sqrt(np_bar * (1 - np_bar / sample_size)) if sample_size > 0 else 0
+    # 当不合格数超过样本量(数据异常)时，括号内为负，用 max(...,0) 防止 sqrt 产生 NaN
+    sigma = np.sqrt(max(np_bar * (1 - np_bar / sample_size), 0)) if sample_size > 0 else 0
 
     ucl = np_bar + 3 * sigma
     lcl = max(np_bar - 3 * sigma, 0)
@@ -439,6 +457,7 @@ def c_chart(defects, target=None):
     参数:
         target: 目标缺陷数
     """
+    defects = np.asarray(defects, dtype=float)
     n = len(defects)
     c_bar = np.mean(defects)
     sigma = np.sqrt(c_bar)
@@ -498,18 +517,26 @@ def u_chart(defects, sample_sizes, target=None):
     参数:
         target: 目标单位缺陷数
     """
-    n = len(defects)
-    u_values = np.array(defects) / np.array(sample_sizes)
-    u_bar = np.sum(defects) / np.sum(sample_sizes)
+    ss_arr = np.asarray(sample_sizes, dtype=float)
+    d_arr = np.asarray(defects, dtype=float)
+    valid = np.isfinite(ss_arr) & (ss_arr > 0)
+    if not np.any(valid):
+        raise ValueError('单位数全部为 0 或缺失，无法绘制 U 图')
+    d_arr = d_arr[valid]
+    ss_arr = ss_arr[valid]
+    n = len(d_arr)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        u_values = d_arr / ss_arr
+    u_bar = np.sum(d_arr) / np.sum(ss_arr)
 
     ucl = []
     lcl = []
-    for ni in sample_sizes:
+    for ni in ss_arr:
         sigma_u = np.sqrt(u_bar / ni)
         ucl.append(max(u_bar + 3 * sigma_u, 0))
         lcl.append(max(u_bar - 3 * sigma_u, 0))
 
-    avg_n = np.mean(sample_sizes)
+    avg_n = np.mean(ss_arr)
     sigma_est = np.sqrt(u_bar / avg_n)
 
     # 目标偏差
@@ -549,8 +576,8 @@ def u_chart(defects, sample_sizes, target=None):
         'chart': fig,
         'stats': {
             'u_bar': u_bar,
-            'total_units': np.sum(sample_sizes),
-            'total_defects': np.sum(defects),
+            'total_units': np.sum(ss_arr),
+            'total_defects': np.sum(d_arr),
             'sigma_estimate': sigma_est,
         },
         'weco': weco_result,

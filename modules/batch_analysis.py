@@ -144,15 +144,22 @@ def analyze_pareto(df: pd.DataFrame, cat_col: str = None, cnt_col: str = None) -
     cnt_col = cnt_col if cnt_col else df.columns[1]
     categories = df[cat_col].astype(str).tolist()
     counts = pd.to_numeric(df[cnt_col], errors='coerce').fillna(0).values
+    total = int(sum(counts))
     result = pareto_histogram.pareto_chart(categories, counts)
+    if total > 0:
+        top1_pct = counts[0] / total * 100 if len(counts) > 0 else 0.0
+        top3_sum = sum(sorted(counts, reverse=True)[:3])
+        top3_pct = top3_sum / total * 100
+    else:
+        top1_pct = top3_pct = 0.0
     return {
         'type': 'pareto',
         'result': result,
         'summary': {
-            '总缺陷数': int(sum(counts)),
+            '总缺陷数': total,
             '缺陷类别数': len(categories),
-            'TOP1缺陷': f'{categories[0]} ({counts[0]}件, {counts[0]/sum(counts)*100:.1f}%)',
-            'TOP3占比': f'{sum(sorted(counts, reverse=True)[:3])/sum(counts)*100:.1f}%',
+            'TOP1缺陷': f'{categories[0] if len(categories) > 0 else "无"} ({counts[0] if len(counts) > 0 else 0}件, {top1_pct:.1f}%)',
+            'TOP3占比': f'{top3_pct:.1f}%',
         }
     }
 

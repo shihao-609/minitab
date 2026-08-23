@@ -14,8 +14,12 @@ def pareto_chart(categories, counts, title='帕累托图'):
     df = df.sort_values('频数', ascending=False).reset_index(drop=True)
 
     total = df['频数'].sum()
-    df['占比 (%)'] = (df['频数'] / total * 100)
-    df['累积 (%)'] = df['占比 (%)'].cumsum()
+    if total > 0:
+        df['占比 (%)'] = (df['频数'] / total * 100)
+        df['累积 (%)'] = df['占比 (%)'].cumsum()
+    else:
+        df['占比 (%)'] = 0.0
+        df['累积 (%)'] = 0.0
 
     fig = make_subplots(specs=[[{'secondary_y': True}]])
 

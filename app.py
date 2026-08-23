@@ -669,12 +669,19 @@ def page_spc():
             with c2:
                 scol = st.selectbox('样本量列', numeric_cols, key='p_size')
             if dcol in df.columns and scol in df.columns:
-                d, s = df[dcol].dropna().values, df[scol].dropna().values
-                ml = min(len(d), len(s))
-                if ml >= 2:
-                    r = spc_charts.p_chart(d[:ml], s[:ml], target_val)
-                    st.plotly_chart(r['chart'], use_container_width=True)
-                    _show_spc_results(r)
+                # 两列按行对齐后再过滤，避免分别 dropna 导致配对错位
+                tmp = df[[dcol, scol]].replace([np.inf, -np.inf], np.nan).dropna()
+                d = tmp[dcol].values
+                s = tmp[scol].values
+                valid = s > 0
+                if not np.any(valid):
+                    st.error('样本量全部为 0，无法绘制 P 图')
+                else:
+                    d, s = d[valid], s[valid]
+                    if len(d) >= 2:
+                        r = spc_charts.p_chart(d, s, target_val)
+                        st.plotly_chart(r['chart'], use_container_width=True)
+                        _show_spc_results(r)
             else:
                 st.warning('数据列已变更，请重新选择')
 
@@ -687,8 +694,10 @@ def page_spc():
             if dcol not in df.columns:
                 st.warning(f'列 "{dcol}" 已变更，请重新选择')
             else:
-                d = df[dcol].dropna().values
+                d = df[dcol].replace([np.inf, -np.inf], np.nan).dropna().values
                 if len(d) >= 2:
+                    if np.max(d) > sz:
+                        st.warning(f'⚠️ 有不合格品数({np.max(d):g})超过固定样本量({sz})，请核对数据（控制限已按截断处理）')
                     r = spc_charts.np_chart(d, sz, target_val)
                     st.plotly_chart(r['chart'], use_container_width=True)
                     _show_spc_results(r)
@@ -707,12 +716,17 @@ def page_spc():
                 if scol not in df.columns:
                     st.warning(f'列 "{scol}" 已变更，请重新选择')
                 else:
-                    d = df[dcol].dropna().values
-                    s = df[scol].dropna().values
-                    ml = min(len(d), len(s))
-                    r = spc_charts.u_chart(d[:ml], s[:ml], target_val)
-                    st.plotly_chart(r['chart'], use_container_width=True)
-                    _show_spc_results(r)
+                    # 两列按行对齐后再过滤，避免分别 dropna 导致配对错位
+                    tmp = df[[dcol, scol]].replace([np.inf, -np.inf], np.nan).dropna()
+                    d = tmp[dcol].values
+                    s = tmp[scol].values
+                    valid = s > 0
+                    if not np.any(valid):
+                        st.error('单位数全部为 0，无法绘制 U 图')
+                    elif len(d[valid]) >= 2:
+                        r = spc_charts.u_chart(d[valid], s[valid], target_val)
+                        st.plotly_chart(r['chart'], use_container_width=True)
+                        _show_spc_results(r)
 
     # --- Tab2: EWMA ---
     with tab2:
@@ -829,10 +843,14 @@ def page_capability():
             elif usl is not None and lsl is not None and usl <= lsl:
                 st.error('USL 必须大于 LSL')
             else:
-                r = capability.process_capability(data, usl, lsl, tgt, ss, wm)
-                if 'error' in r:
-                    st.error(r['error'])
+                try:
+                    r = capability.process_capability(data, usl, lsl, tgt, ss, wm)
+                except Exception as e:
+                    st.error(f'能力分析计算失败: {e}')
                 else:
+                    if 'error' in r:
+                        st.error(r['error'])
+                    else:
                     st.subheader('📊 能力指标')
                     cs = st.columns(6)
                     with cs[0]: st.metric('Cp (短期)', f'{r["Cp"]:.2f}' if r['Cp'] is not None else 'N/A')
@@ -2348,8 +2366,9 @@ def _dlg_step_params(fname, file_idx, cols_list, numeric_cols,
                 c_sub1, c_sub2 = st.columns(2)
                 with c_sub1:
                     params['spc_subgroup_size'] = st.number_input(
-                        '子组大小', 2, 25, params.get('spc_subgroup_size', 5),
-                        key=f'dlg_spc_ss_{file_idx}')
+                        '子组大小', 2, 10, params.get('spc_subgroup_size', 5),
+                        key=f'dlg_spc_ss_{file_idx}',
+                        help='常数表支持 2~10，超出范围将无法绘制')
                 with c_sub2:
                     spc_tgt = st.text_input('目标值 (可选)', placeholder='留空=不设',
                                             key=f'dlg_spc_tgt_{file_idx}')
