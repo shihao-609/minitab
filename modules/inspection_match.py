@@ -20,6 +20,7 @@
   - 检验清单不入库，仅用于本次临时对比；非核心列自动忽略
   - 名称不一致单独成类，人工判断
 """
+import hashlib
 import re
 from datetime import date, datetime, timedelta
 from io import BytesIO
@@ -32,6 +33,43 @@ from modules.supplier_normalize import normalize_supplier, same_supplier
 
 SUBMISSION_COLS = ['供应商', '物料编码', '规格型号', '物料名称', '收料日期', '实收数量']
 INSPECTION_COLS = ['供应商', '物料编码', '规格型号', '物料名称', '质检日期', '检验数量']
+
+# ==================== 检验工序配置中心 ====================
+# 以后新增检验工序（如过程检/出货检）时，只需在下方加一项配置：
+#   - match_pairs: 该工序「送检清单 ↔ 检验清单」用于唯一匹配的字段对。
+#                  **不同工序字段可以完全不同**（如来料检按供应商+物料，过程检可能按工单号+批次号）。
+#                  - 比对（compare）用它做匹配键与差异核对
+#                  - 入库去重用它计算通用去重键 dedup_key（数据库唯一索引不绑定固定列）
+#   - ins_dedup_extra: 检验清单去重额外字段（默认单据编号+质检日期），送检清单无需额外字段
+#   - 前端 app.py 的 INSPECT_TYPES 列表同步加一项，上传模板/Excel 增加对应列即可
+INSPECT_TYPE_CONFIGS = {
+    '来料检': {
+        'match_pairs': [
+            ('供应商', '供应商'),
+            ('物料编码', '物料编码'),
+            ('规格型号', '规格型号'),
+            ('物料名称', '物料名称'),
+            ('实收数量', '检验数量'),
+        ],
+        'ins_dedup_extra': ['单据编号', '质检日期'],
+    },
+    # 示例（以后加过程检时取消注释并按需修改字段）：
+    # '过程检': {
+    #     'match_pairs': [
+    #         ('工单号', '工单号'),
+    #         ('物料编码', '物料编码'),
+    #         ('工序名称', '工序名称'),
+    #         ('批次号', '批次号'),
+    #         ('送检数量', '检验数量'),
+    #     ],
+    #     'ins_dedup_extra': ['单据编号', '质检日期'],
+    # },
+}
+
+
+def get_inspect_type_config(inspect_type='来料检'):
+    """获取某工序的匹配配置（未配置的工序回退到来料检）"""
+    return INSPECT_TYPE_CONFIGS.get(inspect_type or '来料检', INSPECT_TYPE_CONFIGS['来料检'])
 
 # 检验清单入库时保留的扩展字段（非必填，缺失时置空）
 EXTRA_INS_COLS = {
@@ -248,28 +286,51 @@ def parse_sheet(uploaded_file, kind='submission', default_date=None):
 
 # ==================== 幂等去重入库 ====================
 
-def _dedup_key(row):
-    return (row.get('检验类型', '来料检'), row['供应商'], row['物料编码'],
-            row['规格型号'], row['物料名称'], row['实收数量'])
+def _dedup_val(field, v):
+    """把某字段值规范化为「去重键用」的稳定文本（与数据库回填 SQL 的算法一致）"""
+    if field in ('实收数量', '检验数量', '合格数', '不合格数'):
+        return _fmt_qty(_parse_qty(v))
+    if field in ('收料日期', '质检日期'):
+        d = _parse_date(v)
+        return d.isoformat() if d else ''
+    if field == '物料编码':
+        return _normalize_code(v)
+    return _clean_text(v)
+
+
+def make_dedup_key(row, inspect_type='来料检', kind='submission'):
+    """
+    按工序配置计算通用去重键（MD5）。入库时写入表的 dedup_key 列，
+    数据库唯一索引统一为 (user_id, inspect_type, dedup_key)，与字段多少无关。
+
+    row: 字典，键为中文列名（供应商/物料编码/...）。
+    kind: 'submission' 用 match_pairs 送检侧字段；'inspection' 再加 ins_dedup_extra。
+    """
+    cfg = get_inspect_type_config(inspect_type)
+    fields = [sc for sc, _ in cfg['match_pairs']]
+    if kind == 'inspection':
+        fields = [ic for _, ic in cfg['match_pairs']] + list(cfg.get('ins_dedup_extra', []))
+    raw = '|'.join(_dedup_val(f, row.get(f)) for f in fields)
+    return hashlib.md5(raw.encode('utf-8')).hexdigest()
 
 
 def _existing_keys(records):
+    """已入库记录的 (检验类型, dedup_key) 集合"""
     keys = set()
     for r in records:
-        keys.add((
-            _clean_text(r.get('inspect_type')) or '来料检',
-            _clean_text(r.get('supplier')),
-            _normalize_code(r.get('material_code')),
-            _clean_text(r.get('spec')),
-            _clean_text(r.get('material_name')),
-            _parse_qty(r.get('received_qty')),
-        ))
+        it = _clean_text(r.get('inspect_type')) or '来料检'
+        dk = _clean_text(r.get('dedup_key'))
+        if dk:
+            keys.add((it, dk))
+        else:
+            # 老数据兜底：按五元组计算（与回填 SQL 一致）
+            keys.add((it, make_dedup_key(r, it, 'submission')))
     return keys
 
 
 def preview_import(df, records=None, inspect_type='来料检'):
     """
-    返回 (新增记录 df, 重复记录 df)。去重键为 检验类型+五元组，不含日期。
+    返回 (新增记录 df, 重复记录 df)。去重键 = 检验类型 + 通用 dedup_key（按工序配置字段计算）。
 
     records 为空时走轻量查询（只拉取键列），避免全量 SELECT *。
     """
@@ -279,9 +340,10 @@ def preview_import(df, records=None, inspect_type='来料检'):
 
     df = df.copy()
     df['检验类型'] = inspect_type
+    df['去重键'] = df.apply(lambda r: make_dedup_key(r, inspect_type, 'submission'), axis=1)
 
-    key_series = df.apply(_dedup_key, axis=1)
-    is_new = ~key_series.isin(keys)
+    key_series = df['检验类型'] + '|' + df['去重键']
+    is_new = ~key_series.isin({f'{it}|{dk}' for it, dk in keys})
     return df[is_new].reset_index(drop=True), df[~is_new].reset_index(drop=True)
 
 
@@ -294,7 +356,7 @@ def import_submissions(df, progress=None, batch_size=1000, inspect_type='来料�
     """
     df = df.copy()
 
-    # 直接插入全部数据，由数据库 unique index 完成去重，避免再次查 keys
+    # 直接插入全部数据，由数据库 unique index (user_id, inspect_type, dedup_key) 完成去重
     total = len(df)
     rows = []
     for _, row in df.iterrows():
@@ -307,6 +369,7 @@ def import_submissions(df, progress=None, batch_size=1000, inspect_type='来料�
             'received_date': d.isoformat() if isinstance(d, (date, datetime)) else None,
             'received_qty': row['实收数量'],
             'inspect_type': inspect_type,
+            'dedup_key': make_dedup_key(row, inspect_type, 'submission'),
         })
 
     inserted = 0
@@ -322,7 +385,7 @@ def import_submissions(df, progress=None, batch_size=1000, inspect_type='来料�
 
 
 def submissions_to_df(records):
-    """数据库记录 → 展示用 DataFrame（检验类型 + 6 标准列 + 入库时间 + id）"""
+    """数据库记录 → 展示用 DataFrame（检验类型 + 6 标准列 + 入库时间 + id + 去重键）"""
     rows = [{
         '检验类型': _clean_text(r.get('inspect_type')) or '来料检',
         '供应商': _clean_text(r.get('supplier')),
@@ -333,9 +396,10 @@ def submissions_to_df(records):
         '实收数量': _parse_qty(r.get('received_qty')),
         '入库时间': str(r.get('created_at', ''))[:19],
         'id': r.get('id'),
+        '去重键': _clean_text(r.get('dedup_key')),
     } for r in records]
     return pd.DataFrame(rows, columns=['检验类型', '供应商', '物料编码', '规格型号', '物料名称',
-                                       '收料日期', '实收数量', '入库时间', 'id'])
+                                       '收料日期', '实收数量', '入库时间', 'id', '去重键'])
 
 
 # ==================== 对比 ====================
@@ -359,37 +423,41 @@ def _date_ge(ins_date, sub_date):
 
 
 def _sub_dict(row):
-    d = {c: row[c] for c in SUBMISSION_COLS}
+    d = {c: row.get(c, '') for c in SUBMISSION_COLS}
     d['检验类型'] = row.get('检验类型', '来料检')
     return d
 
 
 def _ins_dict(row):
-    d = {c: row[c] for c in INSPECTION_COLS}
+    d = {c: row.get(c, '') for c in INSPECTION_COLS}
     d['检验类型'] = row.get('检验类型', '来料检')
     return d
 
 
-def _diff_fields(sub, ins, use_norm_supplier=True):
+_LABELS = {'供应商': '供应商', '规格型号': '规格', '物料名称': '名称', '物料编码': '编码'}
+
+
+def _diff_fields(sub, ins, cfg, use_norm_supplier=True):
     """严格核对送检记录与检验记录的字段，返回差异描述（空串表示完全一致）。
 
-    重点核对：供应商 / 规格型号 / 物料名称 / 实收数量 vs 检验数量。
-    use_norm_supplier=True 时供应商用归一化比较（自动识别同一公司的不同写法，
-    如"常州塑邦" vs "塑邦模型"）；False 时按原始名称精确比较。
+    核对字段来自工序配置 INSPECT_TYPE_CONFIGS 的 match_pairs（各工序可不同）。
+    use_norm_supplier=True 时供应商用归一化比较（自动识别同一公司的不同写法）。
     """
     diffs = []
-    if use_norm_supplier:
-        if not same_supplier(sub['供应商'], ins['供应商']):
-            diffs.append(f"供应商「{sub['供应商'] or '空'}」≠「{ins['供应商'] or '空'}」")
-    else:
-        if sub['供应商'] != ins['供应商']:
-            diffs.append(f"供应商「{sub['供应商'] or '空'}」≠「{ins['供应商'] or '空'}」")
-    if sub['规格型号'] != ins['规格型号']:
-        diffs.append(f"规格「{sub['规格型号'] or '空'}」≠「{ins['规格型号'] or '空'}」")
-    if sub['物料名称'] != ins['物料名称']:
-        diffs.append(f"名称「{sub['物料名称'] or '空'}」≠「{ins['物料名称'] or '空'}」")
-    if not _qty_eq(sub['实收数量'], ins['检验数量']):
-        diffs.append(f"实收数量 {_fmt_qty(sub['实收数量']) or '空'} ≠ 检验数量 {_fmt_qty(ins['检验数量']) or '空'}")
+    for sc, ic in cfg['match_pairs']:
+        sv, iv = sub.get(sc), ins.get(sc)  # ins 记录已统一用送检侧字段名存储
+        label = _LABELS.get(sc, sc if sc == ic else f'{sc}/{ic}')
+        if sc == '供应商':
+            ok = same_supplier(sv, iv) if use_norm_supplier else _clean_text(sv) == _clean_text(iv)
+            if not ok:
+                diffs.append(f"供应商「{sv or '空'}」≠「{iv or '空'}」")
+            continue
+        if sc in ('实收数量', '检验数量'):
+            if not _qty_eq(sv, iv):
+                diffs.append(f"{_LABELS.get(sc, sc)} {_fmt_qty(sv) or '空'} ≠ {_fmt_qty(iv) or '空'}")
+            continue
+        if _clean_text(sv) != _clean_text(iv):
+            diffs.append(f"{label}「{sv or '空'}」≠「{iv or '空'}」")
     return '；'.join(diffs)
 
 
@@ -419,43 +487,53 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True, inspect_typ
     def _norm_sup(name):
         return normalize_supplier(name) if normalize_suppliers else _clean_text(name)
 
-    # 预处理：to_dict 批量转换（比 iterrows 快约 3 倍），日期/数量统一解析
-    subs = []
-    for r in sub_df.to_dict('records'):
-        sup = _clean_text(r['供应商'])
-        subs.append({
-            '检验类型': _clean_text(r.get('检验类型', '来料检')) or '来料检',
-            '供应商': sup,
-            '_sup_norm': _norm_sup(sup),
-            '物料编码': _normalize_code(r['物料编码']),
-            '规格型号': _clean_text(r['规格型号']),
-            '物料名称': _clean_text(r['物料名称']),
-            '收料日期': _parse_date(r['收料日期']),
-            '实收数量': _parse_qty(r['实收数量']),
-        })
+    # 按工序配置取匹配字段（各工序可不同）
+    cfg = get_inspect_type_config(inspect_type or '来料检')
+    pairs = cfg['match_pairs']
+    sub_fields = [sc for sc, _ in pairs]
+    has_name = '物料名称' in sub_fields
+    has_code = '物料编码' in sub_fields
+    sub_date_field = cfg.get('sub_date_field', '收料日期')
+    ins_date_field = cfg.get('ins_date_field', '质检日期')
+    has_date = (sub_date_field in sub_df.columns and ins_date_field in ins_df.columns)
 
-    ins_rows = []
-    for r in ins_df.to_dict('records'):
-        sup = _clean_text(r['供应商'])
-        ins_rows.append({
-            '检验类型': _clean_text(r.get('检验类型', '来料检')) or '来料检',
-            '供应商': sup,
-            '_sup_norm': _norm_sup(sup),
-            '物料编码': _normalize_code(r['物料编码']),
-            '规格型号': _clean_text(r['规格型号']),
-            '物料名称': _clean_text(r['物料名称']),
-            '质检日期': _parse_date(r['质检日期']),
-            '检验数量': _parse_qty(r['检验数量']),
-        })
+    # 预处理：to_dict 批量转换（比 iterrows 快约 3 倍）
+    # 送检/检验两侧统一用「送检侧字段名」存值，方便按配置生成匹配键
+    def _fill_row(r, is_ins):
+        row = {'检验类型': _clean_text(r.get('检验类型', '来料检')) or '来料检'}
+        for sc, ic in pairs:
+            src = ic if is_ins else sc
+            v = r.get(src)
+            if sc == '供应商':
+                sup = _clean_text(v)
+                row[sc] = sup
+                row['_sup_norm'] = _norm_sup(sup)
+            elif sc == '物料编码':
+                row[sc] = _normalize_code(v)
+            elif sc in ('实收数量', '检验数量'):
+                row[sc] = _parse_qty(v)
+            else:
+                row[sc] = _clean_text(v)
+        if has_date:
+            src_date = ins_date_field if is_ins else sub_date_field
+            row[src_date] = _parse_date(r.get(src_date))
+        return row
 
-    # 建立多级索引（供应商键使用归一化名）
+    subs = [_fill_row(r, False) for r in sub_df.to_dict('records')]
+    ins_rows = [_fill_row(r, True) for r in ins_df.to_dict('records')]
+
+    # 建立索引（供应商键使用归一化名；匹配键 = 工序配置的字段元组）
     ins_by_code = {}
     ins_by_full_key = {}
     for idx, c in enumerate(ins_rows):
-        code = c['物料编码']
-        ins_by_code.setdefault(code, []).append((idx, c))
-        key = (c['_sup_norm'], code, c['规格型号'], c['物料名称'], c['检验数量'])
+        if has_code:
+            code = c['物料编码']
+            ins_by_code.setdefault(code, []).append((idx, c))
+        key = tuple(c[f] for f in sub_fields)
         ins_by_full_key.setdefault(key, []).append((idx, c))
+
+    def _sub_match_key(row):
+        return tuple(row[f] for f in sub_fields)
 
     checked, unchecked = [], []
     name_mismatch_sub, name_mismatch_ins = [], []
@@ -465,22 +543,22 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True, inspect_typ
     report_every = max(1, total_sub // 20)  # 每 5% 进度报告一次，避免频繁重绘
 
     for s_idx, srow in enumerate(subs):
-        code = srow['物料编码']
-        cands_code = ins_by_code.get(code, [])
+        code = srow['物料编码'] if has_code else None
+        cands_code = ins_by_code.get(code, []) if has_code else []
 
         if not cands_code:
             unchecked.append(_sub_dict(srow))
             continue
 
-        # 先尝试全键命中（O(1)）
-        full_key = (srow['_sup_norm'], code, srow['规格型号'], srow['物料名称'], srow['实收数量'])
+        # 先尝试全键命中（O(1)），匹配键 = 工序配置的字段元组
+        full_key = _sub_match_key(srow)
         candidates = ins_by_full_key.get(full_key, [])
         matched_idx = None
         matched_ins_row = None
         for idx, c in candidates:
             if idx in matched_ins:
                 continue
-            if _date_ge(c['质检日期'], srow['收料日期']):
+            if not has_date or _date_ge(c[ins_date_field], srow[sub_date_field]):
                 matched_idx = idx
                 matched_ins_row = c
                 break
@@ -488,16 +566,18 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True, inspect_typ
         if matched_idx is not None:
             d = _sub_dict(srow)
             _mr = matched_ins_row or {}
-            d['匹配检验记录'] = (f"{_mr['供应商']} · {_mr['规格型号']} · "
-                              f"检验数量 {_fmt_qty(_mr['检验数量'])} · "
-                              f"质检日期 {_fmt_date(_mr['质检日期'])}")
+            d['匹配检验记录'] = (f"{_mr.get('供应商', '') or ''} · {_mr.get('规格型号', '') or ''} · "
+                              f"检验数量 {_fmt_qty(_mr.get('检验数量'))} · "
+                              f"质检日期 {_fmt_date(_mr.get('质检日期'))}")
             checked.append(d)
             matched_ins.add(matched_idx)
         else:
-            # 是否有同编码且名称一致的候选？
-            same_name = any(c['物料名称'] == srow['物料名称']
-                            for _, c in cands_code)
-            if not same_name:
+            # 名称不一致分类：仅当配置包含「物料名称」字段时启用
+            if has_name:
+                same_name = any(c['物料名称'] == srow['物料名称'] for _, c in cands_code)
+            else:
+                same_name = True
+            if has_code and not same_name:
                 # 同编码但物料名称完全对不上 → 第四类
                 name_mismatch_sub.append(_sub_dict(srow))
                 for idx, c in cands_code:
@@ -505,8 +585,8 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True, inspect_typ
                         name_mismatch_ins.append({**_ins_dict(c), '对应送检编码': code})
                         matched_ins.add(idx)
             else:
-                # 同编码同名称但全键未命中 → 严格核对：
-                # 1) 优先寻找归一化后完全一致的候选（供应商不同写法也算一致）→ 转为已检验
+                # 全键未命中 → 严格核对：
+                # 1) 优先寻找匹配字段完全一致的候选 → 转为已检验
                 # 2) 否则记录差异原因（重点：数量 / 供应商）
                 d = _sub_dict(srow)
                 reasons = []
@@ -515,20 +595,20 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True, inspect_typ
                 for idx, c in cands_code:
                     if idx in matched_ins:
                         continue
-                    diff = _diff_fields(srow, c, use_norm_supplier=normalize_suppliers)
-                    if not diff and _date_ge(c['质检日期'], srow['收料日期']):
+                    diff = _diff_fields(srow, c, cfg, use_norm_supplier=normalize_suppliers)
+                    if not diff and (not has_date or _date_ge(c[ins_date_field], srow[sub_date_field])):
                         matched_idx = idx
                         matched_ins_row = c
                         break
                     if diff:
                         reasons.append(diff)
-                    else:
-                        reasons.append(f"质检日期 {_fmt_date(c['质检日期']) or '空'} 早于收料日期 {_fmt_date(srow['收料日期']) or '空'}")
+                    elif has_date:
+                        reasons.append(f"质检日期 {_fmt_date(c[ins_date_field]) or '空'} 早于收料日期 {_fmt_date(srow[sub_date_field]) or '空'}")
                 if matched_idx is not None:
                     _mr = matched_ins_row or {}
-                    d['匹配检验记录'] = (f"{_mr['供应商']} · {_mr['规格型号']} · "
-                                      f"检验数量 {_fmt_qty(_mr['检验数量'])} · "
-                                      f"质检日期 {_fmt_date(_mr['质检日期'])}")
+                    d['匹配检验记录'] = (f"{_mr.get('供应商', '') or ''} · {_mr.get('规格型号', '') or ''} · "
+                                      f"检验数量 {_fmt_qty(_mr.get('检验数量'))} · "
+                                      f"质检日期 {_fmt_date(_mr.get('质检日期'))}")
                     checked.append(d)
                     matched_ins.add(matched_idx)
                 else:
@@ -543,20 +623,20 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True, inspect_typ
         progress(total_sub, total_sub)
 
     # 额外检验：未被任何送检匹配的检验记录
-    sub_codes = {s['物料编码'] for s in subs}
-    # 统计检验记录的关键字段出现次数，用于识别疑似重复检验单（供应商键使用归一化名）
+    sub_codes = {s['物料编码'] for s in subs} if has_code else set()
+    # 统计检验记录的关键字段出现次数，用于识别疑似重复检验单
     dup_counts = {}
     for c in ins_rows:
-        _key = (c['_sup_norm'], c['物料编码'], c['规格型号'], c['物料名称'], c['质检日期'], c['检验数量'])
+        _key = _sub_match_key(c) + ((c.get(ins_date_field),) if has_date else ())
         dup_counts[_key] = dup_counts.get(_key, 0) + 1
     extra = []
     for idx, irow in enumerate(ins_rows):
         if idx in matched_ins:
             continue
         note = ''
-        if irow['物料编码'] in sub_codes:
-            # 找出同编码的送检记录，尽量给出具体差异（重点：数量）
-            diffs = [_diff_fields(s, irow, use_norm_supplier=normalize_suppliers)
+        if has_code and irow['物料编码'] in sub_codes:
+            # 找出同编码的送检记录，尽量给出具体差异
+            diffs = [_diff_fields(s, irow, cfg, use_norm_supplier=normalize_suppliers)
                      for s in subs if s['物料编码'] == irow['物料编码']]
             diffs = [d for d in diffs if d]
             if diffs:
@@ -564,10 +644,9 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True, inspect_typ
             else:
                 note = '该编码存在于送检清单，但未匹配成功（请核对名称/数量/日期/供应商）'
         # 疑似重复检验单提示（不去重，仅提示人工确认）
-        dup_key = (irow['_sup_norm'], irow['物料编码'], irow['规格型号'], irow['物料名称'], irow['质检日期'], irow['检验数量'])
+        dup_key = _sub_match_key(irow) + ((irow.get(ins_date_field),) if has_date else ())
         if dup_counts.get(dup_key, 0) > 1:
-            dup_tip = ('该记录与另一条检验记录完全相同（同供应商/编码/规格型号/名称/质检日期/数量），'
-                       '疑似重复检验单，请人工确认')
+            dup_tip = '该记录与另一条检验记录完全相同，疑似重复检验单，请人工确认'
             note = f"{note}；{dup_tip}" if note else dup_tip
         extra.append({**_ins_dict(irow), '备注': note})
 
@@ -728,6 +807,7 @@ def import_inspection_records(df, progress=None, batch_size=1000, source_file=''
             'category': row.get('类别', '') or '',
             'inspect_type': inspect_type,
             'source_file': source_file,
+            'dedup_key': make_dedup_key(row, inspect_type, 'inspection'),
         })
 
     inserted = 0
@@ -761,7 +841,8 @@ def inspection_records_to_df(records):
         '类别': _clean_text(r.get('category')),
         '入库时间': str(r.get('created_at', ''))[:19],
         'id': r.get('id'),
+        '去重键': _clean_text(r.get('dedup_key')),
     } for r in records]
     cols = ['检验类型', '供应商', '物料编码', '规格型号', '物料名称', '质检日期', '检验数量',
-            '单据编号', '合格数', '不合格数', '检验结果', '质检员', '批号', '类别', '入库时间', 'id']
+            '单据编号', '合格数', '不合格数', '检验结果', '质检员', '批号', '类别', '入库时间', 'id', '去重键']
     return pd.DataFrame(rows, columns=cols)

@@ -3279,26 +3279,31 @@ def _render_supplier_alias_tab():
 
 
 def _render_report_recipients_tab():
-    """📮 未检验清单邮件收件人：团队共享，页面增删，无需改 GitHub Secrets"""
+    """📮 未检验清单邮件收件人：团队共享，页面增删，按工序分别发送"""
     st.subheader('📮 未检验清单邮件收件人')
-    st.caption('工作日凌晨自动发送的「未检验清单」会发给「收件人」，并抄送给「抄送人」。可在页面直接增删，无需修改代码或 GitHub 配置。所有登录用户共享。')
+    st.caption('工作日凌晨自动发送的「未检验清单」**按检验工序分别发送**：「全部」收件人收到所有工序的邮件，指定工序的只收到该工序邮件。可在页面直接增删，无需修改代码或 GitHub 配置。所有登录用户共享。')
 
     if not supabase_helper.ensure_report_recipients_table():
         st.warning('⚠️ 收件人表 `report_recipients` 尚未创建，请先在 Supabase SQL Editor 中执行：')
         st.code(supabase_helper.get_create_inspection_records_table_sql(), language='sql')
         return
     if not supabase_helper.ensure_report_recipients_columns():
-        st.warning('⚠️ 收件人表缺少「抄送人」支持字段，请先在 Supabase SQL Editor 中执行迁移 SQL：')
+        st.warning('⚠️ 收件人表缺少「抄送人 / 工序」支持字段，请先在 Supabase SQL Editor 中执行迁移 SQL：')
         st.code(supabase_helper.get_report_recipients_migration_sql(), language='sql')
 
     import re as _re
     with st.form('recipient_form', clear_on_submit=True):
-        c1, c2 = st.columns([3, 1])
+        c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
         with c1:
             email = st.text_input('邮箱地址（多个请逐个添加）', key='recipient_input',
                                   placeholder='例如：someone@qq.com')
         with c2:
             rtype = st.radio('类型', ['收件人', '抄送人'], horizontal=True, key='recipient_type_input')
+        with c3:
+            insp_type = st.selectbox('适用工序', ['全部'] + INSPECT_TYPES, index=0,
+                                     key='recipient_inspect_type_input',
+                                     help='「全部」= 所有工序的未检验清单都发给他；指定工序则只发该工序')
+        with c4:
             submitted = st.form_submit_button('➕ 添加', use_container_width=True)
         if submitted:
             e = email.strip()
@@ -3308,8 +3313,8 @@ def _render_report_recipients_tab():
                 st.warning('邮箱格式不正确，请检查后重试')
             else:
                 t = 'cc' if rtype == '抄送人' else 'to'
-                if supabase_helper.add_report_recipient(e, t):
-                    st.success(f'已添加{rtype}「{e}」')
+                if supabase_helper.add_report_recipient(e, t, insp_type):
+                    st.success(f'已添加{rtype}「{e}」（{insp_type}）')
                     st.rerun()
 
     recipients = supabase_helper.list_report_recipients()
@@ -3320,16 +3325,20 @@ def _render_report_recipients_tab():
         st.markdown(f'**当前配置（收件人 {to_n} 个 · 抄送人 {cc_n} 个）**')
         for r in recipients:
             is_cc = str(r.get('recipient_type', 'to')) == 'cc'
-            c1, c2, c3 = st.columns([1, 4, 1])
+            insp = str(r.get('inspect_type', '全部'))
+            c1, c2, c3, c4 = st.columns([1, 2, 4, 1])
             with c1:
-                st.markdown('📧 抄送人' if is_cc else '📨 收件人')
+                st.markdown('📧 抄送' if is_cc else '📨 收件')
             with c2:
-                st.text(str(r.get('email', '')))
+                st.markdown(f'`{insp}`')
             with c3:
+                st.text(str(r.get('email', '')))
+            with c4:
                 if st.button('🗑️', key=f"del_recipient_{r.get('id')}", help='删除该邮箱'):
                     if supabase_helper.delete_report_recipient(str(r.get('id'))):
                         st.rerun()
-        st.caption('说明：收件人必填（至少 1 个），抄送人可空。每日邮件发给所有收件人并抄送所有抄送人。')
+        st.caption('说明：同一邮箱可为不同工序分别配置角色（如：张三=来料检收件人 + 过程检抄送人）。'
+                   '至少保留 1 个收件人，否则对应工序的邮件不会发送。')
     else:
         st.info('暂无收件人，添加后每天凌晨的未检验清单才会发送。')
 

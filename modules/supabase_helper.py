@@ -620,7 +620,7 @@ def ensure_inspection_table() -> bool:
 
 
 def get_create_inspection_table_sql() -> str:
-    """返回创建 inspection_submissions 表的 SQL（含 RLS + 五元组唯一索引）"""
+    """返回创建 inspection_submissions 表的 SQL（含 RLS + 通用 dedup_key 唯一索引）"""
     return """
 -- 1. 创建表（送检清单持久化）
 CREATE TABLE IF NOT EXISTS inspection_submissions (
@@ -633,6 +633,7 @@ CREATE TABLE IF NOT EXISTS inspection_submissions (
     received_date DATE,
     received_qty NUMERIC,
     inspect_type TEXT NOT NULL DEFAULT '来料检',
+    dedup_key TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -657,9 +658,10 @@ CREATE POLICY "Users can delete own inspections"
     ON inspection_submissions FOR DELETE
     USING (auth.uid() = user_id);
 
--- 5. 唯一索引：按类型+五元组去重（检验类型+供应商+物料编码+规格型号+物料名称+实收数量，日期不参与）
+-- 5. 唯一索引：通用去重键（dedup_key 由应用按工序配置字段计算，
+--    以后新增工序即使字段不同，也无需再改这里的索引）
 CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_dedup
-    ON inspection_submissions(user_id, inspect_type, supplier, material_code, spec, material_name, received_qty);
+    ON inspection_submissions(user_id, inspect_type, dedup_key);
 
 -- 6. 常用查询索引
 CREATE INDEX IF NOT EXISTS idx_inspection_user_date
@@ -676,23 +678,24 @@ DECLARE
     inserted integer := 0;
     r jsonb;
 BEGIN
-    -- 老库自愈：确保 inspect_type 列存在（无动态 SQL，安全）
+    -- 老库自愈：确保 inspect_type / dedup_key 列存在（无动态 SQL，安全）
     ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
-    -- 老库自愈：确保去重索引包含 inspect_type（跨工序不互相覆盖）
+    ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
+    -- 老库自愈：确保去重索引使用通用 dedup_key（新工序字段可不同，索引不再绑定固定列）
     IF NOT EXISTS (
         SELECT 1 FROM pg_indexes
         WHERE schemaname = 'public' AND tablename = 'inspection_submissions'
           AND indexname = 'idx_inspection_dedup'
-          AND indexdef LIKE '%inspect_type%'
+          AND indexdef LIKE '%dedup_key%'
     ) THEN
         DROP INDEX IF EXISTS idx_inspection_dedup;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_dedup
-            ON inspection_submissions(user_id, inspect_type, supplier, material_code, spec, material_name, received_qty);
+            ON inspection_submissions(user_id, inspect_type, dedup_key);
     END IF;
 
     FOR r IN SELECT * FROM jsonb_array_elements(p_rows) LOOP
         INSERT INTO inspection_submissions
-            (user_id, supplier, material_code, spec, material_name, received_date, received_qty, inspect_type)
+            (user_id, supplier, material_code, spec, material_name, received_date, received_qty, inspect_type, dedup_key)
         VALUES
             (auth.uid(),
              COALESCE(r->>'supplier', ''),
@@ -701,7 +704,12 @@ BEGIN
              COALESCE(r->>'material_name', ''),
              NULLIF(r->>'received_date', '')::date,
              (r->>'received_qty')::numeric,
-             COALESCE(NULLIF(r->>'inspect_type', ''), '来料检'))
+             COALESCE(NULLIF(r->>'inspect_type', ''), '来料检'),
+             COALESCE(NULLIF(r->>'dedup_key', ''), md5(
+                 COALESCE(r->>'supplier','')||'|'||COALESCE(r->>'material_code','')||'|'||COALESCE(r->>'spec','')||'|'||
+                 COALESCE(r->>'material_name','')||'|'||
+                 CASE WHEN r->>'received_qty' IS NULL OR r->>'received_qty' = '' THEN ''
+                      ELSE rtrim(rtrim(r->>'received_qty','0'),'.') END)))
         ON CONFLICT DO NOTHING;
         IF FOUND THEN
             inserted := inserted + 1;
@@ -748,14 +756,14 @@ def list_inspection_submissions(limit: int = None) -> list:
 
 @_with_retry
 def _do_fetch_submission_keys(client):
-    """只拉取类型+五元组去重键列（不含日期、数量以外字段），用于导入预览去重"""
+    """只拉取去重所需的列（含 dedup_key），用于导入预览去重"""
     return client.table("inspection_submissions").select(
-        "inspect_type,supplier,material_code,spec,material_name,received_qty"
+        "inspect_type,supplier,material_code,spec,material_name,received_qty,dedup_key"
     ).execute()
 
 
 def fetch_submission_keys() -> list:
-    """轻量查询：拉取全部送检记录的去重键（5 列），避免 SELECT * 大 payload。"""
+    """轻量查询：拉取全部送检记录的去重键（含 dedup_key），避免 SELECT * 大 payload。"""
     try:
         client = _get_client()
         _check_client(client)
@@ -936,6 +944,7 @@ CREATE TABLE IF NOT EXISTS inspection_records (
     batch_no TEXT DEFAULT '',
     category TEXT DEFAULT '',
     inspect_type TEXT NOT NULL DEFAULT '来料检',
+    dedup_key TEXT NOT NULL DEFAULT '',
     source_file TEXT DEFAULT '',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -958,11 +967,10 @@ CREATE POLICY "Users can delete own ins_records"
     ON inspection_records FOR DELETE
     USING (auth.uid() = user_id);
 
--- 去重索引（检验类型+单据编号+供应商+编码+规格+名称+质检日期+检验数量；日期/数量为空时用哨兵值）
+-- 去重索引：通用去重键（dedup_key 由应用按工序配置字段计算，
+--    以后新增工序即使字段不同，也无需再改这里的索引）
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ins_records_dedup
-    ON inspection_records(user_id, inspect_type, doc_no, supplier, material_code, spec, material_name,
-                          COALESCE(inspect_date, '1970-01-01'::date),
-                          COALESCE(inspect_qty, -1));
+    ON inspection_records(user_id, inspect_type, dedup_key);
 
 CREATE INDEX IF NOT EXISTS idx_ins_records_user_date
     ON inspection_records(user_id, inspect_date);
@@ -977,27 +985,26 @@ DECLARE
     inserted integer := 0;
     r jsonb;
 BEGIN
-    -- 老库自愈：确保 inspect_type 列存在（无动态 SQL，安全）
+    -- 老库自愈：确保 inspect_type / dedup_key 列存在（无动态 SQL，安全）
     ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
-    -- 老库自愈：确保去重索引包含 inspect_type（跨工序不互相覆盖）
+    ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
+    -- 老库自愈：确保去重索引使用通用 dedup_key（新工序字段可不同，索引不再绑定固定列）
     IF NOT EXISTS (
         SELECT 1 FROM pg_indexes
         WHERE schemaname = 'public' AND tablename = 'inspection_records'
           AND indexname = 'idx_ins_records_dedup'
-          AND indexdef LIKE '%inspect_type%'
+          AND indexdef LIKE '%dedup_key%'
     ) THEN
         DROP INDEX IF EXISTS idx_ins_records_dedup;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_ins_records_dedup
-            ON inspection_records(user_id, inspect_type, doc_no, supplier, material_code, spec, material_name,
-                                  COALESCE(inspect_date, '1970-01-01'::date),
-                                  COALESCE(inspect_qty, -1));
+            ON inspection_records(user_id, inspect_type, dedup_key);
     END IF;
 
     FOR r IN SELECT * FROM jsonb_array_elements(p_rows) LOOP
         INSERT INTO inspection_records
             (user_id, doc_no, supplier, material_code, spec, material_name,
              inspect_date, inspect_qty, qualified_qty, unqualified_qty,
-             result, inspector, batch_no, category, inspect_type, source_file)
+             result, inspector, batch_no, category, inspect_type, source_file, dedup_key)
         VALUES
             (auth.uid(),
              COALESCE(r->>'doc_no', ''),
@@ -1014,7 +1021,13 @@ BEGIN
              COALESCE(r->>'batch_no', ''),
              COALESCE(r->>'category', ''),
              COALESCE(NULLIF(r->>'inspect_type', ''), '来料检'),
-             COALESCE(r->>'source_file', ''))
+             COALESCE(r->>'source_file', ''),
+             COALESCE(NULLIF(r->>'dedup_key', ''), md5(
+                 COALESCE(r->>'supplier','')||'|'||COALESCE(r->>'material_code','')||'|'||COALESCE(r->>'spec','')||'|'||
+                 COALESCE(r->>'material_name','')||'|'||
+                 CASE WHEN r->>'inspect_qty' IS NULL OR r->>'inspect_qty' = '' THEN ''
+                      ELSE rtrim(rtrim(r->>'inspect_qty','0'),'.') END||'|'||
+                 COALESCE(r->>'doc_no','')||'|'||COALESCE(NULLIF(r->>'inspect_date',''),''))))
         ON CONFLICT DO NOTHING;
         IF FOUND THEN
             inserted := inserted + 1;
@@ -1047,11 +1060,14 @@ CREATE POLICY "All auth can manage supplier_aliases"
 
 -- ============ 未检验清单邮件收件人表（团队共享，页面可维护） ============
 -- recipient_type: 'to' 收件人 / 'cc' 抄送人
+-- inspect_type: 适用的检验工序，'全部' = 所有工序都发；同一邮箱可为不同工序分别配置
 CREATE TABLE IF NOT EXISTS report_recipients (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    email TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL,
     recipient_type TEXT NOT NULL DEFAULT 'to',
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    inspect_type TEXT NOT NULL DEFAULT '全部',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (email, inspect_type)
 );
 
 ALTER TABLE report_recipients ENABLE ROW LEVEL SECURITY;
@@ -1068,22 +1084,37 @@ CREATE POLICY "All auth can manage report_recipients"
 
 
 def get_inspect_type_migration_sql() -> str:
-    """老表迁移 SQL：为送检表/检验记录表补充 inspect_type 字段并重建去重索引（幂等，可重复执行）"""
+    """老表迁移 SQL：补充 inspect_type / dedup_key 字段，回填去重键，重建通用去重索引（幂等，可重复执行）"""
     return """
--- ============ 检验类型字段迁移（来料检/过程检/出货检…） ============
+-- ============ 检验类型 + 通用去重键迁移（来料检/过程检/出货检…） ============
 -- 1. 两张表补充 inspect_type 列（老数据默认「来料检」）
 ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
 ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
 
--- 2. 重建去重索引，把检验类型纳入（避免跨工序互相覆盖）
+-- 2. 补充通用去重键 dedup_key 列（以后新增工序字段可不同，去重不再绑定固定列）
+ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
+
+-- 3. 回填已有数据的去重键（算法与 Python 端一致，仅回填一次）
+UPDATE inspection_submissions SET dedup_key = md5(
+    COALESCE(supplier,'')||'|'||COALESCE(material_code,'')||'|'||COALESCE(spec,'')||'|'||
+    COALESCE(material_name,'')||'|'||
+    CASE WHEN received_qty IS NULL THEN '' ELSE rtrim(rtrim(received_qty::text,'0'),'.') END)
+WHERE dedup_key = '';
+UPDATE inspection_records SET dedup_key = md5(
+    COALESCE(supplier,'')||'|'||COALESCE(material_code,'')||'|'||COALESCE(spec,'')||'|'||
+    COALESCE(material_name,'')||'|'||
+    CASE WHEN inspect_qty IS NULL THEN '' ELSE rtrim(rtrim(inspect_qty::text,'0'),'.') END||'|'||
+    COALESCE(doc_no,'')||'|'||COALESCE(inspect_date::text,''))
+WHERE dedup_key = '';
+
+-- 4. 重建去重索引为通用 (user_id, inspect_type, dedup_key)
 DROP INDEX IF EXISTS idx_inspection_dedup;
 DROP INDEX IF EXISTS idx_ins_records_dedup;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_dedup
-    ON inspection_submissions(user_id, inspect_type, supplier, material_code, spec, material_name, received_qty);
+    ON inspection_submissions(user_id, inspect_type, dedup_key);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ins_records_dedup
-    ON inspection_records(user_id, inspect_type, doc_no, supplier, material_code, spec, material_name,
-                          COALESCE(inspect_date, '1970-01-01'::date),
-                          COALESCE(inspect_qty, -1));
+    ON inspection_records(user_id, inspect_type, dedup_key);
 """
 
 
@@ -1349,21 +1380,28 @@ def ensure_report_recipients_table() -> bool:
 
 
 def ensure_report_recipients_columns() -> bool:
-    """检测 report_recipients 表是否有 recipient_type 列（老表需执行迁移 SQL）"""
+    """检测 report_recipients 表是否有 recipient_type / inspect_type 列（老表需执行迁移 SQL）"""
     try:
         client = _get_client()
         _check_client(client)
-        client.table("report_recipients").select("recipient_type").limit(1).execute()
+        client.table("report_recipients").select("recipient_type, inspect_type").limit(1).execute()
         return True
     except Exception:
         return False
 
 
 def get_report_recipients_migration_sql() -> str:
-    """老表迁移 SQL：补充 recipient_type 列（幂等，可重复执行）"""
+    """老表迁移 SQL：补充 recipient_type / inspect_type 列，并把唯一约束升级为 (email, inspect_type)。
+    幂等，可重复执行。"""
     return """
 -- 老表迁移：新增 recipient_type 列（'to' 收件人 / 'cc' 抄送人）
 ALTER TABLE report_recipients ADD COLUMN IF NOT EXISTS recipient_type TEXT NOT NULL DEFAULT 'to';
+-- 老表迁移：新增 inspect_type 列（适用工序，'全部' = 所有工序都发）
+ALTER TABLE report_recipients ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '全部';
+-- 唯一约束从 email 升级为 (email, inspect_type)：同一邮箱可为不同工序分别配置角色
+ALTER TABLE report_recipients DROP CONSTRAINT IF EXISTS report_recipients_email_key;
+ALTER TABLE report_recipients DROP CONSTRAINT IF EXISTS report_recipients_email_inspect_type_key;
+ALTER TABLE report_recipients ADD CONSTRAINT report_recipients_email_inspect_type_key UNIQUE (email, inspect_type);
 """
 
 
@@ -1379,14 +1417,18 @@ def list_report_recipients() -> list:
         return []
 
 
-def add_report_recipient(email: str, recipient_type: str = 'to') -> bool:
-    """新增收件人邮箱（recipient_type: 'to' 收件人 / 'cc' 抄送人，去重由唯一索引兜底）"""
+def add_report_recipient(email: str, recipient_type: str = 'to', inspect_type: str = '全部') -> bool:
+    """新增收件人邮箱
+    recipient_type: 'to' 收件人 / 'cc' 抄送人
+    inspect_type: 适用的检验工序，'全部' = 所有工序都发
+    同一邮箱可为不同工序分别配置角色，去重由唯一约束 (email, inspect_type) 兜底"""
     try:
         client = _get_client()
         _check_client(client)
         client.table("report_recipients").insert({
             "email": email.strip(),
             "recipient_type": 'cc' if recipient_type == 'cc' else 'to',
+            "inspect_type": inspect_type if inspect_type else '全部',
         }).execute()
         return True
     except Exception as e:

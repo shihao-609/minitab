@@ -8,7 +8,8 @@
   3. 回算「昨日未检验清单」（送检入库时间 ≤ 昨日 且 质检日期 ≤ 昨日的检验记录），
      对比出新增 / 已解决 / 持续三类变动 —— 无需任何额外存储
   4. 无未检验记录时直接退出（不发邮件）
-  5. 生成 Excel（未检验清单 + 变动摘要 两个 sheet），SMTP 发送给配置的收件人列表
+  5. 按检验工序分组，每个工序一封邮件（Excel 含未检验清单 + 变动摘要 两个 sheet），
+     分别发给该工序的收件人/抄送人（收件人可配置「全部」= 所有工序都收）
 
 运行环境变量：
   SUPABASE_URL                Supabase 项目地址
@@ -122,6 +123,31 @@ def _compare_all_types(sub_df, ins_df):
     return merged
 
 
+def _load_recipients():
+    """读取收件人配置（含适用工序 inspect_type）。
+    优先从前端维护的 report_recipients 表读取；表为空或读取失败时回退环境变量 REPORT_RECIPIENTS（视为全部工序）。
+    返回: [{'email', 'recipient_type', 'inspect_type'}, ...]
+    """
+    db_recipients = []
+    try:
+        for r in _load_all_rows('report_recipients'):
+            email = str(r.get('email', '')).strip()
+            if not email:
+                continue
+            db_recipients.append({
+                'email': email,
+                'recipient_type': 'cc' if str(r.get('recipient_type', '')).strip().lower() == 'cc' else 'to',
+                'inspect_type': str(r.get('inspect_type', '全部')).strip() or '全部',
+            })
+        print(f'[收件人] 从数据库读取配置 {len(db_recipients)} 条（含适用工序）')
+    except Exception as e:
+        print(f'[收件人] 读取数据库收件人表失败，回退到环境变量: {e}')
+    if db_recipients:
+        return db_recipients
+    env_to = [x.strip() for x in _get_env('REPORT_RECIPIENTS').split(',') if x.strip()]
+    return [{'email': e, 'recipient_type': 'to', 'inspect_type': '全部'} for e in env_to]
+
+
 def build_report():
     today, yesterday = _today_yesterday()
     print(f'[任务] 运行日期: {today}，回算基准日: {yesterday}')
@@ -159,110 +185,122 @@ def build_report():
         yesterday_unchecked = []
     print(f'[回算] 昨日未检验 {len(yesterday_unchecked)} 条')
 
-    # 4. 对比变动
-    today_keys = set(_identity_keys(today_unchecked))
-    yesterday_keys = set(_identity_keys(yesterday_unchecked))
-    added = today_keys - yesterday_keys
-    solved = yesterday_keys - today_keys
-    ongoing = today_keys & yesterday_keys
-
-    unchecked_out = today_unchecked.copy()
-    if len(unchecked_out) > 0:
-        keys = _identity_keys(unchecked_out)
-        unchecked_out.insert(0, '状态', [
-            '🆕 新增' if k in added else '持续未检验' for k in keys
-        ])
-
-    summary_rows = [
-        ('回算基准日', str(yesterday)),
-        ('昨日未检验', len(yesterday_keys)),
-        ('昨日未检验 → 今日已解决（说明昨日检验已完成）', len(solved)),
-        ('持续未检验（昨日至今仍未检验）', len(ongoing)),
-        ('今日新增未检验', len(added)),
-        ('今日未检验合计', len(today_keys)),
-    ]
-
-    if len(today_keys) == 0:
-        print('[跳过] 今日无未检验记录，不发邮件')
-        return None
-
-    # 5. 生成 Excel
-    buf = BytesIO()
-    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-        unchecked_out.to_excel(writer, index=False, sheet_name='未检验清单')
-        pd.DataFrame(summary_rows, columns=['指标', '数值']).to_excel(
-            writer, index=False, sheet_name='变动摘要')
-
-        # 表头加粗 + 红底高亮未检验清单
-        from openpyxl.styles import Font, PatternFill
-        wb = writer.book
-        for ws_name, n_rows in [('未检验清单', len(unchecked_out))]:
-            ws = wb[ws_name]
-            for cell in ws[1]:
-                cell.font = Font(bold=True)
-            if n_rows > 0:
-                red = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
-                for row in ws.iter_rows(min_row=2, max_row=n_rows + 1, min_col=1,
-                                        max_col=ws.max_column):
-                    for cell in row:
-                        cell.fill = red
-
-    filename = f'未检验清单_{today.isoformat()}.xlsx'
-    print(f'[输出] 生成 {filename}，未检验 {len(today_keys)} 条')
-
-    # 6. 发送邮件
-    # 收件人优先从前端维护的 report_recipients 表读取（区分收件人/抄送人），其次兜底环境变量
-    to_list, cc_list = [], []
-    try:
-        for r in _load_all_rows('report_recipients'):
-            email = str(r.get('email', '')).strip()
-            if not email:
-                continue
-            if str(r.get('recipient_type', '')).strip().lower() == 'cc':
-                cc_list.append(email)
-            else:
-                to_list.append(email)
-        print(f'[收件人] 从数据库读取收件人 {len(to_list)} 个，抄送人 {len(cc_list)} 个')
-    except Exception as e:
-        print(f'[收件人] 读取数据库收件人表失败，回退到环境变量: {e}')
-    if not to_list and not cc_list:
-        to_list = [x.strip() for x in _get_env('REPORT_RECIPIENTS').split(',') if x.strip()]
-    if not to_list:
+    # 4. 加载收件人配置（含适用工序），失败回退环境变量
+    recipients = _load_recipients()
+    if not recipients:
         raise RuntimeError('未配置收件人：请在前端「邮件收件人」页面添加收件人，或配置 REPORT_RECIPIENTS 环境变量')
     smtp_user = _get_env('SMTP_USER')
     smtp_pass = _get_env('SMTP_PASS')
     smtp_host = _get_env('SMTP_HOST', 'smtp.qq.com')
     smtp_port = int(_get_env('SMTP_PORT', '465'))
     from_name = _get_env('REPORT_FROM_NAME', '质量管理系统')
+    if not smtp_user or not smtp_pass:
+        raise RuntimeError('缺少 SMTP_USER 或 SMTP_PASS 环境变量')
 
-    msg = MIMEMultipart()
-    msg['From'] = f'{from_name} <{smtp_user}>'
-    msg['To'] = ', '.join(to_list)
-    if cc_list:
-        msg['Cc'] = ', '.join(cc_list)
-    msg['Subject'] = f'【未检验清单】{today.isoformat()} 共 {len(today_keys)} 条'
-    msg.attach(MIMEText('详见附件。', 'plain', 'utf-8'))
+    if len(today_unchecked) == 0:
+        print('[跳过] 今日无未检验记录，不发邮件')
+        return None
 
-    part = MIMEApplication(buf.getvalue(), _subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-    part.add_header('Content-Disposition', 'attachment', filename=('utf-8', '', filename))
-    msg.attach(part)
+    # 5. 按工序分组，每个工序一封邮件，分别发给该工序的收件人/抄送人
+    today_unchecked = today_unchecked.reset_index(drop=True)
+    yesterday_df = (yesterday_unchecked.reset_index(drop=True)
+                    if isinstance(yesterday_unchecked, pd.DataFrame) else pd.DataFrame(yesterday_unchecked))
 
-    smtp_recipients = to_list + cc_list
-    print(f'[邮件] 连接 {smtp_host}:{smtp_port} ...')
-    with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as server:
-        server.login(smtp_user, smtp_pass)
-        server.sendmail(smtp_user, smtp_recipients, msg.as_string())
-    cc_txt = f'，抄送 {len(cc_list)} 人' if cc_list else ''
-    print(f'[邮件] 已发送给 {len(to_list)} 个收件人{cc_txt}: {", ".join(smtp_recipients)}')
+    sent_emails, total_unchecked = [], 0
+    for t in sorted({str(x) for x in today_unchecked['检验类型'].astype(str)}):
+        t_unchecked = today_unchecked[today_unchecked['检验类型'].astype(str) == t].copy()
+        t_keys = set(_identity_keys(t_unchecked))
 
-    return {'filename': filename, 'unchecked_count': len(today_keys)}
+        # 该工序昨日未检验
+        t_yesterday_keys = set()
+        if len(yesterday_df) > 0 and '检验类型' in yesterday_df.columns:
+            t_yesterday_df = yesterday_df[yesterday_df['检验类型'].astype(str) == t]
+            t_yesterday_keys = set(_identity_keys(t_yesterday_df))
+        added = t_keys - t_yesterday_keys
+        solved = t_yesterday_keys - t_keys
+        ongoing = t_keys & t_yesterday_keys
+
+        t_unchecked.insert(0, '状态', [
+            '🆕 新增' if k in added else '持续未检验' for k in _identity_keys(t_unchecked)
+        ])
+
+        summary_rows = [
+            ('检验工序', t),
+            ('回算基准日', str(yesterday)),
+            ('昨日未检验（该工序）', len(t_yesterday_keys)),
+            ('昨日未检验 → 今日已解决', len(solved)),
+            ('持续未检验（昨日至今仍未检验）', len(ongoing)),
+            ('今日新增未检验', len(added)),
+            ('今日未检验合计', len(t_keys)),
+        ]
+
+        # 该工序的收件人 / 抄送人（"全部" = 所有工序都收）
+        to_list = [r['email'] for r in recipients
+                   if r['recipient_type'] == 'to' and r['inspect_type'] in ('全部', t)]
+        cc_list = [r['email'] for r in recipients
+                   if r['recipient_type'] == 'cc' and r['inspect_type'] in ('全部', t)]
+        if not to_list:
+            print(f'[跳过] 工序「{t}」有 {len(t_keys)} 条未检验，但未配置收件人（含全部），不发该工序邮件')
+            continue
+
+        # 生成该工序的 Excel
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+            t_unchecked.to_excel(writer, index=False, sheet_name='未检验清单')
+            pd.DataFrame(summary_rows, columns=['指标', '数值']).to_excel(
+                writer, index=False, sheet_name='变动摘要')
+
+            # 表头加粗 + 红底高亮未检验清单
+            from openpyxl.styles import Font, PatternFill
+            wb = writer.book
+            ws = wb['未检验清单']
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+            if len(t_unchecked) > 0:
+                red = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+                for row in ws.iter_rows(min_row=2, max_row=len(t_unchecked) + 1,
+                                        min_col=1, max_col=ws.max_column):
+                    for cell in row:
+                        cell.fill = red
+
+        filename = f'未检验清单_{t}_{today.isoformat()}.xlsx'
+        print(f'[输出] 工序「{t}」生成 {filename}，未检验 {len(t_keys)} 条')
+
+        # 发送
+        msg = MIMEMultipart()
+        msg['From'] = f'{from_name} <{smtp_user}>'
+        msg['To'] = ', '.join(to_list)
+        if cc_list:
+            msg['Cc'] = ', '.join(cc_list)
+        msg['Subject'] = f'【未检验清单·{t}】{today.isoformat()} 共 {len(t_keys)} 条'
+        msg.attach(MIMEText(f'「{t}」未检验清单详见附件。', 'plain', 'utf-8'))
+
+        part = MIMEApplication(buf.getvalue(), _subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        part.add_header('Content-Disposition', 'attachment', filename=('utf-8', '', filename))
+        msg.attach(part)
+
+        smtp_recipients = to_list + cc_list
+        print(f'[邮件] 工序「{t}」连接 {smtp_host}:{smtp_port} ...')
+        with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as server:
+            server.login(smtp_user, smtp_pass)
+            server.sendmail(smtp_user, smtp_recipients, msg.as_string())
+        cc_txt = f'，抄送 {len(cc_list)} 人' if cc_list else ''
+        print(f'[邮件] 工序「{t}」已发送给 {len(to_list)} 个收件人{cc_txt}: {", ".join(smtp_recipients)}')
+        sent_emails.append(filename)
+        total_unchecked += len(t_keys)
+
+    if not sent_emails:
+        print('[完成] 所有工序均未发送（未配置对应收件人，或没有未检验记录）')
+        return None
+    print(f'[完成] 共发送 {len(sent_emails)} 封邮件，合计未检验 {total_unchecked} 条')
+    return {'emails': sent_emails, 'unchecked_count': total_unchecked}
 
 
 def main():
     try:
         result = build_report()
         if result:
-            print(f'[完成] {result["filename"]} 已发送')
+            print(f'[完成] 共发送 {len(result["emails"])} 封邮件（未检验合计 {result["unchecked_count"]} 条）')
         else:
             print('[完成] 无需发送（未检验清单为空或没有送检记录）')
     except Exception as e:
