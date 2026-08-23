@@ -1119,12 +1119,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ins_records_dedup
 
 
 def ensure_inspect_type_columns() -> bool:
-    """检测两张表是否已有 inspect_type 列（老库需先执行迁移 SQL）"""
+    """检测两张表是否已有 inspect_type / dedup_key 列（老库需先执行迁移 SQL）"""
     try:
         client = _get_client()
         _check_client(client)
-        client.table("inspection_submissions").select("inspect_type").limit(1).execute()
-        client.table("inspection_records").select("inspect_type").limit(1).execute()
+        client.table("inspection_submissions").select("inspect_type,dedup_key").limit(1).execute()
+        client.table("inspection_records").select("inspect_type,dedup_key").limit(1).execute()
         return True
     except Exception:
         return False
