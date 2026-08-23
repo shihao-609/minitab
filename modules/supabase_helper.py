@@ -632,6 +632,7 @@ CREATE TABLE IF NOT EXISTS inspection_submissions (
     material_name TEXT DEFAULT '',
     received_date DATE,
     received_qty NUMERIC,
+    inspect_type TEXT NOT NULL DEFAULT '来料检',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -656,9 +657,9 @@ CREATE POLICY "Users can delete own inspections"
     ON inspection_submissions FOR DELETE
     USING (auth.uid() = user_id);
 
--- 5. 唯一索引：按五元组去重（供应商+物料编码+规格型号+物料名称+实收数量，日期不参与）
+-- 5. 唯一索引：按类型+五元组去重（检验类型+供应商+物料编码+规格型号+物料名称+实收数量，日期不参与）
 CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_dedup
-    ON inspection_submissions(user_id, supplier, material_code, spec, material_name, received_qty);
+    ON inspection_submissions(user_id, inspect_type, supplier, material_code, spec, material_name, received_qty);
 
 -- 6. 常用查询索引
 CREATE INDEX IF NOT EXISTS idx_inspection_user_date
@@ -677,7 +678,7 @@ DECLARE
 BEGIN
     FOR r IN SELECT * FROM jsonb_array_elements(p_rows) LOOP
         INSERT INTO inspection_submissions
-            (user_id, supplier, material_code, spec, material_name, received_date, received_qty)
+            (user_id, supplier, material_code, spec, material_name, received_date, received_qty, inspect_type)
         VALUES
             (auth.uid(),
              COALESCE(r->>'supplier', ''),
@@ -685,8 +686,9 @@ BEGIN
              COALESCE(r->>'spec', ''),
              COALESCE(r->>'material_name', ''),
              NULLIF(r->>'received_date', '')::date,
-             (r->>'received_qty')::numeric)
-        ON CONFLICT (user_id, supplier, material_code, spec, material_name, received_qty)
+             (r->>'received_qty')::numeric,
+             COALESCE(NULLIF(r->>'inspect_type', ''), '来料检'))
+        ON CONFLICT (user_id, inspect_type, supplier, material_code, spec, material_name, received_qty)
         DO NOTHING;
         IF FOUND THEN
             inserted := inserted + 1;
@@ -733,9 +735,9 @@ def list_inspection_submissions(limit: int = None) -> list:
 
 @_with_retry
 def _do_fetch_submission_keys(client):
-    """只拉取五元组去重键列（不含日期、数量以外字段），用于导入预览去重"""
+    """只拉取类型+五元组去重键列（不含日期、数量以外字段），用于导入预览去重"""
     return client.table("inspection_submissions").select(
-        "supplier,material_code,spec,material_name,received_qty"
+        "inspect_type,supplier,material_code,spec,material_name,received_qty"
     ).execute()
 
 
@@ -753,9 +755,9 @@ def fetch_submission_keys() -> list:
 
 @_with_retry
 def _do_fetch_submission_records(client):
-    """只拉取对比所需的 6 个业务列（不含 id / created_at）"""
+    """只拉取对比所需的业务列（不含 id / created_at）"""
     return client.table("inspection_submissions").select(
-        "supplier,material_code,spec,material_name,received_date,received_qty"
+        "inspect_type,supplier,material_code,spec,material_name,received_date,received_qty"
     ).order("received_date", desc=True).order("created_at", desc=True).execute()
 
 
@@ -920,6 +922,7 @@ CREATE TABLE IF NOT EXISTS inspection_records (
     inspector TEXT DEFAULT '',
     batch_no TEXT DEFAULT '',
     category TEXT DEFAULT '',
+    inspect_type TEXT NOT NULL DEFAULT '来料检',
     source_file TEXT DEFAULT '',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -942,9 +945,9 @@ CREATE POLICY "Users can delete own ins_records"
     ON inspection_records FOR DELETE
     USING (auth.uid() = user_id);
 
--- 去重索引（单据编号+供应商+编码+规格+名称+质检日期+检验数量；日期/数量为空时用哨兵值）
+-- 去重索引（检验类型+单据编号+供应商+编码+规格+名称+质检日期+检验数量；日期/数量为空时用哨兵值）
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ins_records_dedup
-    ON inspection_records(user_id, doc_no, supplier, material_code, spec, material_name,
+    ON inspection_records(user_id, inspect_type, doc_no, supplier, material_code, spec, material_name,
                           COALESCE(inspect_date, '1970-01-01'::date),
                           COALESCE(inspect_qty, -1));
 
@@ -965,7 +968,7 @@ BEGIN
         INSERT INTO inspection_records
             (user_id, doc_no, supplier, material_code, spec, material_name,
              inspect_date, inspect_qty, qualified_qty, unqualified_qty,
-             result, inspector, batch_no, category, source_file)
+             result, inspector, batch_no, category, inspect_type, source_file)
         VALUES
             (auth.uid(),
              COALESCE(r->>'doc_no', ''),
@@ -981,8 +984,9 @@ BEGIN
              COALESCE(r->>'inspector', ''),
              COALESCE(r->>'batch_no', ''),
              COALESCE(r->>'category', ''),
+             COALESCE(NULLIF(r->>'inspect_type', ''), '来料检'),
              COALESCE(r->>'source_file', ''))
-        ON CONFLICT (user_id, doc_no, supplier, material_code, spec, material_name,
+        ON CONFLICT (user_id, inspect_type, doc_no, supplier, material_code, spec, material_name,
                      COALESCE(inspect_date, '1970-01-01'::date),
                      COALESCE(inspect_qty, -1))
         DO NOTHING;
@@ -1035,6 +1039,38 @@ CREATE POLICY "All auth can view report_recipients"
 CREATE POLICY "All auth can manage report_recipients"
     ON report_recipients FOR ALL TO authenticated USING (true) WITH CHECK (true);
 """
+
+
+def get_inspect_type_migration_sql() -> str:
+    """老表迁移 SQL：为送检表/检验记录表补充 inspect_type 字段并重建去重索引（幂等，可重复执行）"""
+    return """
+-- ============ 检验类型字段迁移（来料检/过程检/出货检…） ============
+-- 1. 两张表补充 inspect_type 列（老数据默认「来料检」）
+ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
+ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
+
+-- 2. 重建去重索引，把检验类型纳入（避免跨工序互相覆盖）
+DROP INDEX IF EXISTS idx_inspection_dedup;
+DROP INDEX IF EXISTS idx_ins_records_dedup;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_dedup
+    ON inspection_submissions(user_id, inspect_type, supplier, material_code, spec, material_name, received_qty);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ins_records_dedup
+    ON inspection_records(user_id, inspect_type, doc_no, supplier, material_code, spec, material_name,
+                          COALESCE(inspect_date, '1970-01-01'::date),
+                          COALESCE(inspect_qty, -1));
+"""
+
+
+def ensure_inspect_type_columns() -> bool:
+    """检测两张表是否已有 inspect_type 列（老库需先执行迁移 SQL）"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("inspection_submissions").select("inspect_type").limit(1).execute()
+        client.table("inspection_records").select("inspect_type").limit(1).execute()
+        return True
+    except Exception:
+        return False
 
 
 def ensure_inspection_records_table() -> bool:
@@ -1100,7 +1136,7 @@ def _do_fetch_inspection_records(client):
     """只拉取对账所需的业务列（不含 id / created_at）"""
     return client.table("inspection_records").select(
         "doc_no,supplier,material_code,spec,material_name,inspect_date,"
-        "inspect_qty,qualified_qty,unqualified_qty,result,inspector,batch_no,category"
+        "inspect_qty,qualified_qty,unqualified_qty,result,inspector,batch_no,category,inspect_type"
     ).order("inspect_date", desc=True).order("created_at", desc=True).execute()
 
 

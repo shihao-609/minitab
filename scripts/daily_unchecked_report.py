@@ -74,13 +74,52 @@ def _today_yesterday():
 
 
 def _identity_keys(rows):
-    """按五元组生成每条记录的身份键（与入库唯一索引一致），支持 DataFrame 或空列表"""
+    """按 检验类型+五元组 生成身份键（与入库唯一索引一致），支持 DataFrame 或空列表"""
     if rows is None or len(rows) == 0:
         return []
     df = rows if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
-    return (df['供应商'].astype(str) + '|' + df['物料编码'].astype(str) + '|'
+    t = df['检验类型'].astype(str) if '检验类型' in df.columns else '来料检'
+    return (t + '|' + df['供应商'].astype(str) + '|' + df['物料编码'].astype(str) + '|'
             + df['规格型号'].astype(str) + '|' + df['物料名称'].astype(str) + '|'
             + df['实收数量'].astype(str)).tolist()
+
+
+def _compare_all_types(sub_df, ins_df):
+    """按检验类型分组分别比对再合并，避免跨工序互相匹配（如来料检/过程检）"""
+    sub_types = (sorted({str(x) for x in sub_df['检验类型'].astype(str)})
+                 if '检验类型' in sub_df.columns and len(sub_df) else ['来料检'])
+    ins_types = (sorted({str(x) for x in ins_df['检验类型'].astype(str)})
+                 if '检验类型' in ins_df.columns and len(ins_df) else ['来料检'])
+    all_types = sorted(set(sub_types) | set(ins_types)) or ['来料检']
+
+    results, checked, unchecked, extra, mismatch_sub, mismatch_ins = [], [], [], [], [], []
+    for t in all_types:
+        res = inspection_match.compare(sub_df, ins_df, inspect_type=t)
+        results.append(res)
+        checked.append(res['checked'])
+        unchecked.append(res['unchecked'])
+        extra.append(res['extra'])
+        mismatch_sub.append(res['name_mismatch']['sub'])
+        mismatch_ins.append(res['name_mismatch']['ins'])
+
+    def _concat(dfs):
+        dfs = [d for d in dfs if d is not None and len(d) > 0]
+        return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+    merged = {
+        'checked': _concat(checked),
+        'unchecked': _concat(unchecked),
+        'extra': _concat(extra),
+        'name_mismatch': {'sub': _concat(mismatch_sub), 'ins': _concat(mismatch_ins)},
+        'summary': {
+            'total_sub': int(sum(r['summary']['total_sub'] for r in results)),
+            'checked': int(sum(len(r['checked']) for r in results)),
+            'unchecked': int(sum(len(r['unchecked']) for r in results)),
+            'name_mismatch': int(sum(len(r['name_mismatch']['sub']) for r in results)),
+            'extra': int(sum(len(r['extra']) for r in results)),
+        },
+    }
+    return merged
 
 
 def build_report():
@@ -98,8 +137,8 @@ def build_report():
     sub_df = inspection_match.submissions_to_df(sub_records)
     ins_df = inspection_match.inspection_records_to_df(ins_records)
 
-    # 2. 今日未检验清单（当前全量数据）
-    today_res = inspection_match.compare(sub_df, ins_df)
+    # 2. 今日未检验清单（当前全量数据，按检验类型分组比对后合并）
+    today_res = _compare_all_types(sub_df, ins_df)
     today_unchecked = today_res['unchecked']
     print(f'[比对] 今日未检验 {len(today_unchecked)} 条，已检验 {len(today_res["checked"])} 条，'
           f'额外检验 {len(today_res["extra"])} 条，名称不一致 {len(today_res["name_mismatch"]["sub"])} 条')
@@ -114,7 +153,7 @@ def build_report():
     print(f'[回算] 昨日截止送检 {len(sub_yesterday)} 条，昨日截止检验 {len(ins_yesterday)} 条')
 
     if len(sub_yesterday) > 0:
-        yesterday_res = inspection_match.compare(sub_yesterday, ins_yesterday)
+        yesterday_res = _compare_all_types(sub_yesterday, ins_yesterday)
         yesterday_unchecked = yesterday_res['unchecked']
     else:
         yesterday_unchecked = []

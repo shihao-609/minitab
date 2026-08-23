@@ -249,13 +249,15 @@ def parse_sheet(uploaded_file, kind='submission', default_date=None):
 # ==================== 幂等去重入库 ====================
 
 def _dedup_key(row):
-    return (row['供应商'], row['物料编码'], row['规格型号'], row['物料名称'], row['实收数量'])
+    return (row.get('检验类型', '来料检'), row['供应商'], row['物料编码'],
+            row['规格型号'], row['物料名称'], row['实收数量'])
 
 
 def _existing_keys(records):
     keys = set()
     for r in records:
         keys.add((
+            _clean_text(r.get('inspect_type')) or '来料检',
             _clean_text(r.get('supplier')),
             _normalize_code(r.get('material_code')),
             _clean_text(r.get('spec')),
@@ -265,31 +267,27 @@ def _existing_keys(records):
     return keys
 
 
-def preview_import(df, records=None):
+def preview_import(df, records=None, inspect_type='来料检'):
     """
-    返回 (新增记录 df, 重复记录 df)。去重键为五元组，不含日期。
+    返回 (新增记录 df, 重复记录 df)。去重键为 检验类型+五元组，不含日期。
 
-    records 为空时走轻量查询（只拉取五元组键列），避免全量 SELECT *。
+    records 为空时走轻量查询（只拉取键列），避免全量 SELECT *。
     """
     if records is None:
         records = supabase_helper.fetch_submission_keys()
     keys = _existing_keys(records)
 
-    # 向量化生成去重键，比 iterrows 快一个数量级
-    key_cols = ['供应商', '物料编码', '规格型号', '物料名称', '实收数量']
+    df = df.copy()
+    df['检验类型'] = inspect_type
 
-    def _key(row):
-        return (row['供应商'], row['物料编码'], row['规格型号'],
-                row['物料名称'], row['实收数量'])
-
-    key_series = df[key_cols].apply(_key, axis=1)
+    key_series = df.apply(_dedup_key, axis=1)
     is_new = ~key_series.isin(keys)
     return df[is_new].reset_index(drop=True), df[~is_new].reset_index(drop=True)
 
 
-def import_submissions(df, progress=None, batch_size=1000):
+def import_submissions(df, progress=None, batch_size=1000, inspect_type='来料检'):
     """
-    幂等入库：收料日期保持 Excel 原样（为空则入库为空）；五元组重复的跳过。
+    幂等入库：收料日期保持 Excel 原样（为空则入库为空）；类型+五元组重复的跳过。
     返回 (插入数, 重复数, 新增行数)
 
     progress: 可选回调 progress(done, total)
@@ -308,6 +306,7 @@ def import_submissions(df, progress=None, batch_size=1000):
             'material_name': row['物料名称'],
             'received_date': d.isoformat() if isinstance(d, (date, datetime)) else None,
             'received_qty': row['实收数量'],
+            'inspect_type': inspect_type,
         })
 
     inserted = 0
@@ -323,8 +322,9 @@ def import_submissions(df, progress=None, batch_size=1000):
 
 
 def submissions_to_df(records):
-    """数据库记录 → 展示用 DataFrame（6 标准列 + 入库时间 + id）"""
+    """数据库记录 → 展示用 DataFrame（检验类型 + 6 标准列 + 入库时间 + id）"""
     rows = [{
+        '检验类型': _clean_text(r.get('inspect_type')) or '来料检',
         '供应商': _clean_text(r.get('supplier')),
         '物料编码': _normalize_code(r.get('material_code')),
         '规格型号': _clean_text(r.get('spec')),
@@ -334,7 +334,7 @@ def submissions_to_df(records):
         '入库时间': str(r.get('created_at', ''))[:19],
         'id': r.get('id'),
     } for r in records]
-    return pd.DataFrame(rows, columns=['供应商', '物料编码', '规格型号', '物料名称',
+    return pd.DataFrame(rows, columns=['检验类型', '供应商', '物料编码', '规格型号', '物料名称',
                                        '收料日期', '实收数量', '入库时间', 'id'])
 
 
@@ -359,11 +359,15 @@ def _date_ge(ins_date, sub_date):
 
 
 def _sub_dict(row):
-    return {c: row[c] for c in SUBMISSION_COLS}
+    d = {c: row[c] for c in SUBMISSION_COLS}
+    d['检验类型'] = row.get('检验类型', '来料检')
+    return d
 
 
 def _ins_dict(row):
-    return {c: row[c] for c in INSPECTION_COLS}
+    d = {c: row[c] for c in INSPECTION_COLS}
+    d['检验类型'] = row.get('检验类型', '来料检')
+    return d
 
 
 def _diff_fields(sub, ins, use_norm_supplier=True):
@@ -389,7 +393,7 @@ def _diff_fields(sub, ins, use_norm_supplier=True):
     return '；'.join(diffs)
 
 
-def compare(sub_df, ins_df, progress=None, normalize_suppliers=True):
+def compare(sub_df, ins_df, progress=None, normalize_suppliers=True, inspect_type=None):
     """
     核心对比。逐批次严格匹配，返回四分类结果 dict：
       checked           ✅ 已检验（附匹配的检验记录摘要）
@@ -399,10 +403,18 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True):
       summary           各分类计数
 
     normalize_suppliers: 开启后自动识别同一供应商的不同写法（默认开启）。
+    inspect_type: 指定检验类型（如 '来料检'）时只比对该类型的送检/检验记录，
+                  避免跨工序互相匹配；None 表示全量比对。
     progress: 可选回调 progress(done, total)
     """
     sub_df = sub_df.reset_index(drop=True)
     ins_df = ins_df.reset_index(drop=True)
+
+    if inspect_type:
+        if '检验类型' in sub_df.columns:
+            sub_df = sub_df[sub_df['检验类型'] == inspect_type].reset_index(drop=True)
+        if '检验类型' in ins_df.columns:
+            ins_df = ins_df[ins_df['检验类型'] == inspect_type].reset_index(drop=True)
 
     def _norm_sup(name):
         return normalize_supplier(name) if normalize_suppliers else _clean_text(name)
@@ -412,6 +424,7 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True):
     for r in sub_df.to_dict('records'):
         sup = _clean_text(r['供应商'])
         subs.append({
+            '检验类型': _clean_text(r.get('检验类型', '来料检')) or '来料检',
             '供应商': sup,
             '_sup_norm': _norm_sup(sup),
             '物料编码': _normalize_code(r['物料编码']),
@@ -425,6 +438,7 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True):
     for r in ins_df.to_dict('records'):
         sup = _clean_text(r['供应商'])
         ins_rows.append({
+            '检验类型': _clean_text(r.get('检验类型', '来料检')) or '来料检',
             '供应商': sup,
             '_sup_norm': _norm_sup(sup),
             '物料编码': _normalize_code(r['物料编码']),
@@ -557,11 +571,11 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True):
             note = f"{note}；{dup_tip}" if note else dup_tip
         extra.append({**_ins_dict(irow), '备注': note})
 
-    checked_df = pd.DataFrame(checked, columns=SUBMISSION_COLS + ['匹配检验记录'])
-    unchecked_df = pd.DataFrame(unchecked, columns=SUBMISSION_COLS + ['未匹配原因'])
-    extra_df = pd.DataFrame(extra, columns=INSPECTION_COLS + ['备注'])
-    mismatch_sub_df = pd.DataFrame(name_mismatch_sub, columns=SUBMISSION_COLS)
-    mismatch_ins_df = pd.DataFrame(name_mismatch_ins, columns=INSPECTION_COLS + ['对应送检编码'])
+    checked_df = pd.DataFrame(checked, columns=SUBMISSION_COLS + ['检验类型', '匹配检验记录'])
+    unchecked_df = pd.DataFrame(unchecked, columns=SUBMISSION_COLS + ['检验类型', '未匹配原因'])
+    extra_df = pd.DataFrame(extra, columns=INSPECTION_COLS + ['检验类型', '备注'])
+    mismatch_sub_df = pd.DataFrame(name_mismatch_sub, columns=SUBMISSION_COLS + ['检验类型'])
+    mismatch_ins_df = pd.DataFrame(name_mismatch_ins, columns=INSPECTION_COLS + ['检验类型', '对应送检编码'])
 
     summary = {
         'total_sub': total_sub,
@@ -687,9 +701,10 @@ def parse_inspection_full(uploaded_file):
     return df
 
 
-def import_inspection_records(df, progress=None, batch_size=1000, source_file=''):
+def import_inspection_records(df, progress=None, batch_size=1000, source_file='',
+                              inspect_type='来料检'):
     """
-    幂等入库：检验记录持久化（单据编号+供应商+编码+规格+名称+质检日期+数量 去重）。
+    幂等入库：检验记录持久化（类型+单据编号+供应商+编码+规格+名称+质检日期+数量 去重）。
     返回 (插入数, 跳过数, 总行数)
     """
     df = df.copy()
@@ -711,6 +726,7 @@ def import_inspection_records(df, progress=None, batch_size=1000, source_file=''
             'inspector': row.get('质检员', '') or '',
             'batch_no': row.get('批号', '') or '',
             'category': row.get('类别', '') or '',
+            'inspect_type': inspect_type,
             'source_file': source_file,
         })
 
@@ -727,8 +743,9 @@ def import_inspection_records(df, progress=None, batch_size=1000, source_file=''
 
 
 def inspection_records_to_df(records):
-    """数据库检验记录 → 展示/比对用 DataFrame（6 标准列 + 扩展列 + 入库时间 + id）"""
+    """数据库检验记录 → 展示/比对用 DataFrame（检验类型 + 6 标准列 + 扩展列 + 入库时间 + id）"""
     rows = [{
+        '检验类型': _clean_text(r.get('inspect_type')) or '来料检',
         '供应商': _clean_text(r.get('supplier')),
         '物料编码': _normalize_code(r.get('material_code')),
         '规格型号': _clean_text(r.get('spec')),
@@ -745,6 +762,6 @@ def inspection_records_to_df(records):
         '入库时间': str(r.get('created_at', ''))[:19],
         'id': r.get('id'),
     } for r in records]
-    cols = ['供应商', '物料编码', '规格型号', '物料名称', '质检日期', '检验数量',
+    cols = ['检验类型', '供应商', '物料编码', '规格型号', '物料名称', '质检日期', '检验数量',
             '单据编号', '合格数', '不合格数', '检验结果', '质检员', '批号', '类别', '入库时间', 'id']
     return pd.DataFrame(rows, columns=cols)

@@ -2873,6 +2873,10 @@ def page_batch_analysis():
 
 # ==================== 送检/检验对比 ====================
 
+# 可扩展的检验工序类型（新增工序只需在列表加一项，数据/比对/邮件天然按类型隔离）
+INSPECT_TYPES = ['来料检', '过程检', '出货检', '首件检', '巡检', '其他']
+
+
 def _load_sub_records():
     recs = st.session_state.get('_sub_records')
     if recs is None:
@@ -2927,15 +2931,19 @@ def _render_submission_tab():
 
     st.divider()
 
+    inspect_type = st.selectbox('🧪 检验类型（这批复检属于哪个工序）', INSPECT_TYPES, index=0,
+                                key='sub_inspect_type',
+                                help='送检单按检验工序分类存储与去重，同一物料可在不同工序分别送检')
     uploaded = st.file_uploader(
         '📤 上传送检清单 Excel（列：供应商 / 物料编码 / 规格型号 / 物料名称 / 收料日期 / 实收数量）',
         type=['xlsx', 'xls'], key='sub_upload',
-        help='收料日期按 Excel 原样保存，留空则保持为空；重复记录（供应商+物料编码+规格型号+物料名称+实收数量一致）不会重复入库')
+        help='收料日期按 Excel 原样保存，留空则保持为空；重复记录（检验类型+供应商+物料编码+规格型号+物料名称+实收数量一致）不会重复入库')
     if uploaded is not None:
         # 用文件 ID 判断是否新文件：避免每次 rerun 重新解析/查库
         fid = getattr(uploaded, 'file_id', None) or (uploaded.name, uploaded.size)
-        if st.session_state.get('_sub_fid') != fid:
+        if st.session_state.get('_sub_fid') != fid or st.session_state.get('_sub_type') != inspect_type:
             st.session_state._sub_fid = fid
+            st.session_state._sub_type = inspect_type
             st.session_state._sub_parse_err = None
             st.session_state._sub_df = None
             st.session_state._sub_preview = None
@@ -2947,7 +2955,7 @@ def _render_submission_tab():
             else:
                 with st.spinner('正在检查重复记录...'):
                     t0 = time.monotonic()
-                    new_df, dup_df = inspection_match.preview_import(df)
+                    new_df, dup_df = inspection_match.preview_import(df, inspect_type=inspect_type)
                     preview_dt = time.monotonic() - t0
                 st.session_state._sub_df = df
                 st.session_state._sub_preview = (new_df, dup_df, preview_dt)
@@ -2971,7 +2979,9 @@ def _render_submission_tab():
                 progress_bar.progress(pct)
                 st.info(f'正在写入数据库... {done}/{total}')
 
-            inserted, skipped, _ = inspection_match.import_submissions(df, progress=_update, batch_size=1000)
+            inserted, skipped, _ = inspection_match.import_submissions(
+                df, progress=_update, batch_size=1000,
+                inspect_type=st.session_state.get('_sub_type', '来料检'))
             dt = time.monotonic() - t0
             progress_bar.empty()
             if inserted > 0:
@@ -3031,6 +3041,10 @@ def _render_compare_tab():
         ins_db_ok = supabase_helper.ensure_inspection_records_table()
         st.session_state._ins_db_ok = ins_db_ok
 
+    inspect_type = st.selectbox('🧪 检验类型（本次比对的工序）', INSPECT_TYPES, index=0,
+                                key='ins_inspect_type',
+                                help='只会拿「同一检验类型」的送检单和检验单做比对，不同工序互不干扰')
+
     uploaded = st.file_uploader(
         '📤 上传检验清单 Excel（列：供应商 / 物料编码 / 规格型号 / 物料名称 / 质检日期 / 检验数量）',
         type=['xlsx', 'xls'], key='ins_upload',
@@ -3038,7 +3052,8 @@ def _render_compare_tab():
     if uploaded is not None:
         # 文件 ID 判断是否新文件：避免每次 rerun 重复解析
         fid = getattr(uploaded, 'file_id', None) or (uploaded.name, uploaded.size)
-        if st.session_state.get('_ins_fid') != fid:
+        if st.session_state.get('_ins_fid') != fid or st.session_state.get('_ins_type') != inspect_type:
+            st.session_state._ins_type = inspect_type
             st.session_state._ins_fid = fid
             st.session_state._ins_parse_err = None
             st.session_state._ins_df = None
@@ -3048,6 +3063,8 @@ def _render_compare_tab():
             except Exception as e:
                 st.session_state._ins_parse_err = str(e)
             else:
+                ins_df = ins_df.copy()
+                ins_df['检验类型'] = inspect_type
                 st.session_state._ins_df = ins_df
 
     if st.session_state.get('_ins_parse_err'):
@@ -3083,7 +3100,7 @@ def _render_compare_tab():
             # 1) 检验记录入库
             if store_cb and ins_db_ok:
                 inserted, skipped, _total = inspection_match.import_inspection_records(
-                    ins_df, source_file=getattr(uploaded, 'name', ''))
+                    ins_df, source_file=getattr(uploaded, 'name', ''), inspect_type=inspect_type)
                 st.info(f'📥 检验记录入库：新增 {inserted} 条，跳过重复 {skipped} 条')
 
             # 2) 组装对账数据源
@@ -3098,7 +3115,8 @@ def _render_compare_tab():
                         ins_src = pd.concat([ins_df, db_df], ignore_index=True).drop_duplicates()
                     st.info(f'📚 跨窗口对账：共使用 {len(ins_src)} 条检验记录（含历史入库）')
 
-            result = inspection_match.compare(sub_df, ins_src, progress=_update)
+            result = inspection_match.compare(sub_df, ins_src, progress=_update,
+                                              inspect_type=inspect_type)
             dt = time.monotonic() - t0
             progress_bar.empty()
             st.session_state.inspection_match_result = result
@@ -3198,7 +3216,7 @@ def _render_inspection_records_tab():
         st.info('暂无检验记录')
         return
     df = inspection_match.inspection_records_to_df(records)
-    show_cols = ['单据编号', '供应商', '物料编码', '物料名称', '质检日期', '检验数量',
+    show_cols = ['检验类型', '单据编号', '供应商', '物料编码', '物料名称', '质检日期', '检验数量',
                  '合格数', '不合格数', '检验结果', '质检员', '批号', '类别', '入库时间']
     st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
 
@@ -3319,6 +3337,12 @@ def _render_report_recipients_tab():
 def page_inspection_match():
     st.header('🔍 送检清单 vs 检验清单')
     st.caption('上传送检清单持久化保存，上传检验清单进行对比，找出未检验物料')
+
+    if not supabase_helper.ensure_inspect_type_columns():
+        st.warning('⚠️ 检测到数据库缺少「检验类型」字段（老库升级）。请先在 Supabase SQL Editor 执行下方迁移 SQL，'
+                   '否则上传 / 比对 / 自动邮件会报错：')
+        st.code(supabase_helper.get_inspect_type_migration_sql(), language='sql')
+        st.divider()
 
     # 本页面所有 session_state key 统一初始化，避免分支遗漏
     st.session_state.setdefault('inspection_match_result', None)
