@@ -97,18 +97,19 @@ def get_user_jwt() -> Optional[str]:
 def get_authenticated_client() -> Optional[Client]:
     """
     获取使用用户 JWT 的 Supabase 客户端（已认证）
-    
-    与以往的 anon key 客户端不同：
-    - anon key 客户端：匿名访问，RLS 策略无法识别用户
-    - JWT 客户端：携带用户身份，RLS 策略可正确过滤数据
-    
-    注意：JWT 默认约 1 小时过期。直接把 JWT 当 API key 传入时，
-    supabase-py 不会自动刷新（没有 refresh_token 机制）。
-    因此这里先检查过期时间，快过期时用 refresh_token 手动刷新，
-    并把新会话写回 session_state，再创建客户端。
-    """
-    import time
 
+    正确做法：以 anon key 创建客户端（apikey 合法），再用
+    set_session(access_token, refresh_token) 注入用户 JWT。
+
+    注意：不能把 JWT 直接当 key 传给 create_client —— supabase-py 2.x
+    会把 JWT 原样放进 apikey header，被网关当作 Invalid API key 拒绝
+    （已在本项目本地实测复现：T2 与云端报错一字不差）。
+
+    set_session 行为（supabase_auth 2.x 源码确认）：
+      - token 未过期：调 /auth/v1/user 校验并保存会话
+      - token 已过期：用 refresh_token 自动刷新
+    若校验/刷新失败则返回 None，上层提示重新登录。
+    """
     session = st.session_state.session
     if not session:
         st.session_state.auth_error = "会话数据缺失，请重新登录"
@@ -117,36 +118,26 @@ def get_authenticated_client() -> Optional[Client]:
     if not access_token:
         st.session_state.auth_error = "会话缺少访问令牌，请重新登录"
         return None
-    url = _get_supabase_url()
-    if not url:
-        st.session_state.auth_error = "SUPABASE_URL 未配置"
+    refresh_token = getattr(session, "refresh_token", None)
+    if not refresh_token:
+        st.session_state.auth_error = "会话缺少刷新令牌，请重新登录"
         return None
-
-    expires_at = getattr(session, "expires_at", None)
-    if expires_at and time.time() > float(expires_at) - 60:
-        # access token 即将/已经过期 → 用 refresh_token 刷新
-        refresh_token = getattr(session, "refresh_token", None)
-        anon = get_anon_client()
-        if not refresh_token or anon is None:
-            st.session_state.auth_error = "会话缺少刷新令牌或匿名客户端不可用，请重新登录"
-            return None
-        try:
-            resp = anon.auth.refresh_session(refresh_token)
-            new_session = getattr(resp, "session", None)
-            if not new_session:
-                st.session_state.auth_error = "登录会话已过期，请重新登录"
-                return None
+    anon = get_anon_client()
+    if anon is None:
+        st.session_state.auth_error = "匿名客户端不可用（检查 SUPABASE_URL / SUPABASE_ANON_KEY）"
+        return None
+    try:
+        resp = anon.auth.set_session(access_token, refresh_token)
+        new_session = getattr(resp, "session", None)
+        if new_session is not None:
+            # set_session 内部可能已刷新出全新 token，同步回 session_state
             st.session_state.session = new_session
             st.session_state.user = getattr(new_session, "user", None)
-            session = new_session
-            access_token = getattr(new_session, "access_token", None)
-        except Exception as e:
-            st.session_state.auth_error = f"登录会话刷新失败: {e}"
-            return None
-
-    if not access_token:
+            st.session_state.auth_error = None
+        return anon
+    except Exception as e:
+        st.session_state.auth_error = f"登录会话无效或已过期，请重新登录（{e}）"
         return None
-    return create_client(url, access_token)
 
 
 # ==================== 认证操作 ====================
