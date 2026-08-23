@@ -1014,6 +1014,24 @@ CREATE POLICY "All auth can view supplier_aliases"
 
 CREATE POLICY "All auth can manage supplier_aliases"
     ON supplier_aliases FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+-- ============ 未检验清单邮件收件人表（团队共享，页面可维护） ============
+CREATE TABLE IF NOT EXISTS report_recipients (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE report_recipients ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "All auth can view report_recipients" ON report_recipients;
+DROP POLICY IF EXISTS "All auth can manage report_recipients" ON report_recipients;
+
+CREATE POLICY "All auth can view report_recipients"
+    ON report_recipients FOR SELECT TO authenticated USING (true);
+
+CREATE POLICY "All auth can manage report_recipients"
+    ON report_recipients FOR ALL TO authenticated USING (true) WITH CHECK (true);
 """
 
 
@@ -1250,4 +1268,55 @@ def delete_supplier_alias(alias: str) -> bool:
         return True
     except Exception as e:
         st.error(f"删除供应商别名失败: {e}")
+        return False
+
+
+# ==================== 邮件收件人 CRUD ====================
+
+def ensure_report_recipients_table() -> bool:
+    """检测 report_recipients 表是否存在"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("report_recipients").select("id").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def list_report_recipients() -> list:
+    """列出全部邮件收件人（团队共享）"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        result = client.table("report_recipients").select("*").order("created_at", desc=True).execute()
+        return result.data
+    except Exception as e:
+        st.error(f"获取收件人列表失败: {e}")
+        return []
+
+
+def add_report_recipient(email: str) -> bool:
+    """新增收件人邮箱（去重由唯一索引兜底）"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("report_recipients").insert({
+            "email": email.strip(),
+        }).execute()
+        return True
+    except Exception as e:
+        st.error(f"新增收件人失败: {e}")
+        return False
+
+
+def delete_report_recipient(rid: str) -> bool:
+    """按 id 删除收件人"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("report_recipients").delete().eq("id", rid).execute()
+        return True
+    except Exception as e:
+        st.error(f"删除收件人失败: {e}")
         return False

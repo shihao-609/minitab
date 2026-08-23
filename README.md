@@ -64,7 +64,7 @@ streamlit run app.py
 | `SUPABASE_SERVICE_ROLE_KEY` | 服务端密钥（Supabase → Settings → API） | `eyJ...` |
 | `SMTP_USER` | 发件邮箱（QQ 邮箱） | `123456@qq.com` |
 | `SMTP_PASS` | 发件邮箱**授权码**（非登录密码） | `abcdefghijklmnop` |
-| `REPORT_RECIPIENTS` | 收件人邮箱，**多个用英文逗号分隔** | `a@qq.com,b@163.com` |
+| `REPORT_RECIPIENTS` | （可选兜底）收件人邮箱，多个用英文逗号分隔；配置了前端收件人后无需此 Secret | `a@qq.com,b@163.com` |
 
 ### QQ 邮箱授权码获取
 
@@ -73,9 +73,11 @@ streamlit run app.py
 3. 开启「IMAP/SMTP 服务」，按提示发送短信验证
 4. 生成 16 位**授权码**，填入 `SMTP_PASS`
 
-### 收件人修改
+### 收件人修改（推荐在前端操作）
 
-编辑 `REPORT_RECIPIENTS` 这个 Secret，用英文逗号分隔多个邮箱即可，无需改代码。
+应用「数据导入」页 → **📮 邮件收件人** tab，登录后可直接添加/删除收件人邮箱，团队共享，立即生效，**无需改代码或 GitHub 配置**。
+
+> 需先在 Supabase SQL Editor 执行一次「检验记录库」页面给出的完整 SQL（含 `report_recipients` 表），或直接在 SQL Editor 执行完整建表脚本后刷新页面。
 
 ### 手动触发测试
 

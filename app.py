@@ -3260,6 +3260,54 @@ def _render_supplier_alias_tab():
         st.info('暂无自定义别名，当前全部依赖内置归一化规则。')
 
 
+def _render_report_recipients_tab():
+    """📮 未检验清单邮件收件人：团队共享，页面增删，无需改 GitHub Secrets"""
+    st.subheader('📮 未检验清单邮件收件人')
+    st.caption('工作日凌晨自动发送的「未检验清单」会发给下面的邮箱，可在页面直接增删，无需修改代码或 GitHub 配置。所有登录用户共享。')
+
+    if not supabase_helper.ensure_report_recipients_table():
+        st.warning('⚠️ 收件人表 `report_recipients` 尚未创建，请先在 Supabase SQL Editor 中执行：')
+        st.code(supabase_helper.get_create_inspection_records_table_sql(), language='sql')
+        return
+
+    import re as _re
+    with st.form('recipient_form', clear_on_submit=True):
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            email = st.text_input('收件人邮箱（多个请逐个添加）', key='recipient_input',
+                                  placeholder='例如：someone@qq.com')
+        with c2:
+            submitted = st.form_submit_button('➕ 添加', use_container_width=True)
+        if submitted:
+            e = email.strip()
+            if not e:
+                st.warning('请输入邮箱地址')
+            elif not _re.match(r'^[\w.+-]+@[\w-]+(\.[\w-]+)+$', e):
+                st.warning('邮箱格式不正确，请检查后重试')
+            else:
+                if supabase_helper.add_report_recipient(e):
+                    st.success(f'已添加收件人「{e}」')
+                    st.rerun()
+
+    recipients = supabase_helper.list_report_recipients()
+    if recipients:
+        st.divider()
+        st.markdown(f'**当前收件人（{len(recipients)} 个）**')
+        for r in recipients:
+            c1, c2, c3 = st.columns([3, 2, 1])
+            with c1:
+                st.text(str(r.get('email', '')))
+            with c2:
+                created = str(r.get('created_at', ''))[:10]
+                st.caption(f'添加于 {created}')
+            with c3:
+                if st.button('🗑️', key=f"del_recipient_{r.get('id')}", help='删除该收件人'):
+                    if supabase_helper.delete_report_recipient(str(r.get('id'))):
+                        st.rerun()
+    else:
+        st.info('暂无收件人，添加后每天凌晨的未检验清单才会发送。')
+
+
 def page_inspection_match():
     st.header('🔍 送检清单 vs 检验清单')
     st.caption('上传送检清单持久化保存，上传检验清单进行对比，找出未检验物料')
@@ -3281,8 +3329,8 @@ def page_inspection_match():
     st.session_state.setdefault('_ins_df', None)
     st.session_state.setdefault('_rpc_ok', None)
 
-    tab_manage, tab_compare, tab_ins_db, tab_alias = st.tabs(
-        ['📤 送检清单管理', '⚖️ 检验对比', '📋 检验记录库', '🏷️ 供应商别名'])
+    tab_manage, tab_compare, tab_ins_db, tab_alias, tab_recipients = st.tabs(
+        ['📤 送检清单管理', '⚖️ 检验对比', '📋 检验记录库', '🏷️ 供应商别名', '📮 邮件收件人'])
 
     with tab_manage:
         table_ok = supabase_helper.ensure_inspection_table()
@@ -3310,6 +3358,9 @@ def page_inspection_match():
 
     with tab_alias:
         _render_supplier_alias_tab()
+
+    with tab_recipients:
+        _render_report_recipients_tab()
 
 
 # ==================== 主路由 ====================

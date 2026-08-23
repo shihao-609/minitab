@@ -42,14 +42,19 @@ def _get_env(name: str, default: str = '') -> str:
     return os.environ.get(name, default) or default
 
 
+_SRV_CLIENT = None
+
+
 def _load_all_rows(table: str):
     """用 service_role 读取指定表全部数据（绕过 RLS，含所有用户）"""
+    global _SRV_CLIENT
     url = _get_env('SUPABASE_URL')
     key = _get_env('SUPABASE_SERVICE_ROLE_KEY')
     if not url or not key:
         raise RuntimeError('缺少 SUPABASE_URL 或 SUPABASE_SERVICE_ROLE_KEY 环境变量')
-    client = create_client(url, key)
-    res = client.table(table).select('*').limit(100000).execute()
+    if _SRV_CLIENT is None:
+        _SRV_CLIENT = create_client(url, key)
+    res = _SRV_CLIENT.table(table).select('*').limit(100000).execute()
     return res.data or []
 
 
@@ -167,9 +172,19 @@ def build_report():
     print(f'[输出] 生成 {filename}，未检验 {len(today_keys)} 条')
 
     # 6. 发送邮件
-    recipients = [x.strip() for x in _get_env('REPORT_RECIPIENTS').split(',') if x.strip()]
+    # 收件人优先从前端维护的 report_recipients 表读取，其次兜底环境变量
+    recipients = []
+    try:
+        recipients = [str(r.get('email', '')).strip()
+                      for r in _load_all_rows('report_recipients')
+                      if str(r.get('email', '')).strip()]
+        print(f'[收件人] 从数据库读取 {len(recipients)} 个收件人')
+    except Exception as e:
+        print(f'[收件人] 读取数据库收件人表失败，回退到环境变量: {e}')
     if not recipients:
-        raise RuntimeError('未配置 REPORT_RECIPIENTS 收件人列表')
+        recipients = [x.strip() for x in _get_env('REPORT_RECIPIENTS').split(',') if x.strip()]
+    if not recipients:
+        raise RuntimeError('未配置收件人：请在前端「邮件收件人」页面添加，或配置 REPORT_RECIPIENTS 环境变量')
     smtp_user = _get_env('SMTP_USER')
     smtp_pass = _get_env('SMTP_PASS')
     smtp_host = _get_env('SMTP_HOST', 'smtp.qq.com')
