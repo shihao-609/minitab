@@ -3390,7 +3390,7 @@ def page_inspection_match():
         st.warning('⚠️ 检测到数据库缺少「检验类型」字段（老库升级）。请先在 Supabase SQL Editor 执行下方迁移 SQL，'
                    '否则上传 / 比对 / 自动邮件会报错：')
         if col_err:
-            st.caption(f'检测失败原因：`{col_err}`')
+            st.error(f'❌ 检测失败原因：`{col_err}`')
         st.code(supabase_helper.get_inspect_type_migration_sql(), language='sql')
         st.divider()
 
@@ -3434,7 +3434,7 @@ def page_inspection_match():
             db_err = supabase_helper.get_last_db_check_error()
             st.warning('⚠️ 数据库表 `inspection_submissions` 检测未通过，请先在 Supabase SQL Editor 中执行：')
             if db_err:
-                st.caption(f'检测失败原因：`{db_err}`')
+                st.error(f'❌ 检测失败原因：`{db_err}`')
             st.code(supabase_helper.get_create_inspection_table_sql(), language='sql')
             if st.button('🔄 已执行 SQL，重新检测', key='db_recheck'):
                 st.rerun()
@@ -3447,7 +3447,7 @@ def page_inspection_match():
                 rpc_err = supabase_helper.get_last_db_check_error()
                 st.warning('⚠️ 批量入库函数 `bulk_insert_inspections` 检测未通过，当前使用普通写入模式（含重复时较慢）。建议执行下方完整 SQL：')
                 if rpc_err:
-                    st.caption(f'检测失败原因：`{rpc_err}`')
+                    st.error(f'❌ 检测失败原因：`{rpc_err}`')
                 st.code(supabase_helper.get_create_inspection_table_sql(), language='sql')
                 if st.button('🔄 已执行 SQL，重新检测', key='rpc_recheck'):
                     st.session_state._rpc_ok = supabase_helper.ensure_inspection_rpc()

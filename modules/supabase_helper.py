@@ -79,6 +79,10 @@ def _get_supabase_key() -> str:
         return os.environ.get("SUPABASE_ANON_KEY", "")
 
 
+# 最近一次获取客户端失败的具体原因（供页面诊断显示）
+_last_client_error: str = ""
+
+
 def _get_user_id() -> Optional[str]:
     """从 session 获取当前用户 ID"""
     if st.session_state.get("authenticated") and st.session_state.get("user"):
@@ -102,9 +106,11 @@ def _get_client() -> Optional[Client]:
 
     Supabase RLS 通过 JWT 中的 auth.uid() 识别用户身份，确保数据隔离。
     """
+    global _last_client_error
     url = _get_supabase_url()
     key = _get_supabase_key()
     if not url or not key:
+        _last_client_error = "SUPABASE_URL / SUPABASE_ANON_KEY 未配置（检查 .env 或 Streamlit Secrets）"
         return None
 
     # 已登录：优先使用携带 JWT 的认证客户端
@@ -113,20 +119,28 @@ def _get_client() -> Optional[Client]:
             from modules import auth
             client = auth.get_authenticated_client()
             if client is not None:
+                _last_client_error = ""
                 return client
             # 已登录但 session 失效，不能降级为匿名，否则 RLS 会隐藏所有数据
+            auth_err = st.session_state.get("auth_error")
+            if auth_err:
+                _last_client_error = f"登录会话异常：{auth_err}"
+            else:
+                _last_client_error = "已登录但无法获取认证客户端（会话可能已失效，请退出重新登录）"
             return None
-        except Exception:
+        except Exception as e:
+            _last_client_error = f"获取认证客户端出错：{e}"
             return None
 
     # 未登录：使用 anon key 匿名客户端
+    _last_client_error = ""
     return create_client(url, key)
 
 
 def _check_client(client: Optional[Client]):
-    """检查客户端是否可用，不可用时抛出异常"""
+    """检查客户端是否可用，不可用时抛出异常（带具体失败原因）"""
     if client is None:
-        raise ValueError("SUPABASE_URL 或 SUPABASE_ANON_KEY 未设置，请检查 .env 文件或 Streamlit Secrets")
+        raise ValueError(_last_client_error or "SUPABASE_URL 或 SUPABASE_ANON_KEY 未设置，请检查 .env 文件或 Streamlit Secrets")
 
 
 def _sanitize_value(v):

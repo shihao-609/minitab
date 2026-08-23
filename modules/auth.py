@@ -111,12 +111,15 @@ def get_authenticated_client() -> Optional[Client]:
 
     session = st.session_state.session
     if not session:
+        st.session_state.auth_error = "会话数据缺失，请重新登录"
         return None
     access_token = getattr(session, "access_token", None)
     if not access_token:
+        st.session_state.auth_error = "会话缺少访问令牌，请重新登录"
         return None
     url = _get_supabase_url()
     if not url:
+        st.session_state.auth_error = "SUPABASE_URL 未配置"
         return None
 
     expires_at = getattr(session, "expires_at", None)
@@ -125,6 +128,7 @@ def get_authenticated_client() -> Optional[Client]:
         refresh_token = getattr(session, "refresh_token", None)
         anon = get_anon_client()
         if not refresh_token or anon is None:
+            st.session_state.auth_error = "会话缺少刷新令牌或匿名客户端不可用，请重新登录"
             return None
         try:
             resp = anon.auth.refresh_session(refresh_token)
