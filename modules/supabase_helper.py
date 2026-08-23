@@ -1016,9 +1016,11 @@ CREATE POLICY "All auth can manage supplier_aliases"
     ON supplier_aliases FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
 -- ============ 未检验清单邮件收件人表（团队共享，页面可维护） ============
+-- recipient_type: 'to' 收件人 / 'cc' 抄送人
 CREATE TABLE IF NOT EXISTS report_recipients (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email TEXT NOT NULL UNIQUE,
+    recipient_type TEXT NOT NULL DEFAULT 'to',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -1284,6 +1286,25 @@ def ensure_report_recipients_table() -> bool:
         return False
 
 
+def ensure_report_recipients_columns() -> bool:
+    """检测 report_recipients 表是否有 recipient_type 列（老表需执行迁移 SQL）"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("report_recipients").select("recipient_type").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def get_report_recipients_migration_sql() -> str:
+    """老表迁移 SQL：补充 recipient_type 列（幂等，可重复执行）"""
+    return """
+-- 老表迁移：新增 recipient_type 列（'to' 收件人 / 'cc' 抄送人）
+ALTER TABLE report_recipients ADD COLUMN IF NOT EXISTS recipient_type TEXT NOT NULL DEFAULT 'to';
+"""
+
+
 def list_report_recipients() -> list:
     """列出全部邮件收件人（团队共享）"""
     try:
@@ -1296,13 +1317,14 @@ def list_report_recipients() -> list:
         return []
 
 
-def add_report_recipient(email: str) -> bool:
-    """新增收件人邮箱（去重由唯一索引兜底）"""
+def add_report_recipient(email: str, recipient_type: str = 'to') -> bool:
+    """新增收件人邮箱（recipient_type: 'to' 收件人 / 'cc' 抄送人，去重由唯一索引兜底）"""
     try:
         client = _get_client()
         _check_client(client)
         client.table("report_recipients").insert({
             "email": email.strip(),
+            "recipient_type": 'cc' if recipient_type == 'cc' else 'to',
         }).execute()
         return True
     except Exception as e:

@@ -172,19 +172,24 @@ def build_report():
     print(f'[输出] 生成 {filename}，未检验 {len(today_keys)} 条')
 
     # 6. 发送邮件
-    # 收件人优先从前端维护的 report_recipients 表读取，其次兜底环境变量
-    recipients = []
+    # 收件人优先从前端维护的 report_recipients 表读取（区分收件人/抄送人），其次兜底环境变量
+    to_list, cc_list = [], []
     try:
-        recipients = [str(r.get('email', '')).strip()
-                      for r in _load_all_rows('report_recipients')
-                      if str(r.get('email', '')).strip()]
-        print(f'[收件人] 从数据库读取 {len(recipients)} 个收件人')
+        for r in _load_all_rows('report_recipients'):
+            email = str(r.get('email', '')).strip()
+            if not email:
+                continue
+            if str(r.get('recipient_type', '')).strip().lower() == 'cc':
+                cc_list.append(email)
+            else:
+                to_list.append(email)
+        print(f'[收件人] 从数据库读取收件人 {len(to_list)} 个，抄送人 {len(cc_list)} 个')
     except Exception as e:
         print(f'[收件人] 读取数据库收件人表失败，回退到环境变量: {e}')
-    if not recipients:
-        recipients = [x.strip() for x in _get_env('REPORT_RECIPIENTS').split(',') if x.strip()]
-    if not recipients:
-        raise RuntimeError('未配置收件人：请在前端「邮件收件人」页面添加，或配置 REPORT_RECIPIENTS 环境变量')
+    if not to_list and not cc_list:
+        to_list = [x.strip() for x in _get_env('REPORT_RECIPIENTS').split(',') if x.strip()]
+    if not to_list:
+        raise RuntimeError('未配置收件人：请在前端「邮件收件人」页面添加收件人，或配置 REPORT_RECIPIENTS 环境变量')
     smtp_user = _get_env('SMTP_USER')
     smtp_pass = _get_env('SMTP_PASS')
     smtp_host = _get_env('SMTP_HOST', 'smtp.qq.com')
@@ -193,7 +198,9 @@ def build_report():
 
     msg = MIMEMultipart()
     msg['From'] = f'{from_name} <{smtp_user}>'
-    msg['To'] = ', '.join(recipients)
+    msg['To'] = ', '.join(to_list)
+    if cc_list:
+        msg['Cc'] = ', '.join(cc_list)
     msg['Subject'] = f'【未检验清单】{today.isoformat()} 共 {len(today_keys)} 条'
     msg.attach(MIMEText('详见附件。', 'plain', 'utf-8'))
 
@@ -201,11 +208,13 @@ def build_report():
     part.add_header('Content-Disposition', 'attachment', filename=('utf-8', '', filename))
     msg.attach(part)
 
+    smtp_recipients = to_list + cc_list
     print(f'[邮件] 连接 {smtp_host}:{smtp_port} ...')
     with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as server:
         server.login(smtp_user, smtp_pass)
-        server.sendmail(smtp_user, recipients, msg.as_string())
-    print(f'[邮件] 已发送给 {len(recipients)} 个收件人: {", ".join(recipients)}')
+        server.sendmail(smtp_user, smtp_recipients, msg.as_string())
+    cc_txt = f'，抄送 {len(cc_list)} 人' if cc_list else ''
+    print(f'[邮件] 已发送给 {len(to_list)} 个收件人{cc_txt}: {", ".join(smtp_recipients)}')
 
     return {'filename': filename, 'unchecked_count': len(today_keys)}
 

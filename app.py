@@ -3263,20 +3263,24 @@ def _render_supplier_alias_tab():
 def _render_report_recipients_tab():
     """📮 未检验清单邮件收件人：团队共享，页面增删，无需改 GitHub Secrets"""
     st.subheader('📮 未检验清单邮件收件人')
-    st.caption('工作日凌晨自动发送的「未检验清单」会发给下面的邮箱，可在页面直接增删，无需修改代码或 GitHub 配置。所有登录用户共享。')
+    st.caption('工作日凌晨自动发送的「未检验清单」会发给「收件人」，并抄送给「抄送人」。可在页面直接增删，无需修改代码或 GitHub 配置。所有登录用户共享。')
 
     if not supabase_helper.ensure_report_recipients_table():
         st.warning('⚠️ 收件人表 `report_recipients` 尚未创建，请先在 Supabase SQL Editor 中执行：')
         st.code(supabase_helper.get_create_inspection_records_table_sql(), language='sql')
         return
+    if not supabase_helper.ensure_report_recipients_columns():
+        st.warning('⚠️ 收件人表缺少「抄送人」支持字段，请先在 Supabase SQL Editor 中执行迁移 SQL：')
+        st.code(supabase_helper.get_report_recipients_migration_sql(), language='sql')
 
     import re as _re
     with st.form('recipient_form', clear_on_submit=True):
         c1, c2 = st.columns([3, 1])
         with c1:
-            email = st.text_input('收件人邮箱（多个请逐个添加）', key='recipient_input',
+            email = st.text_input('邮箱地址（多个请逐个添加）', key='recipient_input',
                                   placeholder='例如：someone@qq.com')
         with c2:
+            rtype = st.radio('类型', ['收件人', '抄送人'], horizontal=True, key='recipient_type_input')
             submitted = st.form_submit_button('➕ 添加', use_container_width=True)
         if submitted:
             e = email.strip()
@@ -3285,25 +3289,29 @@ def _render_report_recipients_tab():
             elif not _re.match(r'^[\w.+-]+@[\w-]+(\.[\w-]+)+$', e):
                 st.warning('邮箱格式不正确，请检查后重试')
             else:
-                if supabase_helper.add_report_recipient(e):
-                    st.success(f'已添加收件人「{e}」')
+                t = 'cc' if rtype == '抄送人' else 'to'
+                if supabase_helper.add_report_recipient(e, t):
+                    st.success(f'已添加{rtype}「{e}」')
                     st.rerun()
 
     recipients = supabase_helper.list_report_recipients()
     if recipients:
         st.divider()
-        st.markdown(f'**当前收件人（{len(recipients)} 个）**')
+        to_n = sum(1 for r in recipients if str(r.get('recipient_type', 'to')) != 'cc')
+        cc_n = len(recipients) - to_n
+        st.markdown(f'**当前配置（收件人 {to_n} 个 · 抄送人 {cc_n} 个）**')
         for r in recipients:
-            c1, c2, c3 = st.columns([3, 2, 1])
+            is_cc = str(r.get('recipient_type', 'to')) == 'cc'
+            c1, c2, c3 = st.columns([1, 4, 1])
             with c1:
-                st.text(str(r.get('email', '')))
+                st.markdown('📧 抄送人' if is_cc else '📨 收件人')
             with c2:
-                created = str(r.get('created_at', ''))[:10]
-                st.caption(f'添加于 {created}')
+                st.text(str(r.get('email', '')))
             with c3:
-                if st.button('🗑️', key=f"del_recipient_{r.get('id')}", help='删除该收件人'):
+                if st.button('🗑️', key=f"del_recipient_{r.get('id')}", help='删除该邮箱'):
                     if supabase_helper.delete_report_recipient(str(r.get('id'))):
                         st.rerun()
+        st.caption('说明：收件人必填（至少 1 个），抄送人可空。每日邮件发给所有收件人并抄送所有抄送人。')
     else:
         st.info('暂无收件人，添加后每天凌晨的未检验清单才会发送。')
 
