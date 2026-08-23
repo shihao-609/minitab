@@ -314,8 +314,15 @@ def make_dedup_key(row, inspect_type='来料检', kind='submission'):
     return hashlib.md5(raw.encode('utf-8')).hexdigest()
 
 
-def _existing_keys(records):
+def _existing_keys(records, kind='submission'):
     """已入库记录的 (检验类型, dedup_key) 集合"""
+    # 数据库返回的键是英文列名，兜底计算时需转回中文列名（与 make_dedup_key 的输入一致）
+    _EN_CN = {
+        'supplier': '供应商', 'material_code': '物料编码', 'spec': '规格型号',
+        'material_name': '物料名称', 'received_date': '收料日期', 'received_qty': '实收数量',
+        'inspect_date': '质检日期', 'inspect_qty': '检验数量', 'doc_no': '单据编号',
+        'batch_no': '批号',
+    }
     keys = set()
     for r in records:
         it = _clean_text(r.get('inspect_type')) or '来料检'
@@ -323,8 +330,9 @@ def _existing_keys(records):
         if dk:
             keys.add((it, dk))
         else:
-            # 老数据兜底：按五元组计算（与回填 SQL 一致）
-            keys.add((it, make_dedup_key(r, it, 'submission')))
+            # 老数据兜底：英文键转中文后按工序配置计算（与入库算法一致）
+            row_cn = {cn: r.get(en) for en, cn in _EN_CN.items()}
+            keys.add((it, make_dedup_key(row_cn, it, kind)))
     return keys
 
 

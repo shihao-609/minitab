@@ -2873,8 +2873,7 @@ def page_batch_analysis():
 
 # ==================== 送检/检验对比 ====================
 
-# 可扩展的检验工序类型（新增工序只需在列表加一项，数据/比对/邮件天然按类型隔离）
-INSPECT_TYPES = ['来料检', '过程检', '出货检', '首件检', '巡检', '其他']
+# 检验工序类型统一从 inspection_match.INSPECT_TYPE_CONFIGS 读取（新增工序 = 加一段配置即可）
 
 
 def _load_sub_records(show_type=None):
@@ -2926,6 +2925,13 @@ def _style_unchecked(df):
 
 
 def _render_submission_tab(inspect_type):
+    # 工序切换后重置本 tab 的临时状态，避免把上一工序预览的文件误入库到当前工序
+    if st.session_state.get('_sub_active_type') != inspect_type:
+        st.session_state._sub_active_type = inspect_type
+        for k in ['_sub_fid', '_sub_type', '_sub_df', '_sub_preview']:
+            st.session_state[k] = None
+        st.session_state._sub_imported = False
+
     st.session_state.setdefault('_sub_fid', None)
     st.session_state.setdefault('_sub_parse_err', None)
     st.session_state.setdefault('_sub_df', None)

@@ -709,7 +709,9 @@ BEGIN
                  COALESCE(r->>'supplier','')||'|'||COALESCE(r->>'material_code','')||'|'||COALESCE(r->>'spec','')||'|'||
                  COALESCE(r->>'material_name','')||'|'||
                  CASE WHEN r->>'received_qty' IS NULL OR r->>'received_qty' = '' THEN ''
-                      ELSE rtrim(rtrim(r->>'received_qty','0'),'.') END)))
+                      WHEN (r->>'received_qty')::numeric = floor((r->>'received_qty')::numeric)
+                           THEN to_char((r->>'received_qty')::numeric, 'FM99999999999999999999')
+                      ELSE (r->>'received_qty')::numeric::text END)))
         ON CONFLICT DO NOTHING;
         IF FOUND THEN
             inserted := inserted + 1;
@@ -1035,7 +1037,9 @@ BEGIN
                  COALESCE(r->>'supplier','')||'|'||COALESCE(r->>'material_code','')||'|'||COALESCE(r->>'spec','')||'|'||
                  COALESCE(r->>'material_name','')||'|'||
                  CASE WHEN r->>'inspect_qty' IS NULL OR r->>'inspect_qty' = '' THEN ''
-                      ELSE rtrim(rtrim(r->>'inspect_qty','0'),'.') END||'|'||
+                      WHEN (r->>'inspect_qty')::numeric = floor((r->>'inspect_qty')::numeric)
+                           THEN to_char((r->>'inspect_qty')::numeric, 'FM99999999999999999999')
+                      ELSE (r->>'inspect_qty')::numeric::text END||'|'||
                  COALESCE(r->>'doc_no','')||'|'||COALESCE(NULLIF(r->>'inspect_date',''),''))))
         ON CONFLICT DO NOTHING;
         IF FOUND THEN
@@ -1104,16 +1108,20 @@ ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NU
 ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
 ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
 
--- 3. 回填已有数据的去重键（算法与 Python 端一致，仅回填一次）
+-- 3. 回填已有数据的去重键（算法与 Python 端 _fmt_qty 一致：整数去小数尾，非整数保留原样）
 UPDATE inspection_submissions SET dedup_key = md5(
     COALESCE(supplier,'')||'|'||COALESCE(material_code,'')||'|'||COALESCE(spec,'')||'|'||
     COALESCE(material_name,'')||'|'||
-    CASE WHEN received_qty IS NULL THEN '' ELSE rtrim(rtrim(received_qty::text,'0'),'.') END)
+    CASE WHEN received_qty IS NULL THEN ''
+         WHEN received_qty = floor(received_qty) THEN to_char(received_qty, 'FM99999999999999999999')
+         ELSE received_qty::text END)
 WHERE dedup_key = '';
 UPDATE inspection_records SET dedup_key = md5(
     COALESCE(supplier,'')||'|'||COALESCE(material_code,'')||'|'||COALESCE(spec,'')||'|'||
     COALESCE(material_name,'')||'|'||
-    CASE WHEN inspect_qty IS NULL THEN '' ELSE rtrim(rtrim(inspect_qty::text,'0'),'.') END||'|'||
+    CASE WHEN inspect_qty IS NULL THEN ''
+         WHEN inspect_qty = floor(inspect_qty) THEN to_char(inspect_qty, 'FM99999999999999999999')
+         ELSE inspect_qty::text END||'|'||
     COALESCE(doc_no,'')||'|'||COALESCE(inspect_date::text,''))
 WHERE dedup_key = '';
 

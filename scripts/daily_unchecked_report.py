@@ -75,14 +75,15 @@ def _today_yesterday():
 
 
 def _identity_keys(rows):
-    """按 检验类型+五元组 生成身份键（与入库唯一索引一致），支持 DataFrame 或空列表"""
+    """按 检验类型+五元组 生成身份键（数量规范化与入库 dedup_key 算法一致），支持 DataFrame 或空列表"""
     if rows is None or len(rows) == 0:
         return []
     df = rows if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
     t = df['检验类型'].astype(str) if '检验类型' in df.columns else '来料检'
-    return (t + '|' + df['供应商'].astype(str) + '|' + df['物料编码'].astype(str) + '|'
-            + df['规格型号'].astype(str) + '|' + df['物料名称'].astype(str) + '|'
-            + df['实收数量'].astype(str)).tolist()
+    qty = df['实收数量'].map(inspection_match._fmt_qty) if '实收数量' in df.columns else ''
+    return (t + '|' + df['供应商'].fillna('').astype(str) + '|' + df['物料编码'].fillna('').astype(str) + '|'
+            + df['规格型号'].fillna('').astype(str) + '|' + df['物料名称'].fillna('').astype(str) + '|'
+            + qty).tolist()
 
 
 def _compare_all_types(sub_df, ins_df):
