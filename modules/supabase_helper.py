@@ -608,14 +608,26 @@ def delete_report(report_id: str) -> bool:
 
 # ==================== 送检清单 CRUD ====================
 
+# 记录最近一次数据库结构检测失败的原因，供页面展示
+_last_db_check_error: str = ""
+
+
+def get_last_db_check_error() -> str:
+    """返回最近一次数据库结构检测失败的原因（用于页面诊断提示）"""
+    return _last_db_check_error
+
+
 def ensure_inspection_table() -> bool:
     """检测 inspection_submissions 表是否存在"""
+    global _last_db_check_error
     try:
         client = _get_client()
         _check_client(client)
         client.table("inspection_submissions").select("id").limit(1).execute()
+        _last_db_check_error = ""
         return True
-    except Exception:
+    except Exception as e:
+        _last_db_check_error = str(e)
         return False
 
 
@@ -820,12 +832,15 @@ def count_inspection_submissions(inspect_type: str = None) -> int:
 
 def ensure_inspection_rpc() -> bool:
     """检测 bulk_insert_inspections 函数是否已创建（空数组调用无副作用）"""
+    global _last_db_check_error
     try:
         client = _get_client()
         _check_client(client)
         client.rpc("bulk_insert_inspections", {"p_rows": []}).execute()
+        _last_db_check_error = ""
         return True
-    except Exception:
+    except Exception as e:
+        _last_db_check_error = str(e)
         return False
 
 
@@ -1137,24 +1152,30 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ins_records_dedup
 
 def ensure_inspect_type_columns() -> bool:
     """检测两张表是否已有 inspect_type / dedup_key 列（老库需先执行迁移 SQL）"""
+    global _last_db_check_error
     try:
         client = _get_client()
         _check_client(client)
         client.table("inspection_submissions").select("inspect_type,dedup_key").limit(1).execute()
         client.table("inspection_records").select("inspect_type,dedup_key").limit(1).execute()
+        _last_db_check_error = ""
         return True
-    except Exception:
+    except Exception as e:
+        _last_db_check_error = str(e)
         return False
 
 
 def ensure_inspection_records_table() -> bool:
     """检测 inspection_records 表是否存在"""
+    global _last_db_check_error
     try:
         client = _get_client()
         _check_client(client)
         client.table("inspection_records").select("id").limit(1).execute()
+        _last_db_check_error = ""
         return True
-    except Exception:
+    except Exception as e:
+        _last_db_check_error = str(e)
         return False
 
 

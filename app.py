@@ -3386,8 +3386,11 @@ def page_inspection_match():
     st.caption('按工序管理送检、检验对比、记录库及相关配置。当前只启用已配置的工序，以后新增工序会自动扩展。')
 
     if not supabase_helper.ensure_inspect_type_columns():
+        col_err = supabase_helper.get_last_db_check_error()
         st.warning('⚠️ 检测到数据库缺少「检验类型」字段（老库升级）。请先在 Supabase SQL Editor 执行下方迁移 SQL，'
                    '否则上传 / 比对 / 自动邮件会报错：')
+        if col_err:
+            st.caption(f'检测失败原因：`{col_err}`')
         st.code(supabase_helper.get_inspect_type_migration_sql(), language='sql')
         st.divider()
 
@@ -3428,15 +3431,23 @@ def page_inspection_match():
     with tab_manage:
         table_ok = supabase_helper.ensure_inspection_table()
         if not table_ok:
-            st.warning('⚠️ 数据库表 `inspection_submissions` 尚未创建，请先在 Supabase SQL Editor 中执行：')
+            db_err = supabase_helper.get_last_db_check_error()
+            st.warning('⚠️ 数据库表 `inspection_submissions` 检测未通过，请先在 Supabase SQL Editor 中执行：')
+            if db_err:
+                st.caption(f'检测失败原因：`{db_err}`')
             st.code(supabase_helper.get_create_inspection_table_sql(), language='sql')
+            if st.button('🔄 已执行 SQL，重新检测', key='db_recheck'):
+                st.rerun()
         else:
             if st.session_state._rpc_ok is None:
                 st.session_state._rpc_ok = supabase_helper.ensure_inspection_rpc()
             if st.session_state._rpc_ok:
                 st.caption('⚡ 高速批量入库已启用（RPC 原子去重，单请求完成）')
             else:
-                st.warning('⚠️ 批量入库函数 `bulk_insert_inspections` 尚未创建，当前使用普通写入模式（含重复时较慢）。建议执行下方完整 SQL：')
+                rpc_err = supabase_helper.get_last_db_check_error()
+                st.warning('⚠️ 批量入库函数 `bulk_insert_inspections` 检测未通过，当前使用普通写入模式（含重复时较慢）。建议执行下方完整 SQL：')
+                if rpc_err:
+                    st.caption(f'检测失败原因：`{rpc_err}`')
                 st.code(supabase_helper.get_create_inspection_table_sql(), language='sql')
                 if st.button('🔄 已执行 SQL，重新检测', key='rpc_recheck'):
                     st.session_state._rpc_ok = supabase_helper.ensure_inspection_rpc()
