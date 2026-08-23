@@ -670,12 +670,26 @@ CREATE INDEX IF NOT EXISTS idx_inspection_user_date
 CREATE OR REPLACE FUNCTION bulk_insert_inspections(p_rows jsonb)
 RETURNS integer
 LANGUAGE plpgsql
-SECURITY INVOKER
+SECURITY DEFINER
 AS $$
 DECLARE
     inserted integer := 0;
     r jsonb;
 BEGIN
+    -- 老库自愈：确保 inspect_type 列存在（无动态 SQL，安全）
+    ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
+    -- 老库自愈：确保去重索引包含 inspect_type（跨工序不互相覆盖）
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = 'inspection_submissions'
+          AND indexname = 'idx_inspection_dedup'
+          AND indexdef LIKE '%inspect_type%'
+    ) THEN
+        DROP INDEX IF EXISTS idx_inspection_dedup;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_dedup
+            ON inspection_submissions(user_id, inspect_type, supplier, material_code, spec, material_name, received_qty);
+    END IF;
+
     FOR r IN SELECT * FROM jsonb_array_elements(p_rows) LOOP
         INSERT INTO inspection_submissions
             (user_id, supplier, material_code, spec, material_name, received_date, received_qty, inspect_type)
@@ -688,8 +702,7 @@ BEGIN
              NULLIF(r->>'received_date', '')::date,
              (r->>'received_qty')::numeric,
              COALESCE(NULLIF(r->>'inspect_type', ''), '来料检'))
-        ON CONFLICT (user_id, inspect_type, supplier, material_code, spec, material_name, received_qty)
-        DO NOTHING;
+        ON CONFLICT DO NOTHING;
         IF FOUND THEN
             inserted := inserted + 1;
         END IF;
@@ -958,12 +971,28 @@ CREATE INDEX IF NOT EXISTS idx_ins_records_user_date
 CREATE OR REPLACE FUNCTION bulk_insert_inspection_records(p_rows jsonb)
 RETURNS integer
 LANGUAGE plpgsql
-SECURITY INVOKER
+SECURITY DEFINER
 AS $$
 DECLARE
     inserted integer := 0;
     r jsonb;
 BEGIN
+    -- 老库自愈：确保 inspect_type 列存在（无动态 SQL，安全）
+    ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
+    -- 老库自愈：确保去重索引包含 inspect_type（跨工序不互相覆盖）
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = 'inspection_records'
+          AND indexname = 'idx_ins_records_dedup'
+          AND indexdef LIKE '%inspect_type%'
+    ) THEN
+        DROP INDEX IF EXISTS idx_ins_records_dedup;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ins_records_dedup
+            ON inspection_records(user_id, inspect_type, doc_no, supplier, material_code, spec, material_name,
+                                  COALESCE(inspect_date, '1970-01-01'::date),
+                                  COALESCE(inspect_qty, -1));
+    END IF;
+
     FOR r IN SELECT * FROM jsonb_array_elements(p_rows) LOOP
         INSERT INTO inspection_records
             (user_id, doc_no, supplier, material_code, spec, material_name,
@@ -986,10 +1015,7 @@ BEGIN
              COALESCE(r->>'category', ''),
              COALESCE(NULLIF(r->>'inspect_type', ''), '来料检'),
              COALESCE(r->>'source_file', ''))
-        ON CONFLICT (user_id, inspect_type, doc_no, supplier, material_code, spec, material_name,
-                     COALESCE(inspect_date, '1970-01-01'::date),
-                     COALESCE(inspect_qty, -1))
-        DO NOTHING;
+        ON CONFLICT DO NOTHING;
         IF FOUND THEN
             inserted := inserted + 1;
         END IF;
