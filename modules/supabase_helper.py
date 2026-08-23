@@ -726,23 +726,26 @@ GRANT EXECUTE ON FUNCTION bulk_insert_inspections(jsonb) TO authenticated;
 
 
 @_with_retry
-def _do_list_inspections(client, limit=None):
+def _do_list_inspections(client, limit=None, inspect_type=None):
     q = client.table("inspection_submissions").select("*").order(
         "received_date", desc=True).order("created_at", desc=True)
+    if inspect_type:
+        q = q.eq("inspect_type", inspect_type)
     if limit:
         q = q.limit(limit)
     return q.execute()
 
 
-def list_inspection_submissions(limit: int = None) -> list:
+def list_inspection_submissions(limit: int = None, inspect_type: str = None) -> list:
     """
     列出当前用户的送检记录（按收料日期倒序），用于管理页展示。
     limit 用于控制单次传输量（例如仅展示最近 2000 条）。
+    inspect_type 传入工序名则只返回该工序的记录（None 返回全部，兼容旧调用）。
     """
     try:
         client = _get_client()
         _check_client(client)
-        result = _do_list_inspections(client, limit)
+        result = _do_list_inspections(client, limit, inspect_type)
 
         uid = _get_user_id()
         if uid and result.data:
@@ -795,16 +798,19 @@ def fetch_submission_records() -> list:
 
 
 @_with_retry
-def _do_count_inspections(client):
-    return client.table("inspection_submissions").select("id", count="exact").execute()
+def _do_count_inspections(client, inspect_type=None):
+    q = client.table("inspection_submissions").select("id", count="exact")
+    if inspect_type:
+        q = q.eq("inspect_type", inspect_type)
+    return q.execute()
 
 
-def count_inspection_submissions() -> int:
-    """获取当前用户送检记录总数"""
+def count_inspection_submissions(inspect_type: str = None) -> int:
+    """获取当前用户送检记录总数（inspect_type 传入工序名则只统计该工序）"""
     try:
         client = _get_client()
         _check_client(client)
-        result = _do_count_inspections(client)
+        result = _do_count_inspections(client, inspect_type)
         return int(result.count or 0)
     except Exception:
         return 0
@@ -1164,20 +1170,23 @@ def ensure_inspection_records_rpc() -> bool:
 
 
 @_with_retry
-def _do_list_inspection_records(client, limit=None):
+def _do_list_inspection_records(client, limit=None, inspect_type=None):
     q = client.table("inspection_records").select("*").order(
         "inspect_date", desc=True).order("created_at", desc=True)
+    if inspect_type:
+        q = q.eq("inspect_type", inspect_type)
     if limit:
         q = q.limit(limit)
     return q.execute()
 
 
-def list_inspection_records(limit: int = None) -> list:
-    """列出当前用户的检验记录（按质检日期倒序）"""
+def list_inspection_records(limit: int = None, inspect_type: str = None) -> list:
+    """列出当前用户的检验记录（按质检日期倒序）
+    inspect_type 传入工序名则只返回该工序的记录（None 返回全部，兼容旧调用）。"""
     try:
         client = _get_client()
         _check_client(client)
-        result = _do_list_inspection_records(client, limit)
+        result = _do_list_inspection_records(client, limit, inspect_type)
 
         uid = _get_user_id()
         if uid and result.data:
@@ -1210,16 +1219,19 @@ def fetch_inspection_records() -> list:
 
 
 @_with_retry
-def _do_count_inspection_records(client):
-    return client.table("inspection_records").select("id", count="exact").execute()
+def _do_count_inspection_records(client, inspect_type=None):
+    q = client.table("inspection_records").select("id", count="exact")
+    if inspect_type:
+        q = q.eq("inspect_type", inspect_type)
+    return q.execute()
 
 
-def count_inspection_records() -> int:
-    """获取当前用户检验记录总数"""
+def count_inspection_records(inspect_type: str = None) -> int:
+    """获取当前用户检验记录总数（inspect_type 传入工序名则只统计该工序）"""
     try:
         client = _get_client()
         _check_client(client)
-        result = _do_count_inspection_records(client)
+        result = _do_count_inspection_records(client, inspect_type)
         return int(result.count or 0)
     except Exception:
         return 0

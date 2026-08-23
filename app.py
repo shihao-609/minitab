@@ -2877,20 +2877,33 @@ def page_batch_analysis():
 INSPECT_TYPES = ['来料检', '过程检', '出货检', '首件检', '巡检', '其他']
 
 
-def _load_sub_records():
-    recs = st.session_state.get('_sub_records')
+def _load_sub_records(show_type=None):
+    """送检记录按工序加载（缓存 key 含工序，切换工序互不污染）"""
+    cache_key = f'_sub_records|{show_type or "全部"}'
+    recs = st.session_state.get(cache_key)
     if recs is None:
-        recs = supabase_helper.list_inspection_submissions(limit=2000)
-        st.session_state._sub_records = recs
+        recs = supabase_helper.list_inspection_submissions(limit=2000, inspect_type=show_type)
+        st.session_state[cache_key] = recs
     return recs
 
 
-def _load_sub_total():
-    total = st.session_state.get('_sub_total')
+def _load_sub_total(show_type=None):
+    """送检总数按工序加载（缓存 key 含工序）"""
+    cache_key = f'_sub_total|{show_type or "全部"}'
+    total = st.session_state.get(cache_key)
     if total is None:
-        total = supabase_helper.count_inspection_submissions()
-        st.session_state._sub_total = total
+        total = supabase_helper.count_inspection_submissions(inspect_type=show_type)
+        st.session_state[cache_key] = total
     return total
+
+
+def _clear_sub_caches():
+    """清空送检页全部工序的缓存（入库/清空后调用）"""
+    for k in [k for k in st.session_state.keys()
+              if k.startswith('_sub_records|') or k.startswith('_sub_total|')]:
+        del st.session_state[k]
+    st.session_state._sub_compare = None
+    st.session_state._sub_df_cache = None
 
 
 def _load_compare_records():
@@ -2920,8 +2933,12 @@ def _render_submission_tab():
     st.session_state.setdefault('_sub_preview', None)
     st.session_state.setdefault('_sub_imported', False)
 
-    records = _load_sub_records() or []
-    total = _load_sub_total() or 0
+    show_type = st.selectbox(
+        '🗂️ 显示工序（本页统计与记录列表按工序区分）', INSPECT_TYPES + ['全部'], index=0,
+        key='sub_show_type',
+        help='默认只显示「来料检」的数据；以后新增工序（过程检等）后各工序数据互不混淆，可在此下拉切换查看')
+    records = _load_sub_records(show_type) or []
+    total = _load_sub_total(show_type) or 0
     suppliers = len({r.get('supplier') for r in records})
     codes = len({r.get('material_code') for r in records})
     c1, c2, c3 = st.columns(3)
@@ -2989,10 +3006,7 @@ def _render_submission_tab():
                            + (f'，跳过重复 {skipped} 条' if skipped else ''))
             else:
                 st.info(f'没有新增记录，{skipped} 条均为重复。')
-            st.session_state._sub_records = None
-            st.session_state._sub_total = None
-            st.session_state._sub_compare = None
-            st.session_state._sub_df_cache = None
+            _clear_sub_caches()
             st.session_state._sub_preview = None
             st.session_state._sub_imported = True
             st.rerun()
@@ -3012,9 +3026,7 @@ def _render_submission_tab():
     if st.checkbox('⚠️ 确认清空全部送检记录', key='sub_clear_ck'):
         if st.button('🗑️ 清空全部', type='primary', key='sub_clear_btn', use_container_width=True):
             if supabase_helper.clear_inspection_submissions():
-                st.session_state._sub_records = None
-                st.session_state._sub_total = None
-                st.session_state._sub_compare = None
+                _clear_sub_caches()
                 st.rerun()
 
 
@@ -3204,14 +3216,16 @@ def _render_inspection_records_tab():
         st.code(supabase_helper.get_create_inspection_records_table_sql(), language='sql')
         return
 
-    total = supabase_helper.count_inspection_records()
-    st.caption(f'已入库检验记录：**{total}** 条。比对时勾选「🔄 跨窗口对账」即可自动关联这些累计检验单。')
+    show_type = st.selectbox('🗂️ 显示工序', INSPECT_TYPES + ['全部'], index=0, key='rec_show_type',
+                             help='只显示所选工序的检验记录，不同工序互不混淆')
+    total = supabase_helper.count_inspection_records(inspect_type=show_type)
+    st.caption(f'已入库检验记录：**{total}** 条（工序：{show_type}）。比对时勾选「🔄 跨窗口对账」即可自动关联这些累计检验单。')
 
     if total == 0:
         st.info('暂无检验记录。请到「⚖️ 检验对比」上传检验清单并勾选「📥 写入检验记录库」。')
         return
 
-    records = supabase_helper.list_inspection_records(limit=1000)
+    records = supabase_helper.list_inspection_records(limit=1000, inspect_type=show_type)
     if not records:
         st.info('暂无检验记录')
         return
@@ -3227,7 +3241,7 @@ def _render_inspection_records_tab():
                 st.success('已清空全部检验记录')
                 st.rerun()
     with c2:
-        st.caption('清空后无法恢复，历史跨窗口对账将失效，请谨慎操作。')
+        st.caption('⚠️ 该按钮会清空所有工序的检验记录，清空后无法恢复，历史跨窗口对账将失效，请谨慎操作。')
 
 
 def _render_supplier_alias_tab():
