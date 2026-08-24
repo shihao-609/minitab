@@ -851,39 +851,39 @@ def page_capability():
                     if 'error' in r:
                         st.error(r['error'])
                     else:
-                    st.subheader('📊 能力指标')
-                    cs = st.columns(6)
-                    with cs[0]: st.metric('Cp (短期)', f'{r["Cp"]:.2f}' if r['Cp'] is not None else 'N/A')
-                    with cs[1]: st.metric('Cpk (短期)', f'{r["Cpk"]:.2f}' if r['Cpk'] is not None else 'N/A')
-                    with cs[2]: st.metric('Pp (长期)', f'{r["Pp"]:.2f}' if r['Pp'] is not None else 'N/A')
-                    with cs[3]: st.metric('Ppk (长期)', f'{r["Ppk"]:.2f}' if r['Ppk'] is not None else 'N/A')
-                    with cs[4]: st.metric('Cpk 评级', r.get('cpk_level', 'N/A'))
-                    with cs[5]: st.metric('预计 PPM',
-                                           f'{r["ppm_total"]:,.0f}',
-                                           help=f'实测 PPM: {r.get("ppm_observed_total", 0):,.0f}')
+                        st.subheader('📊 能力指标')
+                        cs = st.columns(6)
+                        with cs[0]: st.metric('Cp (短期)', f'{r["Cp"]:.2f}' if r['Cp'] is not None else 'N/A')
+                        with cs[1]: st.metric('Cpk (短期)', f'{r["Cpk"]:.2f}' if r['Cpk'] is not None else 'N/A')
+                        with cs[2]: st.metric('Pp (长期)', f'{r["Pp"]:.2f}' if r['Pp'] is not None else 'N/A')
+                        with cs[3]: st.metric('Ppk (长期)', f'{r["Ppk"]:.2f}' if r['Ppk'] is not None else 'N/A')
+                        with cs[4]: st.metric('Cpk 评级', r.get('cpk_level', 'N/A'))
+                        with cs[5]: st.metric('预计 PPM',
+                                               f'{r["ppm_total"]:,.0f}',
+                                               help=f'实测 PPM: {r.get("ppm_observed_total", 0):,.0f}')
 
-                    cs2 = st.columns(5)
-                    with cs2[0]: st.metric('均值', f'{r["mean"]:.4f}')
-                    with cs2[1]: st.metric('整体 σ', f'{r["std_overall"]:.4f}')
-                    wm_label = r.get('within_method', 'Rbar')
-                    if r.get('subgroup_size', 1) <= 1:
-                        sigma_method = '移动极差 MR̄/d₂'
-                    else:
-                        sigma_method = f'子组{wm_label}法 (n={r.get("subgroup_size",1)})'
-                    with cs2[2]: st.metric('组内 σ', f'{r["std_within"]:.4f}', help=f'估计方法: {sigma_method}')
-                    with cs2[3]: st.metric('样本量', f'{r["n"]} (子组={r.get("subgroup_size",1)})')
-                    with cs2[4]: st.metric('实测 PPM',
-                                           f'{r.get("ppm_observed_total", 0):,.0f}',
-                                           help='实际超规格数据点数 / 总数 × 1M')
+                        cs2 = st.columns(5)
+                        with cs2[0]: st.metric('均值', f'{r["mean"]:.4f}')
+                        with cs2[1]: st.metric('整体 σ', f'{r["std_overall"]:.4f}')
+                        wm_label = r.get('within_method', 'Rbar')
+                        if r.get('subgroup_size', 1) <= 1:
+                            sigma_method = '移动极差 MR̄/d₂'
+                        else:
+                            sigma_method = f'子组{wm_label}法 (n={r.get("subgroup_size",1)})'
+                        with cs2[2]: st.metric('组内 σ', f'{r["std_within"]:.4f}', help=f'估计方法: {sigma_method}')
+                        with cs2[3]: st.metric('样本量', f'{r["n"]} (子组={r.get("subgroup_size",1)})')
+                        with cs2[4]: st.metric('实测 PPM',
+                                               f'{r.get("ppm_observed_total", 0):,.0f}',
+                                               help='实际超规格数据点数 / 总数 × 1M')
 
-                    st.plotly_chart(r['chart'], use_container_width=True)
+                        st.plotly_chart(r['chart'], use_container_width=True)
 
-                    with st.expander('📋 评级标准'):
-                        st.table(pd.DataFrame({
-                            'Cpk': ['≥ 1.67', '1.33~1.67', '1.00~1.33', '0.67~1.00', '< 0.67'],
-                            '评级': ['优秀', '良好', '尚可', '不足', '差'],
-                            '建议': ['可放宽抽检', '维持现状', '加强控制', '需改进', '急需改进'],
-                        }))
+                        with st.expander('📋 评级标准'):
+                            st.table(pd.DataFrame({
+                                'Cpk': ['≥ 1.67', '1.33~1.67', '1.00~1.33', '0.67~1.00', '< 0.67'],
+                                '评级': ['优秀', '良好', '尚可', '不足', '差'],
+                                '建议': ['可放宽抽检', '维持现状', '加强控制', '需改进', '急需改进'],
+                            }))
 
     # --- Tab2: Box-Cox 非正态能力 ---
     with tab2:
