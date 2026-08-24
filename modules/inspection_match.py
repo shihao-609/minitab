@@ -445,18 +445,73 @@ def _ins_dict(row):
 _LABELS = {'供应商': '供应商', '规格型号': '规格', '物料名称': '名称', '物料编码': '编码'}
 
 
-def _diff_fields(sub, ins, cfg, use_norm_supplier=True):
+def _norm_cached(name, cache):
+    """带缓存的 normalize_supplier：同一名称只归一化一次。
+    normalize_supplier 是纯函数，缓存只影响耗时，不影响结果。"""
+    if name in cache:
+        return cache[name]
+    r = normalize_supplier(name)
+    cache[name] = r
+    return r
+
+
+def _same_supplier_cached(a, b, cache):
+    """与 supplier_normalize.same_supplier 语义逐字一致，仅复用归一化缓存。
+    a/b 为 _fill_row 已规范化（_clean_text）后的字符串，_clean_text 与 _clean 对已规范值等价，
+    因此判定结果与原 same_supplier 完全相同。"""
+    a = _clean_text(a)
+    b = _clean_text(b)
+    if not a or not b:
+        return a == b
+    if a == b:
+        return True
+    na = _norm_cached(a, cache)
+    nb = _norm_cached(b, cache)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    short, long = (na, nb) if len(na) <= len(nb) else (nb, na)
+    if len(short) >= 2 and short in long and len(long) - len(short) <= 8:
+        return True
+    return False
+
+
+def _quick_fields_equal(sub, ins, pairs):
+    """快速必然性检查：非供应商字段全部精确相等才可能匹配。
+
+    匹配成功要求 _diff_fields 全字段 diff 为空，其中非供应商字段都是精确比较；
+    因此本函数返回 False 时，完整 _diff_fields 必非空，该候选不可能匹配成功。
+    仅用于提前排除候选，不生成差异文本、不调用供应商归一化。
+    """
+    for sc, ic in pairs:
+        if sc == '供应商':
+            continue
+        sv, iv = sub.get(sc), ins.get(sc)
+        if sc in ('实收数量', '检验数量'):
+            if not _qty_eq(sv, iv):
+                return False
+        elif _clean_text(sv) != _clean_text(iv):
+            return False
+    return True
+
+
+def _diff_fields(sub, ins, cfg, use_norm_supplier=True, sup_cache=None):
     """严格核对送检记录与检验记录的字段，返回差异描述（空串表示完全一致）。
 
     核对字段来自工序配置 INSPECT_TYPE_CONFIGS 的 match_pairs（各工序可不同）。
     use_norm_supplier=True 时供应商用归一化比较（自动识别同一公司的不同写法）。
+    sup_cache: 可选 dict，缓存供应商归一化结果，加速大量记录的重复比较。
     """
     diffs = []
     for sc, ic in cfg['match_pairs']:
         sv, iv = sub.get(sc), ins.get(sc)  # ins 记录已统一用送检侧字段名存储
         label = _LABELS.get(sc, sc if sc == ic else f'{sc}/{ic}')
         if sc == '供应商':
-            ok = same_supplier(sv, iv) if use_norm_supplier else _clean_text(sv) == _clean_text(iv)
+            if use_norm_supplier:
+                ok = _same_supplier_cached(sv, iv, sup_cache) if sup_cache is not None else same_supplier(sv, iv)
+            else:
+                ok = _clean_text(sv) == _clean_text(iv)
             if not ok:
                 diffs.append(f"供应商「{sv or '空'}」≠「{iv or '空'}」")
             continue
@@ -533,10 +588,13 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True, inspect_typ
     # 建立索引（供应商键使用归一化名；匹配键 = 工序配置的字段元组）
     ins_by_code = {}
     ins_by_full_key = {}
+    code_name_sets = {}
     for idx, c in enumerate(ins_rows):
         if has_code:
             code = c['物料编码']
             ins_by_code.setdefault(code, []).append((idx, c))
+            if has_name:
+                code_name_sets.setdefault(code, set()).add(c['物料名称'])
         key = tuple(c[f] for f in sub_fields)
         ins_by_full_key.setdefault(key, []).append((idx, c))
 
@@ -546,6 +604,12 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True, inspect_typ
     checked, unchecked = [], []
     name_mismatch_sub, name_mismatch_ins = [], []
     matched_ins = set()
+
+    _sup_cache = {}  # 供应商归一化缓存（纯加速，判定结果不变）
+    subs_by_code = {}
+    if has_code:
+        for s in subs:
+            subs_by_code.setdefault(s['物料编码'], []).append(s)
 
     total_sub = len(subs)
     report_every = max(1, total_sub // 20)  # 每 5% 进度报告一次，避免频繁重绘
@@ -582,7 +646,7 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True, inspect_typ
         else:
             # 名称不一致分类：仅当配置包含「物料名称」字段时启用
             if has_name:
-                same_name = any(c['物料名称'] == srow['物料名称'] for _, c in cands_code)
+                same_name = srow['物料名称'] in code_name_sets.get(code, set())
             else:
                 same_name = True
             if has_code and not same_name:
@@ -603,15 +667,21 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True, inspect_typ
                 for idx, c in cands_code:
                     if idx in matched_ins:
                         continue
-                    diff = _diff_fields(srow, c, cfg, use_norm_supplier=normalize_suppliers)
+                    # 快速必然性检查：非供应商字段已不同 → 不可能匹配，只需前 2 条差异文本
+                    if not _quick_fields_equal(srow, c, pairs):
+                        if len(reasons) < 2:
+                            reasons.append(_diff_fields(srow, c, cfg, use_norm_supplier=normalize_suppliers, sup_cache=_sup_cache))
+                        continue
+                    diff = _diff_fields(srow, c, cfg, use_norm_supplier=normalize_suppliers, sup_cache=_sup_cache)
                     if not diff and (not has_date or _date_ge(c[ins_date_field], srow[sub_date_field])):
                         matched_idx = idx
                         matched_ins_row = c
                         break
-                    if diff:
-                        reasons.append(diff)
-                    elif has_date:
-                        reasons.append(f"质检日期 {_fmt_date(c[ins_date_field]) or '空'} 早于收料日期 {_fmt_date(srow[sub_date_field]) or '空'}")
+                    if len(reasons) < 2:
+                        if diff:
+                            reasons.append(diff)
+                        elif has_date:
+                            reasons.append(f"质检日期 {_fmt_date(c[ins_date_field]) or '空'} 早于收料日期 {_fmt_date(srow[sub_date_field]) or '空'}")
                 if matched_idx is not None:
                     _mr = matched_ins_row or {}
                     d['匹配检验记录'] = (f"{_mr.get('供应商', '') or ''} · {_mr.get('规格型号', '') or ''} · "
@@ -643,10 +713,14 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True, inspect_typ
             continue
         note = ''
         if has_code and irow['物料编码'] in sub_codes:
-            # 找出同编码的送检记录，尽量给出具体差异
-            diffs = [_diff_fields(s, irow, cfg, use_norm_supplier=normalize_suppliers)
-                     for s in subs if s['物料编码'] == irow['物料编码']]
-            diffs = [d for d in diffs if d]
+            # 找出同编码的送检记录，尽量给出具体差异（按送检顺序收集前 2 条非空差异即停，结果与原全量收集一致）
+            diffs = []
+            for s in subs_by_code.get(irow['物料编码'], []):
+                d = _diff_fields(s, irow, cfg, use_norm_supplier=normalize_suppliers, sup_cache=_sup_cache)
+                if d:
+                    diffs.append(d)
+                    if len(diffs) >= 2:
+                        break
             if diffs:
                 note = f"送检清单同编码记录存在差异：{'；'.join(diffs[:2])}"
             else:
