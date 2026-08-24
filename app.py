@@ -2965,7 +2965,7 @@ def _render_submission_tab(inspect_type):
     # 工序切换后重置本 tab 的临时状态，避免把上一工序预览的文件误入库到当前工序
     if st.session_state.get('_sub_active_type') != inspect_type:
         st.session_state._sub_active_type = inspect_type
-        for k in ['_sub_fid', '_sub_type', '_sub_df', '_sub_preview', '_sub_import_result']:
+        for k in ['_sub_fid', '_sub_type', '_sub_df', '_sub_preview', '_sub_import_result', '_sub_clean_filled']:
             st.session_state[k] = None
         st.session_state._sub_imported = False
 
@@ -2974,6 +2974,7 @@ def _render_submission_tab(inspect_type):
     st.session_state.setdefault('_sub_df', None)
     st.session_state.setdefault('_sub_preview', None)
     st.session_state.setdefault('_sub_imported', False)
+    st.session_state.setdefault('_sub_clean_filled', 0)
 
     st.caption(f'🧪 当前工序：**{inspect_type}**（顶部按钮切换工序）')
     records = _load_sub_records(inspect_type) or []
@@ -3003,10 +3004,13 @@ def _render_submission_tab(inspect_type):
             st.session_state._sub_import_result = None
             st.session_state._sub_imported = False
             try:
-                df = inspection_match.parse_sheet(uploaded, 'submission')
+                clean_report = {}
+                df = inspection_match.parse_sheet(uploaded, 'submission', clean_report=clean_report)
             except Exception as e:
                 st.session_state._sub_parse_err = str(e)
             else:
+                # 记录 ERP 收料通知单自动填充行数（仅首行有日期/状态时触发）
+                st.session_state._sub_clean_filled = clean_report.get('filled_rows', {}).get('收料日期', 0)
                 with st.spinner('正在检查重复记录...'):
                     t0 = time.monotonic()
                     new_df, dup_df = inspection_match.preview_import(df, inspect_type=inspect_type)
@@ -3031,6 +3035,9 @@ def _render_submission_tab(inspect_type):
         new_df, dup_df, preview_dt = st.session_state._sub_preview
         df = st.session_state._sub_df
         st.success(f'✅ 解析成功：共 {len(df)} 行 → 将新增 {len(new_df)} 条，重复跳过 {len(dup_df)} 条（预览耗时 {preview_dt:.2f}s）')
+        clean_filled = st.session_state.get('_sub_clean_filled', 0)
+        if clean_filled:
+            st.info(f'🧹 识别到 ERP 收料通知单格式：已自动按单据号填充 {clean_filled} 行空白收料日期/单据状态')
         st.dataframe(new_df, use_container_width=True, hide_index=True)
         if st.button('🚀 确认入库', type='primary', key=f'sub_import_btn_{inspect_type}'):
             progress_bar = st.progress(0)
