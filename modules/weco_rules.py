@@ -8,7 +8,7 @@ Western Electric / Nelson 判异规则模块
 import numpy as np
 
 
-def apply_all_rules(data, center, ucl, lcl, sigma, n_consecutive_same_side=7,
+def apply_all_rules(data, center, ucl, lcl, sigma, n_consecutive_same_side=9,
                     n_trend=6, n_alternating=14):
     """
     对一组数据应用全部 8 条 Nelson 判异规则。
@@ -19,7 +19,7 @@ def apply_all_rules(data, center, ucl, lcl, sigma, n_consecutive_same_side=7,
         ucl: 控制上限 (UCL)，可以是标量或与 data 等长的数组
         lcl: 控制下限 (LCL)，可以是标量或与 data 等长的数组
         sigma: 过程标准差 σ
-        n_consecutive_same_side: 同侧连续点数阈值（默认7）
+        n_consecutive_same_side: 同侧连续点数阈值（默认9，Minitab WECO 默认）
         n_trend: 趋势点数阈值（默认6）
         n_alternating: 交替点数阈值（默认14）
 
@@ -156,17 +156,19 @@ def _find_trends(data, min_run):
     runs = []
     diff = np.diff(data)
     start = 0
+    current_dir = None
     for i in range(len(diff)):
         if diff[i] > 0:
             direction = True  # 递增
         elif diff[i] < 0:
             direction = False  # 递减
         else:
-            # 相等时延续之前方向
-            continue
+            continue  # 相等点不改变方向
 
-        if i == start:
+        if current_dir is None:
+            # 第一个有方向的差分量
             current_dir = direction
+            start = i
             continue
 
         if direction != current_dir:
@@ -176,9 +178,10 @@ def _find_trends(data, min_run):
             start = i
             current_dir = direction
 
-    run_len = len(data) - start
-    if run_len >= min_run and start < len(data) - 1:
-        runs.append((start + 1, len(data), current_dir))
+    if current_dir is not None and start < len(data) - 1:
+        run_len = len(data) - start
+        if run_len >= min_run:
+            runs.append((start + 1, len(data), current_dir))
     return runs
 
 
@@ -199,7 +202,10 @@ def _find_alternating(data, min_run):
 
     start = 0
     for i in range(1, len(signs)):
-        if signs[i] == 0 or signs[i] == signs[i - 1]:
+        if signs[i] == 0:
+            start = i  # 相等点中断交替序列
+            continue
+        if signs[i] == signs[i - 1]:
             run_len = i - start + 1
             if run_len >= min_run:
                 runs.append((start + 1, i + 1))

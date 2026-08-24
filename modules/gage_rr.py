@@ -32,8 +32,10 @@ def gage_rr_crossed(parts, operators, measurements, tolerance=None):
     n_parts = df['Part'].nunique()
     n_operators = df['Operator'].nunique()
 
-    # 校验数据平衡性：所有 Part-Operator 组合的试验次数必须一致
+    # 校验数据平衡性：所有 Part-Operator 组合必须齐全，且试验次数一致
     trial_counts = df.groupby(['Part', 'Operator']).size()
+    if len(trial_counts) < n_parts * n_operators:
+        return {'error': '数据不完整：存在缺失的 Part×Operator 组合，请补充该组合的测量数据后再分析'}
     if trial_counts.nunique() > 1:
         return {'error': '数据不平衡：不同 Part-Operator 组合的试验次数不一致，请检查数据'}
     n_trials = trial_counts.iloc[0]
@@ -51,7 +53,9 @@ def gage_rr_crossed(parts, operators, measurements, tolerance=None):
     # d2常数 (标准表, g ≥ 15): EV用, 因 g = n_parts × n_operators ≥ 15
     d2_table = {2: 1.128, 3: 1.693, 4: 2.059, 5: 2.326, 6: 2.534,
                 7: 2.704, 8: 2.847, 9: 2.970, 10: 3.078}
-    d2 = d2_table.get(n_trials, d2_table[3])
+    d2 = d2_table.get(n_trials)
+    if d2 is None:
+        return {'error': f'重复试验次数 {n_trials} 超出常数表支持范围 (2~10)，请减少试验次数后再分析'}
 
     # 重复性 (Repeatability) = Equipment Variation (EV)
     EV = R_bar / d2
@@ -63,7 +67,9 @@ def gage_rr_crossed(parts, operators, measurements, tolerance=None):
     # d₂* 表 (AIAG MSA 第4版, g=1): 操作员均值的极差只有1个子组
     d2_star_ops = {2: 1.414, 3: 1.911, 4: 2.240, 5: 2.481,
                    6: 2.673, 7: 2.830, 8: 2.963, 9: 3.078, 10: 3.179}
-    d2_op = d2_star_ops.get(n_operators, 1.911)
+    d2_op = d2_star_ops.get(n_operators)
+    if d2_op is None:
+        return {'error': f'操作员数量 {n_operators} 超出常数表支持范围 (2~10)，请减少操作员数量后再分析'}
 
     AV_sq = (X_bar_diff / d2_op) ** 2 - var_EV / (n_parts * n_trials)
     AV = np.sqrt(max(AV_sq, 0))
@@ -82,7 +88,9 @@ def gage_rr_crossed(parts, operators, measurements, tolerance=None):
                      6: 2.673, 7: 2.830, 8: 2.963, 9: 3.078, 10: 3.179,
                      11: 3.269, 12: 3.350, 13: 3.424, 14: 3.491, 15: 3.553,
                      16: 3.610, 17: 3.663, 18: 3.713, 19: 3.760, 20: 3.804}
-    d2_part = d2_star_parts.get(n_parts, 3.179)
+    d2_part = d2_star_parts.get(n_parts)
+    if d2_part is None:
+        return {'error': f'部件数量 {n_parts} 超出常数表支持范围 (2~20)，请减少部件数量后再分析'}
     PV = Rp / d2_part
     var_PV = PV ** 2
 
@@ -278,6 +286,8 @@ def gage_rr_anova(parts, operators, measurements, tolerance=None, alpha_interact
     n_operators = df['Operator'].nunique()
 
     trial_counts = df.groupby(['Part', 'Operator']).size()
+    if len(trial_counts) < n_parts * n_operators:
+        return {'error': '数据不完整：存在缺失的 Part×Operator 组合，请补充该组合的测量数据后再分析'}
     if trial_counts.nunique() > 1:
         return {'error': '数据不平衡：不同 Part-Operator 组合的试验次数不一致，请检查数据'}
     n_trials = trial_counts.iloc[0]

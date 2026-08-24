@@ -10,6 +10,28 @@ from scipy import stats, special
 
 # ==================== DOE 试验设计 ====================
 
+def _lenth_pse_margin(effects):
+    """Lenth's PSE 伪标准误差与显著性界限 (Lenth 1989)。
+
+    返回 (PSE, ME, SME)：
+    - PSE: 伪标准误差
+    - ME : Margin of Error = t(0.975, m/3) * PSE
+    - SME: Simultaneous ME  = t(0.9975, m/3) * PSE (Minitab 默认参考线)
+    """
+    effects = np.asarray(effects, dtype=float)
+    n_eff = len(effects)
+    if n_eff == 0:
+        return 0.0, 0.0, 0.0
+    s0 = 1.5 * np.median(np.abs(effects))
+    keep = np.abs(effects) <= 2.5 * s0
+    pse = 1.5 * np.median(np.abs(effects[keep])) if np.any(keep) else s0
+    pse = max(pse, 1e-12)
+    df = max(n_eff / 3.0, 1.0)
+    me = stats.t.ppf(0.975, df) * pse
+    sme = stats.t.ppf(0.9975, df) * pse
+    return pse, me, sme
+
+
 def doe_full_factorial(df, response_col):
     """
     全因子试验设计分析
@@ -47,12 +69,15 @@ def doe_full_factorial(df, response_col):
                             subplot_titles=('因子效应帕累托图', '主效应图'),
                             vertical_spacing=0.18, row_heights=[0.45, 0.55])
 
-        # 帕累托图
+        # 帕累托图（显著性参考线：Lenth's PSE 方法）
         colors_pareto = ['#d62728' if v > 0 else '#1f77b4' for v in eff_raw]
         fig.add_trace(go.Bar(x=eff_names, y=eff_values, marker=dict(color=colors_pareto),
                              text=[f'{v:.4f}' for v in eff_raw], textposition='outside'), row=1, col=1)
-        fig.add_hline(y=np.mean(eff_values) * 2, line_dash='dash', line_color='gray', row=1, col=1,
-                      annotation_text='Lenth PSE')
+        _, me, sme = _lenth_pse_margin([e[1][0] for e in eff_sorted])
+        fig.add_hline(y=sme, line_dash='dash', line_color='red', row=1, col=1,
+                      annotation_text=f'SME={sme:.4f} (Lenth PSE)')
+        fig.add_hline(y=me, line_dash='dot', line_color='gray', row=1, col=1,
+                      annotation_text=f'ME={me:.4f}')
 
         # 主效应图
         for col_name, (eff, lo, hi, lo_label, hi_label) in eff_sorted:
