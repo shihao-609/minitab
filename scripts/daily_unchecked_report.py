@@ -46,6 +46,9 @@ def _get_env(name: str, default: str = '') -> str:
 
 # 每封邮件之间的发送间隔（秒）。凌晨定时任务无需及时，错开发送降低被判定为群发的风险。
 SEND_INTERVAL = max(0, int(_get_env('REPORT_SEND_INTERVAL', '30')))
+# 单封邮件发送失败后的重试次数（0 = 不重试），及两次重试之间的等待秒数。
+MAX_SEND_RETRY = max(0, int(_get_env('REPORT_MAX_RETRY', '2')))
+RETRY_INTERVAL = max(0, int(_get_env('REPORT_RETRY_INTERVAL', '60')))
 
 
 _SRV_CLIENT = None
@@ -212,7 +215,7 @@ def build_report():
     yesterday_df = (yesterday_unchecked.reset_index(drop=True)
                     if isinstance(yesterday_unchecked, pd.DataFrame) else pd.DataFrame(yesterday_unchecked))
 
-    sent_emails, total_unchecked = [], 0
+    sent_emails, total_unchecked, failed_emails = [], 0, []
     for t in sorted({str(x) for x in today_unchecked['检验类型'].astype(str)}):
         t_unchecked = today_unchecked[today_unchecked['检验类型'].astype(str) == t].copy()
         t_keys = set(_identity_keys(t_unchecked))
@@ -289,10 +292,27 @@ def build_report():
         msg.attach(part)
 
         smtp_recipients = to_list + cc_list
-        print(f'[邮件] 工序「{t}」连接 {smtp_host}:{smtp_port} ...')
-        with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as server:
-            server.login(smtp_user, smtp_pass)
-            server.sendmail(smtp_sender, smtp_recipients, msg.as_string())
+        last_err = None
+        for attempt in range(1, MAX_SEND_RETRY + 2):
+            try:
+                print(f'[邮件] 工序「{t}」连接 {smtp_host}:{smtp_port}（第 {attempt} 次尝试）...')
+                with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as server:
+                    server.login(smtp_user, smtp_pass)
+                    server.sendmail(smtp_sender, smtp_recipients, msg.as_string())
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                print(f'[邮件] 工序「{t}」第 {attempt} 次发送失败: {e}')
+                if attempt <= MAX_SEND_RETRY:
+                    print(f'[等待] {RETRY_INTERVAL} 秒后重试...')
+                    time.sleep(RETRY_INTERVAL)
+        if last_err is not None:
+            print(f'[失败] 工序「{t}」重试 {MAX_SEND_RETRY} 次后仍发送失败，跳过该工序继续后续: {last_err}')
+            failed_emails.append(filename)
+            if SEND_INTERVAL > 0:
+                time.sleep(SEND_INTERVAL)
+            continue
         cc_txt = f'，抄送 {len(cc_list)} 人' if cc_list else ''
         print(f'[邮件] 工序「{t}」已发送给 {len(to_list)} 个收件人{cc_txt}: {", ".join(smtp_recipients)}')
         sent_emails.append(filename)
@@ -305,7 +325,9 @@ def build_report():
         print('[完成] 所有工序均未发送（未配置对应收件人，或没有未检验记录）')
         return None
     print(f'[完成] 共发送 {len(sent_emails)} 封邮件，合计未检验 {total_unchecked} 条')
-    return {'emails': sent_emails, 'unchecked_count': total_unchecked}
+    if failed_emails:
+        print(f'[警告] {len(failed_emails)} 封发送失败: {", ".join(failed_emails)}')
+    return {'emails': sent_emails, 'unchecked_count': total_unchecked, 'failed': failed_emails}
 
 
 def main():
@@ -313,6 +335,8 @@ def main():
         result = build_report()
         if result:
             print(f'[完成] 共发送 {len(result["emails"])} 封邮件（未检验合计 {result["unchecked_count"]} 条）')
+            if result.get('failed'):
+                print(f'[警告] 其中 {len(result["failed"])} 封发送失败: {", ".join(result["failed"])}')
         else:
             print('[完成] 无需发送（未检验清单为空或没有送检记录）')
     except Exception as e:
