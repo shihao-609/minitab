@@ -24,6 +24,7 @@
 import os
 import sys
 import smtplib
+import time
 from datetime import date, datetime, timedelta
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
@@ -41,6 +42,10 @@ from modules import inspection_match  # noqa: E402
 
 def _get_env(name: str, default: str = '') -> str:
     return os.environ.get(name, default) or default
+
+
+# 每封邮件之间的发送间隔（秒）。凌晨定时任务无需及时，错开发送降低被判定为群发的风险。
+SEND_INTERVAL = max(0, int(_get_env('REPORT_SEND_INTERVAL', '30')))
 
 
 _SRV_CLIENT = None
@@ -292,6 +297,9 @@ def build_report():
         print(f'[邮件] 工序「{t}」已发送给 {len(to_list)} 个收件人{cc_txt}: {", ".join(smtp_recipients)}')
         sent_emails.append(filename)
         total_unchecked += len(t_keys)
+        if SEND_INTERVAL > 0:
+            print(f'[等待] 下一封邮件间隔 {SEND_INTERVAL} 秒（凌晨任务，错开发送）')
+            time.sleep(SEND_INTERVAL)
 
     if not sent_emails:
         print('[完成] 所有工序均未发送（未配置对应收件人，或没有未检验记录）')
