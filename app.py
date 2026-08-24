@@ -31,6 +31,18 @@ load_dotenv()
 
 
 # ==================== 工具函数 ====================
+def _safe_float(s):
+    """安全转换字符串为 float，非法输入返回 None（避免用户输入导致页面崩溃）"""
+    if s is None:
+        return None
+    s = str(s).strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
 def check_data():
     if 'user_data' not in st.session_state or st.session_state.user_data is None:
         return None
@@ -630,7 +642,7 @@ def page_spc():
         # 目标值输入（可选）
         tgt_input = st.text_input('🎯 目标值 (可选)', placeholder='留空=不设目标', key='shewhart_target',
                                   help='设置后将计算中心线与目标值的偏差，并在图中显示目标线')
-        target_val = float(tgt_input) if tgt_input else None
+        target_val = _safe_float(tgt_input)
 
         if ct in ['X-bar R (均值-极差)', 'X-bar S (均值-标准差)']:
             c1, c2 = st.columns(2)
@@ -738,7 +750,7 @@ def page_spc():
             L = st.slider('控制限倍数 L', 2.0, 4.0, 2.7, 0.1)
         with c3:
             tgt_input_ewma = st.text_input('目标值 (可选)', placeholder='留空=不设', key='ewma_target')
-        target_ewma = float(tgt_input_ewma) if tgt_input_ewma else None
+        target_ewma = _safe_float(tgt_input_ewma)
         if dc not in df.columns:
             st.warning(f'列 "{dc}" 已变更，请重新选择')
         else:
@@ -763,7 +775,7 @@ def page_spc():
             h_val = st.slider('决策区间 h (σ倍数)', 2.0, 8.0, 4.0, 0.5)
         with c3:
             tgt_input_cusum = st.text_input('目标值 (可选)', placeholder='留空=用数据均值', key='cusum_target')
-        target_cusum = float(tgt_input_cusum) if tgt_input_cusum else None
+        target_cusum = _safe_float(tgt_input_cusum)
         if dc not in df.columns:
             st.warning(f'列 "{dc}" 已变更，请重新选择')
         else:
@@ -834,9 +846,9 @@ def page_capability():
                 if ss <= 1:
                     wm = 'Rbar'  # 单值只能用移动极差
 
-            usl = float(usl) if usl else None
-            lsl = float(lsl) if lsl else None
-            tgt = float(tgt) if tgt else None
+            usl = _safe_float(usl)
+            lsl = _safe_float(lsl)
+            tgt = _safe_float(tgt)
 
             if usl is None and lsl is None:
                 st.info('请至少输入一个规格限')
@@ -904,8 +916,8 @@ def page_capability():
             with c4:
                 wm_bc = st.selectbox('组内σ方法', ['Rbar', 'Sbar'], key='bc_wm')
 
-            usl_bc_f = float(usl_bc) if usl_bc else None
-            lsl_bc_f = float(lsl_bc) if lsl_bc else None
+            usl_bc_f = _safe_float(usl_bc)
+            lsl_bc_f = _safe_float(lsl_bc)
 
             if usl_bc_f is None and lsl_bc_f is None:
                 st.info('请至少输入一个规格限')
@@ -948,8 +960,8 @@ def page_capability():
                                help='20% = VDA 5 标准, 100% = 完整公差法')
 
         if tol:
-            tolerance = float(tol)
-            ref = float(ref_val) if ref_val else None
+            tolerance = _safe_float(tol)
+            ref = _safe_float(ref_val)
             r = msa_advanced.cg_cgk(data, tolerance, ref, percent_tol=pct)
             if 'error' in r:
                 st.error(r['error'])
@@ -1040,7 +1052,7 @@ def page_quality_tools():
             else:
                 dc = st.selectbox('数据列', numeric_cols, key='run_col')
                 tgt = st.text_input('目标线 (可选)', placeholder='留空=不显示', key='run_tgt')
-                target = float(tgt) if tgt else None
+                target = _safe_float(tgt)
                 r = quality_tools.run_chart(df[dc].dropna().values, target)
                 if 'error' in r:
                     st.error(r['error'])
@@ -1254,7 +1266,7 @@ def page_msa():
         parts = df[pc].values
         ops = df[oc].values
         meas = df[mc].values
-        tolerance = float(tol_val) if tol_val else None
+        tolerance = _safe_float(tol_val)
         n_parts = len(np.unique(parts))
         n_ops = len(np.unique(ops))
         st.info(f'📋 {n_parts} 部件 × {n_ops} 操作员 × {len(meas)} 次测量')
@@ -2060,7 +2072,7 @@ def _show_analysis_detail(analysis, data_dict, file_idx):
                         if vi < len(h_cols):
                             with cs[ci]:
                                 st.plotly_chart(hist_charts[h_cols[vi]], use_container_width=True,
-                                               key=f'batch_hist_{file_idx}_{h_cols[vi]}')
+                                               key=f'batch_hist_mod_{file_idx}_{h_cols[vi]}')
 
         # EWMA 控制图
         ewma_result = results.get('ewma', {})
@@ -2439,9 +2451,15 @@ def _dlg_step_params(fname, file_idx, cols_list, numeric_cols,
                                          params.get('bc_subgroup', 1),
                                          key=f'dlg_cap_ss_{file_idx}')
             if cap_usl:
-                params['usl'] = float(cap_usl)
+                try:
+                    params['usl'] = float(cap_usl)
+                except ValueError:
+                    pass
             if cap_lsl:
-                params['lsl'] = float(cap_lsl)
+                try:
+                    params['lsl'] = float(cap_lsl)
+                except ValueError:
+                    pass
             params['bc_subgroup'] = cap_ss
 
         # SPC 高级参数

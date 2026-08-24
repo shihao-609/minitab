@@ -207,9 +207,9 @@ def attribute_gage_rr(reference, appraisers, n_trials=2):
     else:
         ops_match = 1.0
 
-    # 图表
+    # 图表（仅包含数据足够的操作员，避免数据不足被 continue 的操作员导致 KeyError）
     fig = go.Figure()
-    op_names = list(appraisers.keys())
+    op_names = op_names_in_results
     kappas = [results[op]['kappa'] for op in op_names]
     accuracies = [results[op]['accuracy'] for op in op_names]
     colors_bar = ['#2ca02c' if k >= 0.8 else ('#ff7f0e' if k >= 0.6 else '#d62728') for k in kappas]
@@ -232,17 +232,22 @@ def attribute_gage_rr(reference, appraisers, n_trials=2):
     )
     fig.update_xaxes(title_text='操作员')
 
+    skipped_ops = [op for op in appraisers if op not in results]
+    stats_summary = {
+        '零件数': n_parts,
+        '操作员数': n_ops,
+        '重复次数': detected_trials,
+        '试验次数一致性': '一致' if trials_consistent else f'不一致 (检测到: {sorted(unique_trials)})',
+        '操作员间一致性': f'{ops_match:.1%}',
+    }
+    if skipped_ops:
+        stats_summary['说明'] = f'已跳过判定数据不足(<2条)的操作员: {", ".join(skipped_ops)}'
+
     return {
         'chart': fig,
         'kappa_summary': kappa_summary,
         'between_operators_agreement': ops_match,
-        'stats_summary': {
-            '零件数': n_parts,
-            '操作员数': n_ops,
-            '重复次数': detected_trials,
-            '试验次数一致性': '一致' if trials_consistent else f'不一致 (检测到: {sorted(unique_trials)})',
-            '操作员间一致性': f'{ops_match:.1%}',
-        }
+        'stats_summary': stats_summary,
     }
 
 
