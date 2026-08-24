@@ -2932,18 +2932,22 @@ def _load_sub_total(show_type=None):
     return total
 
 
-def _records_time_range(records: list, key: str = 'created_at') -> str:
-    """从记录列表的指定时间字段提取最早/最晚，返回 'YYYY-MM-DD HH:MM ~ YYYY-MM-DD HH:MM'。
+def _records_time_range(records: list, key: str) -> str:
+    """从记录列表的指定日期/时间字段提取最早/最晚，返回 'YYYY-MM-DD ~ YYYY-MM-DD'。
 
-    时间字段取前 19 字符并按字典序取 min/max（ISO 字符串天然有序），无有效时间返回 ''。
+    支持 'YYYY-MM-DD' 纯日期与 'YYYY-MM-DD HH:MM[:SS]' 两种格式；字段缺失或空值跳过；
+    取前 19 字符并按字典序 min/max（ISO 格式天然有序），无有效值返回 ''。
     """
     times = []
     for r in records or []:
         v = str(r.get(key, '') or '').strip()
-        if v:
-            v = v[:19].replace('T', ' ').strip()
-            if len(v) >= 16:
-                times.append(v[:16])  # 统一到 'YYYY-MM-DD HH:MM'
+        if not v:
+            continue
+        v = v[:19].replace('T', ' ').strip()
+        if len(v) == 10:          # 'YYYY-MM-DD'
+            times.append(v)
+        elif len(v) >= 16:        # 'YYYY-MM-DD HH:MM[:SS]'
+            times.append(v[:16])
     if not times:
         return ''
     lo, hi = min(times), max(times)
@@ -3097,9 +3101,9 @@ def _render_submission_tab(inspect_type):
 
     if total and total > len(records):
         st.caption(f'💡 共 {total} 条，仅显示最近 {len(records)} 条')
-    trange = _records_time_range(records)
-    st.caption(f'🕐 数据时间范围（已加载 {len(records)} 条）：**{trange}**' if trange
-               else f'🕐 数据时间范围：未知（已加载 {len(records)} 条）')
+    trange = _records_time_range(records, key='received_date')
+    st.caption(f'📅 收料日期范围（已加载 {len(records)} 条）：**{trange}**' if trange
+               else f'📅 收料日期范围：未知（已加载 {len(records)} 条）')
     df = inspection_match.submissions_to_df(records)
     cols = [c for c in df.columns if c != 'id']
     st.dataframe(df[cols], use_container_width=True, hide_index=True)
@@ -3315,9 +3319,9 @@ def _render_inspection_records_tab(inspect_type):
     if not records:
         st.info('暂无检验记录')
         return
-    trange = _records_time_range(records)
-    st.caption(f'🕐 已保存数据时间范围（已加载 {len(records)} 条）：**{trange}**' if trange
-               else f'🕐 已保存数据时间范围：未知（已加载 {len(records)} 条）')
+    trange = _records_time_range(records, key='inspect_date')
+    st.caption(f'📅 质检日期范围（已加载 {len(records)} 条）：**{trange}**' if trange
+               else f'📅 质检日期范围：未知（已加载 {len(records)} 条）')
     df = inspection_match.inspection_records_to_df(records)
     show_cols = ['检验类型', '单据编号', '供应商', '物料编码', '物料名称', '质检日期', '检验数量',
                  '合格数', '不合格数', '检验结果', '质检员', '批号', '类别', '入库时间']
