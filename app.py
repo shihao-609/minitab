@@ -3425,6 +3425,33 @@ def _render_report_recipients_tab(inspect_type):
         st.info('暂无收件人，添加后每天凌晨的未检验清单才会发送。')
 
 
+@st.dialog('⚠️ 确认清除记录')
+def _confirm_clear_records_dialog(inspect_type):
+    """一键清除当前工序的送检记录和检验记录，操作不可恢复。"""
+    sub_total = supabase_helper.count_inspection_submissions(inspect_type)
+    ins_total = supabase_helper.count_inspection_records(inspect_type)
+    st.warning(
+        f'即将清除「**{inspect_type}**」的全部记录：\n\n'
+        f'- 送检记录：**{sub_total}** 条\n'
+        f'- 检验记录：**{ins_total}** 条\n\n'
+        '清除后无法恢复，历史跨窗口对账将失效，请确认。'
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button('✅ 确认清除', type='primary', key=f'confirm_clear_records_{inspect_type}', use_container_width=True):
+            ok_sub = supabase_helper.clear_inspection_submissions(inspect_type)
+            ok_ins = supabase_helper.clear_inspection_records(inspect_type)
+            if ok_sub and ok_ins:
+                _clear_sub_caches()
+                st.success(f'已清除「{inspect_type}」全部记录')
+                st.rerun()
+            else:
+                st.error('清除失败，请检查网络或数据库状态')
+    with c2:
+        if st.button('取消', key=f'cancel_clear_records_{inspect_type}', use_container_width=True):
+            st.rerun()
+
+
 def page_inspection_match():
     st.header('🔍 质量管理')
     st.caption('按工序管理送检、检验对比、记录库及相关配置。当前只启用已配置的工序，以后新增工序会自动扩展。')
@@ -3467,7 +3494,13 @@ def page_inspection_match():
     )
     if not selected_type:
         selected_type = inspect_types[0]
-    st.caption(f'当前工序：**{selected_type}**')
+    c1, c2 = st.columns([6, 1])
+    with c1:
+        st.caption(f'当前工序：**{selected_type}**')
+    with c2:
+        if st.button('🗑️ 清除记录', key=f'btn_clear_records_{selected_type}',
+                     help='一键清空当前工序的送检记录和检验记录', use_container_width=True):
+            _confirm_clear_records_dialog(selected_type)
 
     tab_manage, tab_compare, tab_ins_db, tab_alias, tab_recipients = st.tabs(
         ['📤 送检清单管理', '⚖️ 检验对比', '📋 检验记录库', '🏷️ 供应商别名', '📮 邮件收件人'])
