@@ -273,29 +273,6 @@ def list_datasets() -> list:
         return []
 
 
-def update_dataset(dataset_id: str, name: str = None, df: pd.DataFrame = None) -> bool:
-    """
-    更新数据集
-
-    v2 变更：使用 JWT 客户端，确保只能更新自己的数据
-    """
-    try:
-        client = _get_client()
-        _check_client(client)
-        update_data = {"updated_at": datetime.now(timezone.utc).isoformat()}
-        if name:
-            update_data["name"] = name
-        if df is not None:
-            update_data["data"] = json.loads(df.to_json(orient="records", force_ascii=False))
-            update_data["row_count"] = len(df)
-
-        client.table("datasets").update(update_data).eq("id", dataset_id).execute()
-        return True
-    except Exception as e:
-        st.error(f"更新数据集失败: {e}")
-        return False
-
-
 @_with_retry
 def _do_delete_dataset(client, dataset_id):
     return client.table("datasets").delete().eq("id", dataset_id).execute()
@@ -373,34 +350,6 @@ def list_fishbone_configs() -> list:
     except Exception as e:
         st.error(f"获取鱼骨图配置列表失败: {e}")
         return []
-
-
-@_with_retry
-def _do_load_fishbone(client, config_id):
-    return client.table("fishbone_configs").select("*").eq("id", config_id).execute()
-
-
-def load_fishbone_config(config_id: str) -> Optional[dict]:
-    """
-    加载指定鱼骨图配置
-    v3 变更：添加重试机制
-    """
-    try:
-        client = _get_client()
-        _check_client(client)
-        result = _do_load_fishbone(client, config_id)
-        if result.data:
-            record = result.data[0]
-            rid = record.get("user_id")
-            uid = _get_user_id()
-            if uid and rid and rid != uid:
-                st.error("无权访问此配置")
-                return None
-            return record
-        return None
-    except Exception as e:
-        st.error(f"加载鱼骨图配置失败: {e}")
-        return None
 
 
 @_with_retry
@@ -921,23 +870,6 @@ def insert_inspection_submissions(rows: list) -> int:
 
 
 @_with_retry
-def _do_delete_inspection(client, rid):
-    return client.table("inspection_submissions").delete().eq("id", rid).execute()
-
-
-def delete_inspection_submission(rid: str) -> bool:
-    """删除指定的送检记录"""
-    try:
-        client = _get_client()
-        _check_client(client)
-        _do_delete_inspection(client, rid)
-        return True
-    except Exception as e:
-        st.error(f"删除送检记录失败: {e}")
-        return False
-
-
-@_with_retry
 def _do_clear_inspections(client, uid, inspect_type=None):
     q = client.table("inspection_submissions").delete().eq("user_id", uid)
     if inspect_type:
@@ -1204,17 +1136,6 @@ def ensure_supplier_aliases_table() -> bool:
         return False
 
 
-def ensure_inspection_records_rpc() -> bool:
-    """检测 bulk_insert_inspection_records 函数是否已创建（空数组调用无副作用）"""
-    try:
-        client = _get_client()
-        _check_client(client)
-        client.rpc("bulk_insert_inspection_records", {"p_rows": []}).execute()
-        return True
-    except Exception:
-        return False
-
-
 @_with_retry
 def _do_list_inspection_records(client, limit=None, inspect_type=None):
     q = client.table("inspection_records").select("*").order(
@@ -1338,23 +1259,6 @@ def insert_inspection_records(rows: list) -> int:
     except Exception as e:
         st.error(f"插入检验记录失败: {e}")
         return 0
-
-
-@_with_retry
-def _do_delete_inspection_record(client, rid):
-    return client.table("inspection_records").delete().eq("id", rid).execute()
-
-
-def delete_inspection_record(rid: str) -> bool:
-    """删除指定的检验记录"""
-    try:
-        client = _get_client()
-        _check_client(client)
-        _do_delete_inspection_record(client, rid)
-        return True
-    except Exception as e:
-        st.error(f"删除检验记录失败: {e}")
-        return False
 
 
 @_with_retry

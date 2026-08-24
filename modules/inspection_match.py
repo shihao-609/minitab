@@ -783,23 +783,6 @@ def _to_xlsx_bytes(df, sheet_name='结果', red_rows=None):
     return buf.getvalue()
 
 
-def download_template(kind='submission'):
-    """下载填表模板（含一行示例）"""
-    cols = SUBMISSION_COLS if kind == 'submission' else INSPECTION_COLS
-    example = {
-        'submission': ['供应商A', 'M1001', '10x20x30', '示例物料', '2026-08-21', 1000],
-        'inspection': ['供应商A', 'M1001', '10x20x30', '示例物料', '2026-08-21', 1000],
-    }
-    rows = [dict(zip(cols, example[kind])), {c: '' for c in cols}]
-    return _to_xlsx_bytes(pd.DataFrame(rows, columns=cols), '模板')
-
-
-def export_submissions(records):
-    """导出当前用户的全部送检记录"""
-    df = submissions_to_df(records).drop(columns=['id'])
-    return _to_xlsx_bytes(df, '送检记录')
-
-
 def export_unchecked(result):
     """导出未检验清单（整表红底高亮）"""
     df = result['unchecked']

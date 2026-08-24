@@ -60,7 +60,6 @@ def parse_uploaded_file(uploaded_file):
         df = None
         for enc in ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'gb18030', 'latin-1']:
             try:
-                from io import BytesIO
                 df = pd.read_csv(BytesIO(raw_bytes), encoding=enc)
                 break
             except (UnicodeDecodeError, UnicodeError):
