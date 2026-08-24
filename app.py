@@ -3108,10 +3108,11 @@ def _render_submission_tab(inspect_type):
     cols = [c for c in df.columns if c != 'id']
     st.dataframe(df[cols], use_container_width=True, hide_index=True)
 
+    st.caption('⚠️ 团队共享：清空将移除当前工序**所有检验员上传**的送检记录，且无法恢复。')
     clear_ck_key = f'sub_clear_ck_{inspect_type}'
     clear_btn_key = f'sub_clear_btn_{inspect_type}'
-    if st.checkbox(f'⚠️ 确认清空「{inspect_type}」的全部送检记录', key=clear_ck_key):
-        if st.button(f'🗑️ 清空「{inspect_type}」送检记录', type='primary', key=clear_btn_key, use_container_width=True):
+    if st.checkbox(f'⚠️ 确认清空「{inspect_type}」的**全部共享**送检记录', key=clear_ck_key):
+        if st.button(f'🗑️ 清空「{inspect_type}」送检记录（所有人）', type='primary', key=clear_btn_key, use_container_width=True):
             if supabase_helper.clear_inspection_submissions(inspect_type=inspect_type):
                 _clear_sub_caches()
                 st.rerun()
@@ -3329,12 +3330,12 @@ def _render_inspection_records_tab(inspect_type):
 
     c1, c2 = st.columns([1, 3])
     with c1:
-        if st.button(f'🗑️ 清空「{inspect_type}」检验记录', key=f'clear_ins_db_{inspect_type}'):
+        if st.button(f'🗑️ 清空「{inspect_type}」检验记录（所有人）', key=f'clear_ins_db_{inspect_type}'):
             if supabase_helper.clear_inspection_records(inspect_type=inspect_type):
                 st.success(f'已清空「{inspect_type}」检验记录')
                 st.rerun()
     with c2:
-        st.caption('⚠️ 该按钮只清空当前工序的检验记录，清空后无法恢复，历史跨窗口对账将失效，请谨慎操作。')
+        st.caption('⚠️ 团队共享：该按钮将清空当前工序**所有检验员上传**的检验记录，清空后无法恢复，历史跨窗口对账将失效，请谨慎操作。')
 
 
 def _render_supplier_alias_tab():
@@ -3458,10 +3459,10 @@ def _confirm_clear_records_dialog(inspect_type):
     sub_total = supabase_helper.count_inspection_submissions(inspect_type)
     ins_total = supabase_helper.count_inspection_records(inspect_type)
     st.warning(
-        f'即将清除「**{inspect_type}**」的全部记录：\n\n'
+        f'即将清除「**{inspect_type}**」的**全部共享**记录：\n\n'
         f'- 送检记录：**{sub_total}** 条\n'
         f'- 检验记录：**{ins_total}** 条\n\n'
-        '清除后无法恢复，历史跨窗口对账将失效，请确认。'
+        '⚠️ 团队共享：清除将移除所有检验员上传的记录，且无法恢复，历史跨窗口对账将失效，请确认。'
     )
     c1, c2 = st.columns(2)
     with c1:
@@ -3490,6 +3491,13 @@ def page_inspection_match():
         if col_err:
             st.error(f'❌ 检测失败原因：`{col_err}`')
         st.code(supabase_helper.get_inspect_type_migration_sql(), language='sql')
+        st.divider()
+
+    if not supabase_helper.is_shared_mode():
+        st.warning('⚠️ 当前数据库仍为「按账号隔离」模式，各检验员只能看到/清空自己上传的记录。'
+                   '如需团队共享（所有检验员共享同一份送检/检验数据，多人上传自动去重），'
+                   '请在 Supabase SQL Editor 执行下方迁移 SQL（幂等，可重复执行）：')
+        st.code(supabase_helper.get_shared_mode_migration_sql(), language='sql')
         st.divider()
 
     # 本页面所有 session_state key 统一初始化，避免分支遗漏
@@ -3526,7 +3534,7 @@ def page_inspection_match():
         st.caption(f'当前工序：**{selected_type}**')
     with c2:
         if st.button('🗑️ 清除记录', key=f'btn_clear_records_{selected_type}',
-                     help='一键清空当前工序的送检记录和检验记录', use_container_width=True):
+                     help='一键清空当前工序的全部共享记录（所有检验员上传的送检+检验记录）', use_container_width=True):
             _confirm_clear_records_dialog(selected_type)
 
     tab_manage, tab_compare, tab_ins_db, tab_alias, tab_recipients = st.tabs(

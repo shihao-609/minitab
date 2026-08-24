@@ -615,28 +615,32 @@ CREATE TABLE IF NOT EXISTS inspection_submissions (
 -- 2. 启用 RLS
 ALTER TABLE inspection_submissions ENABLE ROW LEVEL SECURITY;
 
--- 3. 删除旧策略（避免重复执行报错）
+-- 3. 删除旧策略（避免重复执行报错；兼容升级前的账号隔离策略）
 DROP POLICY IF EXISTS "Users can view own inspections" ON inspection_submissions;
 DROP POLICY IF EXISTS "Users can insert own inspections" ON inspection_submissions;
 DROP POLICY IF EXISTS "Users can delete own inspections" ON inspection_submissions;
+DROP POLICY IF EXISTS "Users can view all inspections" ON inspection_submissions;
+DROP POLICY IF EXISTS "Users can delete all inspections" ON inspection_submissions;
 
--- 4. 创建 RLS 策略：用户只能访问自己的送检记录
-CREATE POLICY "Users can view own inspections"
+-- 4. 创建 RLS 策略：团队共享（多个检验员共享同一份送检/检验数据）
+--    SELECT/DELETE：所有登录用户可见、可删除全部
+--    INSERT：仍写入当前用户 user_id，仅允许插入自己的记录（保留上传人追溯）
+CREATE POLICY "Users can view all inspections"
     ON inspection_submissions FOR SELECT
-    USING (auth.uid() = user_id);
+    USING (auth.uid() IS NOT NULL);
 
 CREATE POLICY "Users can insert own inspections"
     ON inspection_submissions FOR INSERT
     WITH CHECK (auth.uid() = user_id);
 
-CREATE POLICY "Users can delete own inspections"
+CREATE POLICY "Users can delete all inspections"
     ON inspection_submissions FOR DELETE
-    USING (auth.uid() = user_id);
+    USING (auth.uid() IS NOT NULL);
 
--- 5. 唯一索引：通用去重键（dedup_key 由应用按工序配置字段计算，
---    以后新增工序即使字段不同，也无需再改这里的索引）
+-- 5. 唯一索引：跨账号全局去重（dedup_key 由应用按工序配置字段计算，
+--    多人上传同一记录时自动跳过；部分索引排除空去重键的异常行）
 CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_dedup
-    ON inspection_submissions(user_id, inspect_type, dedup_key);
+    ON inspection_submissions(inspect_type, dedup_key) WHERE dedup_key <> '';
 
 -- 6. 常用查询索引
 CREATE INDEX IF NOT EXISTS idx_inspection_user_date
@@ -656,16 +660,26 @@ BEGIN
     -- 老库自愈：确保 inspect_type / dedup_key 列存在（无动态 SQL，安全）
     ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
     ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
-    -- 老库自愈：确保去重索引使用通用 dedup_key（新工序字段可不同，索引不再绑定固定列）
-    IF NOT EXISTS (
+    -- 老库自愈：若去重索引仍按账号隔离（含 user_id），迁移为团队共享（跨账号全局去重）
+    IF EXISTS (
         SELECT 1 FROM pg_indexes
         WHERE schemaname = 'public' AND tablename = 'inspection_submissions'
           AND indexname = 'idx_inspection_dedup'
-          AND indexdef LIKE '%dedup_key%'
+          AND indexdef LIKE '%(user_id, inspect_type, dedup_key)%'
     ) THEN
-        DROP INDEX IF EXISTS idx_inspection_dedup;
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_dedup
-            ON inspection_submissions(user_id, inspect_type, dedup_key);
+        -- 先清理跨账号重复（保留最早一条），否则无法创建全局唯一索引
+        DELETE FROM inspection_submissions
+        WHERE id IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY inspect_type, dedup_key ORDER BY created_at, id
+                ) AS rn
+                FROM inspection_submissions WHERE dedup_key <> ''
+            ) t WHERE rn > 1
+        );
+        DROP INDEX idx_inspection_dedup;
+        CREATE UNIQUE INDEX idx_inspection_dedup
+            ON inspection_submissions(inspect_type, dedup_key) WHERE dedup_key <> '';
     END IF;
 
     FOR r IN SELECT * FROM jsonb_array_elements(p_rows) LOOP
@@ -715,7 +729,7 @@ def _do_list_inspections(client, limit=None, inspect_type=None):
 
 def list_inspection_submissions(limit: int = None, inspect_type: str = None) -> list:
     """
-    列出当前用户的送检记录（按收料日期倒序），用于管理页展示。
+    列出团队共享的送检记录（按收料日期倒序），用于管理页展示。
     limit 用于控制单次传输量（例如仅展示最近 2000 条）。
     inspect_type 传入工序名则只返回该工序的记录（None 返回全部，兼容旧调用）。
     """
@@ -723,10 +737,6 @@ def list_inspection_submissions(limit: int = None, inspect_type: str = None) -> 
         client = _get_client()
         _check_client(client)
         result = _do_list_inspections(client, limit, inspect_type)
-
-        uid = _get_user_id()
-        if uid and result.data:
-            result.data = [r for r in result.data if r.get("user_id") == uid]
 
         return result.data
     except Exception as e:
@@ -870,23 +880,21 @@ def insert_inspection_submissions(rows: list) -> int:
 
 
 @_with_retry
-def _do_clear_inspections(client, uid, inspect_type=None):
-    q = client.table("inspection_submissions").delete().eq("user_id", uid)
+def _do_clear_inspections(client, inspect_type=None):
+    q = client.table("inspection_submissions").delete()
     if inspect_type:
         q = q.eq("inspect_type", inspect_type)
+    else:
+        q = q.neq("inspect_type", "")  # PostgREST 要求 DELETE 必须带过滤条件
     return q.execute()
 
 
 def clear_inspection_submissions(inspect_type: str = None) -> bool:
-    """清空当前用户的送检记录（inspect_type 传入工序名则只清空该工序）"""
+    """清空团队共享的送检记录（inspect_type 传入工序名则只清空该工序）"""
     try:
         client = _get_client()
         _check_client(client)
-        uid = _get_user_id()
-        if not uid:
-            st.error("清空送检记录失败: 未获取到用户 ID。")
-            return False
-        _do_clear_inspections(client, uid, inspect_type)
+        _do_clear_inspections(client, inspect_type)
         return True
     except Exception as e:
         st.error(f"清空送检记录失败: {e}")
@@ -926,23 +934,26 @@ ALTER TABLE inspection_records ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "Users can view own ins_records" ON inspection_records;
 DROP POLICY IF EXISTS "Users can insert own ins_records" ON inspection_records;
 DROP POLICY IF EXISTS "Users can delete own ins_records" ON inspection_records;
+DROP POLICY IF EXISTS "Users can view all ins_records" ON inspection_records;
+DROP POLICY IF EXISTS "Users can delete all ins_records" ON inspection_records;
 
-CREATE POLICY "Users can view own ins_records"
+-- 团队共享：SELECT/DELETE 对所有登录用户开放；INSERT 仍记录上传人
+CREATE POLICY "Users can view all ins_records"
     ON inspection_records FOR SELECT
-    USING (auth.uid() = user_id);
+    USING (auth.uid() IS NOT NULL);
 
 CREATE POLICY "Users can insert own ins_records"
     ON inspection_records FOR INSERT
     WITH CHECK (auth.uid() = user_id);
 
-CREATE POLICY "Users can delete own ins_records"
+CREATE POLICY "Users can delete all ins_records"
     ON inspection_records FOR DELETE
-    USING (auth.uid() = user_id);
+    USING (auth.uid() IS NOT NULL);
 
--- 去重索引：通用去重键（dedup_key 由应用按工序配置字段计算，
---    以后新增工序即使字段不同，也无需再改这里的索引）
+-- 去重索引：跨账号全局去重（dedup_key 由应用按工序配置字段计算，
+--    多人上传同一记录时自动跳过；部分索引排除空去重键的异常行）
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ins_records_dedup
-    ON inspection_records(user_id, inspect_type, dedup_key);
+    ON inspection_records(inspect_type, dedup_key) WHERE dedup_key <> '';
 
 CREATE INDEX IF NOT EXISTS idx_ins_records_user_date
     ON inspection_records(user_id, inspect_date);
@@ -960,16 +971,26 @@ BEGIN
     -- 老库自愈：确保 inspect_type / dedup_key 列存在（无动态 SQL，安全）
     ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
     ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
-    -- 老库自愈：确保去重索引使用通用 dedup_key（新工序字段可不同，索引不再绑定固定列）
-    IF NOT EXISTS (
+    -- 老库自愈：若去重索引仍按账号隔离（含 user_id），迁移为团队共享（跨账号全局去重）
+    IF EXISTS (
         SELECT 1 FROM pg_indexes
         WHERE schemaname = 'public' AND tablename = 'inspection_records'
           AND indexname = 'idx_ins_records_dedup'
-          AND indexdef LIKE '%dedup_key%'
+          AND indexdef LIKE '%(user_id, inspect_type, dedup_key)%'
     ) THEN
-        DROP INDEX IF EXISTS idx_ins_records_dedup;
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_ins_records_dedup
-            ON inspection_records(user_id, inspect_type, dedup_key);
+        -- 先清理跨账号重复（保留最早一条），否则无法创建全局唯一索引
+        DELETE FROM inspection_records
+        WHERE id IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY inspect_type, dedup_key ORDER BY created_at, id
+                ) AS rn
+                FROM inspection_records WHERE dedup_key <> ''
+            ) t WHERE rn > 1
+        );
+        DROP INDEX idx_ins_records_dedup;
+        CREATE UNIQUE INDEX idx_ins_records_dedup
+            ON inspection_records(inspect_type, dedup_key) WHERE dedup_key <> '';
     END IF;
 
     FOR r IN SELECT * FROM jsonb_array_elements(p_rows) LOOP
@@ -1013,6 +1034,21 @@ $$;
 
 REVOKE ALL ON FUNCTION bulk_insert_inspection_records(jsonb) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION bulk_insert_inspection_records(jsonb) TO authenticated;
+
+-- ============ 团队共享模式检测函数（应用通过 RPC 判断 RLS 是否已共享化） ============
+CREATE OR REPLACE FUNCTION inspect_rls_mode()
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'public'
+          AND tablename = 'inspection_submissions'
+          AND policyname = 'Users can view all inspections'
+    );
+$$;
 
 -- ============ 供应商别名表（团队共享的归一化配置） ============
 CREATE TABLE IF NOT EXISTS supplier_aliases (
@@ -1086,14 +1122,115 @@ UPDATE inspection_records SET dedup_key = md5(
     COALESCE(doc_no,'')||'|'||COALESCE(inspect_date::text,''))
 WHERE dedup_key = '';
 
--- 4. 重建去重索引为通用 (user_id, inspect_type, dedup_key)
+-- 4. 重建去重索引为跨账号全局去重（团队共享：多人上传同一记录自动跳过）
 DROP INDEX IF EXISTS idx_inspection_dedup;
 DROP INDEX IF EXISTS idx_ins_records_dedup;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_dedup
-    ON inspection_submissions(user_id, inspect_type, dedup_key);
+    ON inspection_submissions(inspect_type, dedup_key) WHERE dedup_key <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ins_records_dedup
-    ON inspection_records(user_id, inspect_type, dedup_key);
+    ON inspection_records(inspect_type, dedup_key) WHERE dedup_key <> '';
 """
+
+
+def get_shared_mode_migration_sql() -> str:
+    """老库团队共享迁移 SQL（幂等，可重复执行）
+
+    升级后：
+      1. 送检/检验数据对所有登录用户共享（可见/可删），多个检验员协作
+      2. 去重改为跨账号全局去重（多人上传同一记录自动跳过）
+      3. 安装 inspect_rls_mode 检测函数，供应用判断是否已迁移
+    """
+    return """
+-- =============================================================
+-- 团队共享迁移 SQL（老库专用，幂等可重复执行）
+-- =============================================================
+
+-- 1. 送检记录表：SELECT/DELETE 放开为所有登录用户（INSERT 仍记录上传人）
+DROP POLICY IF EXISTS "Users can view own inspections" ON inspection_submissions;
+DROP POLICY IF EXISTS "Users can delete own inspections" ON inspection_submissions;
+DROP POLICY IF EXISTS "Users can view all inspections" ON inspection_submissions;
+DROP POLICY IF EXISTS "Users can delete all inspections" ON inspection_submissions;
+
+CREATE POLICY "Users can view all inspections"
+    ON inspection_submissions FOR SELECT
+    USING (auth.uid() IS NOT NULL);
+
+CREATE POLICY "Users can delete all inspections"
+    ON inspection_submissions FOR DELETE
+    USING (auth.uid() IS NOT NULL);
+
+-- 2. 检验记录表：SELECT/DELETE 放开为所有登录用户
+DROP POLICY IF EXISTS "Users can view own ins_records" ON inspection_records;
+DROP POLICY IF EXISTS "Users can delete own ins_records" ON inspection_records;
+DROP POLICY IF EXISTS "Users can view all ins_records" ON inspection_records;
+DROP POLICY IF EXISTS "Users can delete all ins_records" ON inspection_records;
+
+CREATE POLICY "Users can view all ins_records"
+    ON inspection_records FOR SELECT
+    USING (auth.uid() IS NOT NULL);
+
+CREATE POLICY "Users can delete all ins_records"
+    ON inspection_records FOR DELETE
+    USING (auth.uid() IS NOT NULL);
+
+-- 3. 清理跨账号重复记录（保留最早一条），否则无法创建全局唯一索引
+DELETE FROM inspection_submissions
+WHERE id IN (
+    SELECT id FROM (
+        SELECT id, ROW_NUMBER() OVER (
+            PARTITION BY inspect_type, dedup_key ORDER BY created_at, id
+        ) AS rn
+        FROM inspection_submissions WHERE dedup_key <> ''
+    ) t WHERE rn > 1
+);
+
+DELETE FROM inspection_records
+WHERE id IN (
+    SELECT id FROM (
+        SELECT id, ROW_NUMBER() OVER (
+            PARTITION BY inspect_type, dedup_key ORDER BY created_at, id
+        ) AS rn
+        FROM inspection_records WHERE dedup_key <> ''
+    ) t WHERE rn > 1
+);
+
+-- 4. 重建为跨账号全局去重索引（部分索引：排除空去重键的异常行）
+DROP INDEX IF EXISTS idx_inspection_dedup;
+DROP INDEX IF EXISTS idx_ins_records_dedup;
+CREATE UNIQUE INDEX idx_inspection_dedup
+    ON inspection_submissions(inspect_type, dedup_key) WHERE dedup_key <> '';
+CREATE UNIQUE INDEX idx_ins_records_dedup
+    ON inspection_records(inspect_type, dedup_key) WHERE dedup_key <> '';
+
+-- 5. 安装共享模式检测函数（应用通过 RPC 判断是否已迁移）
+CREATE OR REPLACE FUNCTION inspect_rls_mode()
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'public'
+          AND tablename = 'inspection_submissions'
+          AND policyname = 'Users can view all inspections'
+    );
+$$;
+"""
+
+
+def is_shared_mode() -> bool:
+    """检测当前是否为团队共享模式（老库需先执行 get_shared_mode_migration_sql）"""
+    global _last_db_check_error
+    try:
+        client = _get_client()
+        _check_client(client)
+        data = client.rpc("inspect_rls_mode").execute()
+        _last_db_check_error = ""
+        return bool(data.data)
+    except Exception as e:
+        _last_db_check_error = str(e)
+        return False
 
 
 def ensure_inspect_type_columns() -> bool:
@@ -1148,16 +1285,13 @@ def _do_list_inspection_records(client, limit=None, inspect_type=None):
 
 
 def list_inspection_records(limit: int = None, inspect_type: str = None) -> list:
-    """列出当前用户的检验记录（按质检日期倒序）
+    """列出团队共享的检验记录（按质检日期倒序）
     inspect_type 传入工序名则只返回该工序的记录（None 返回全部，兼容旧调用）。"""
     try:
         client = _get_client()
         _check_client(client)
         result = _do_list_inspection_records(client, limit, inspect_type)
 
-        uid = _get_user_id()
-        if uid and result.data:
-            result.data = [r for r in result.data if r.get("user_id") == uid]
         return result.data
     except Exception as e:
         st.error(f"获取检验记录失败: {e}")
@@ -1262,23 +1396,21 @@ def insert_inspection_records(rows: list) -> int:
 
 
 @_with_retry
-def _do_clear_inspection_records(client, uid, inspect_type=None):
-    q = client.table("inspection_records").delete().eq("user_id", uid)
+def _do_clear_inspection_records(client, inspect_type=None):
+    q = client.table("inspection_records").delete()
     if inspect_type:
         q = q.eq("inspect_type", inspect_type)
+    else:
+        q = q.neq("inspect_type", "")  # PostgREST 要求 DELETE 必须带过滤条件
     return q.execute()
 
 
 def clear_inspection_records(inspect_type: str = None) -> bool:
-    """清空当前用户的检验记录（inspect_type 传入工序名则只清空该工序）"""
+    """清空团队共享的检验记录（inspect_type 传入工序名则只清空该工序）"""
     try:
         client = _get_client()
         _check_client(client)
-        uid = _get_user_id()
-        if not uid:
-            st.error("清空检验记录失败: 未获取到用户 ID。")
-            return False
-        _do_clear_inspection_records(client, uid, inspect_type)
+        _do_clear_inspection_records(client, inspect_type)
         return True
     except Exception as e:
         st.error(f"清空检验记录失败: {e}")
