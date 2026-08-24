@@ -26,7 +26,6 @@ from datetime import date, datetime, timedelta
 from io import BytesIO
 
 import pandas as pd
-import streamlit as st
 
 from modules import supabase_helper
 from modules.receipt_notice import fill_receipt_order

@@ -14,13 +14,13 @@ v3: 添加数据库冷启动重试机制（解决 Supabase 免费版暂停后唤
 import os
 import time
 import math
-from datetime import datetime, timezone
+from datetime import datetime
 from supabase import create_client, Client
 import pandas as pd
 import numpy as np
 import json
 import streamlit as st
-from typing import Optional, List
+from typing import Optional
 from functools import wraps
 
 # ==================== 重试机制 ====================

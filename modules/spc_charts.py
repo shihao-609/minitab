@@ -3,11 +3,9 @@ SPC控制图模块 - 支持各类休哈特控制图
 包含: 超限点标记 / WECO规则 / 目标偏差 / nelson规则
 """
 import numpy as np
-import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from scipy import stats
-from modules.weco_rules import apply_all_rules, add_ooc_markers, go_scatter_ooc, compute_target_deviation
+from modules.weco_rules import apply_all_rules, go_scatter_ooc, compute_target_deviation
 
 
 # 控制图常数表 (A2, D3, D4, A3, B3, B4)

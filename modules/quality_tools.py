@@ -2,9 +2,7 @@
 基本质量工具 — 运行图 (Run Chart) / 鱼骨图 (石川图)
 """
 import numpy as np
-import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 
 # ==================== 运行图 (Run Chart) ====================

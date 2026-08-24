@@ -2,7 +2,6 @@
 高级 MSA — Cg/Cgk 检具能力 / 计数型 GRR (Kappa) / 测量不确定度
 """
 import numpy as np
-import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 

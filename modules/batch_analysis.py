@@ -10,7 +10,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Tuple, Optional
@@ -887,13 +886,6 @@ def _analyze_spc_shewhart(df: pd.DataFrame, numeric_cols: list = None,
         'summary': overall_summary,
         **results,  # imr, xbar_r, xbar_s, p, np, c, u
     }
-
-
-# 保留旧函数的向后兼容包装
-def _analyze_spc_only(df: pd.DataFrame, numeric_cols: list = None) -> list:
-    """仅执行 SPC I-MR 分析（向后兼容）"""
-    result = _analyze_spc_shewhart(df, numeric_cols, spc_sub_modes=['imr'])
-    return result.get('summary', [])
 
 
 def _analyze_capability_only(df: pd.DataFrame, numeric_cols: list = None,

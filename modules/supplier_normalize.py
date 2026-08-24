@@ -15,8 +15,6 @@
 import math
 import re
 
-import streamlit as st
-
 from modules import supabase_helper
 
 # 公司后缀（按长度降序，优先剥离长后缀）
