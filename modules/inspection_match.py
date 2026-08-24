@@ -313,7 +313,7 @@ def _dedup_val(field, v):
 def make_dedup_key(row, inspect_type='来料检', kind='submission'):
     """
     按工序配置计算通用去重键（MD5）。入库时写入表的 dedup_key 列，
-    数据库唯一索引统一为 (user_id, inspect_type, dedup_key)，与字段多少无关。
+    数据库唯一索引统一为 (inspect_type, dedup_key)（团队共享全局去重），与字段多少无关。
 
     row: 字典，键为中文列名（供应商/物料编码/...）。
     kind: 'submission' 用 match_pairs 送检侧字段；'inspection' 再加 ins_dedup_extra。
@@ -376,7 +376,7 @@ def import_submissions(df, progress=None, batch_size=1000, inspect_type='来料�
     """
     df = df.copy()
 
-    # 直接插入全部数据，由数据库 unique index (user_id, inspect_type, dedup_key) 完成去重
+    # 直接插入全部数据，由数据库 unique index (inspect_type, dedup_key) 完成去重（团队共享全局去重）
     total = len(df)
     rows = []
     for _, row in df.iterrows():

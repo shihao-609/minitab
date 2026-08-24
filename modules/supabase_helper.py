@@ -660,14 +660,14 @@ BEGIN
     -- 老库自愈：确保 inspect_type / dedup_key 列存在（无动态 SQL，安全）
     ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
     ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
-    -- 老库自愈：若去重索引仍按账号隔离（含 user_id），迁移为团队共享（跨账号全局去重）
+    -- 老库自愈：确保去重索引为跨账号全局（账号隔离索引存在则重建；索引缺失则补建）
     IF EXISTS (
         SELECT 1 FROM pg_indexes
         WHERE schemaname = 'public' AND tablename = 'inspection_submissions'
           AND indexname = 'idx_inspection_dedup'
           AND indexdef LIKE '%(user_id, inspect_type, dedup_key)%'
     ) THEN
-        -- 先清理跨账号重复（保留最早一条），否则无法创建全局唯一索引
+        -- 账号隔离索引存在：先清理跨账号重复（保留最早一条），再重建为全局
         DELETE FROM inspection_submissions
         WHERE id IN (
             SELECT id FROM (
@@ -679,6 +679,15 @@ BEGIN
         );
         DROP INDEX idx_inspection_dedup;
         CREATE UNIQUE INDEX idx_inspection_dedup
+            ON inspection_submissions(inspect_type, dedup_key) WHERE dedup_key <> '';
+    ELSIF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = 'inspection_submissions'
+          AND indexname = 'idx_inspection_dedup'
+          AND indexdef LIKE '%ON inspection_submissions(inspect_type, dedup_key)%'
+    ) THEN
+        -- 索引缺失（异常旧库）：直接补建全局去重索引，防止去重失效
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_dedup
             ON inspection_submissions(inspect_type, dedup_key) WHERE dedup_key <> '';
     END IF;
 
@@ -971,14 +980,14 @@ BEGIN
     -- 老库自愈：确保 inspect_type / dedup_key 列存在（无动态 SQL，安全）
     ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
     ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
-    -- 老库自愈：若去重索引仍按账号隔离（含 user_id），迁移为团队共享（跨账号全局去重）
+    -- 老库自愈：确保去重索引为跨账号全局（账号隔离索引存在则重建；索引缺失则补建）
     IF EXISTS (
         SELECT 1 FROM pg_indexes
         WHERE schemaname = 'public' AND tablename = 'inspection_records'
           AND indexname = 'idx_ins_records_dedup'
           AND indexdef LIKE '%(user_id, inspect_type, dedup_key)%'
     ) THEN
-        -- 先清理跨账号重复（保留最早一条），否则无法创建全局唯一索引
+        -- 账号隔离索引存在：先清理跨账号重复（保留最早一条），再重建为全局
         DELETE FROM inspection_records
         WHERE id IN (
             SELECT id FROM (
@@ -990,6 +999,15 @@ BEGIN
         );
         DROP INDEX idx_ins_records_dedup;
         CREATE UNIQUE INDEX idx_ins_records_dedup
+            ON inspection_records(inspect_type, dedup_key) WHERE dedup_key <> '';
+    ELSIF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = 'inspection_records'
+          AND indexname = 'idx_ins_records_dedup'
+          AND indexdef LIKE '%ON inspection_records(inspect_type, dedup_key)%'
+    ) THEN
+        -- 索引缺失（异常旧库）：直接补建全局去重索引，防止去重失效
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ins_records_dedup
             ON inspection_records(inspect_type, dedup_key) WHERE dedup_key <> '';
     END IF;
 
