@@ -12,6 +12,7 @@
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 from io import BytesIO
@@ -3617,6 +3618,33 @@ def main():
         [data-testid="stSidebarCollapsedButton"] { display: none !important; }
         </style>
         """), unsafe_allow_html=True)
+
+        # ===== 自动强制展开侧边栏（修复浏览器遗留的折叠状态，展开后不可再折叠） =====
+        components.html(
+            """
+            <script>
+            function forceExpand() {
+                var sel = ['[data-testid="stSidebarCollapsedControl"]',
+                           '[data-testid="stSidebarCollapsedButton"]'];
+                for (var i = 0; i < sel.length; i++) {
+                    var el = parent.document.querySelector(sel[i]);
+                    if (el) { el.click(); return; }
+                }
+            }
+            function scheduleExpand() {
+                forceExpand();
+                setTimeout(forceExpand, 600);
+                setTimeout(forceExpand, 1800);
+            }
+            if (parent.document.readyState === 'complete') {
+                setTimeout(scheduleExpand, 300);
+            } else {
+                parent.window.addEventListener('load', function(){ setTimeout(scheduleExpand, 300); });
+            }
+            </script>
+            """,
+            height=0,
+        )
 
         # ===== 弹窗居中样式 + 遮罩透明 =====
         st.markdown(textwrap.dedent("""
