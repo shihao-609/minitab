@@ -255,7 +255,9 @@ def parse_sheet(uploaded_file, kind='submission', default_date=None, clean_repor
 
     收料日期（kind='submission'）：
       - 若识别为 ERP 收料通知单（含「单据编号」列）→ 自动按单据号向下填充
-        收料日期/单据状态（ERP 导出时仅首行有值），填充明细写入 clean_report（若传入 dict）；
+        收料日期/单据状态/供应商/整单关闭状态（ERP 导出时可能仅首行有值），
+        填充明细写入 clean_report（若传入 dict）；「整单关闭状态 = 单据关闭」的行
+        表示该单已检验完毕，会被跳过（计数写入 clean_report['closed_rows']）；
       - 普通 6 列送检清单 → 按 Excel 原样保存，为空保持为空。
     参数 default_date 仅作向后兼容保留，已不使用。
     """
@@ -266,15 +268,26 @@ def parse_sheet(uploaded_file, kind='submission', default_date=None, clean_repor
     df.columns = df.iloc[header_row].astype(str).str.strip()
     df = df.iloc[header_row + 1:].reset_index(drop=True)
     df = df.dropna(how='all')
-    # 识别 ERP 收料通知单（含「单据编号」列）：自动按单据号填充收料日期/单据状态
+    # 识别 ERP 收料通知单（含「单据编号」列）：自动按单据号填充收料日期/单据状态/供应商/整单关闭状态
     if kind == 'submission':
         norm = {_normalize_header(c): c for c in df.columns}
-        if '单据编号' in norm and norm['单据编号'] != '单据编号':
-            df = df.rename(columns={norm['单据编号']: '单据编号'})
+        rename_map = {}
+        for _key in ('单据编号', '供应商', '整单关闭状态'):
+            if _key in norm and norm[_key] != _key:
+                rename_map[norm[_key]] = _key
+        if rename_map:
+            df = df.rename(columns=rename_map)
         if '单据编号' in df.columns:
             df, clean_notes = fill_receipt_order(df)
             if isinstance(clean_report, dict):
                 clean_report.update(clean_notes)
+    # 整单关闭状态 =「单据关闭」表示该单据已检验完毕，不参与送检/检验比对 → 解析时跳过
+    if kind == 'submission' and '整单关闭状态' in df.columns:
+        _closed = df['整单关闭状态'].astype(str).str.strip().eq('单据关闭')
+        if _closed.any():
+            if isinstance(clean_report, dict):
+                clean_report['closed_rows'] = int(_closed.sum())
+            df = df[~_closed].reset_index(drop=True)
     df, missing = _map_columns(df, kind)
     if missing:
         raise ValueError(f'缺少必要列: {", ".join(missing)}（请使用标准列名或下载模板）')
