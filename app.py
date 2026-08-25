@@ -3606,40 +3606,41 @@ def main():
             initial_sidebar_state='expanded',
         )
 
-        # 隐藏右上角工具栏 (Share / 编辑代码等) + 隐藏右下角 Made with Streamlit
-        # 固定侧边栏：隐藏折叠/展开按钮，使侧边栏始终展开、不可折叠
+        # 隐藏右上角工具栏的动作按钮（主菜单/分享等）+ 隐藏右下角 Made with Streamlit
+        # 注意：必须保留 stExpandSidebarButton（折叠状态下的"展开侧边栏"按钮），
+        #       它是浏览器遗留折叠状态时的唯一恢复入口，不能连 stToolbar 一起隐藏。
+        # 固定侧边栏：隐藏折叠按钮 stSidebarCollapseButton，用户无法主动折叠。
         st.markdown(textwrap.dedent("""
         <style>
-        [data-testid="stToolbar"] { display: none !important; }
+        [data-testid="stToolbarActions"] { display: none !important; }
         footer { visibility: hidden; }
         [data-testid="manage-app-button"] { display: none !important; }
         [data-testid="stSidebarCollapseButton"] { display: none !important; }
-        [data-testid="stSidebarCollapsedControl"] { display: none !important; }
-        [data-testid="stSidebarCollapsedButton"] { display: none !important; }
         </style>
         """), unsafe_allow_html=True)
 
-        # ===== 强制侧边栏展开 =====
-        # Streamlit 把侧边栏折叠状态保存在 localStorage['stSidebarCollapsed-<appId>']，
-        # 值为 'true' 表示折叠（浏览器会一直记住）。这里把所有该键置为 'false'
-        # 并刷新页面，彻底清除浏览器遗留的折叠状态；折叠按钮已被 CSS 隐藏，无法再折叠。
+        # ===== 自动展开侧边栏 =====
+        # 若浏览器遗留了折叠状态（localStorage['stSidebarCollapsed-<appId>']='true'），
+        # 折叠状态下 Streamlit 会显示 stExpandSidebarButton（展开侧边栏按钮）。
+        # 这里自动点击该按钮完成展开（由 React 原生状态更新，无需 reload、不影响登录会话）；
+        # 展开后该按钮消失，而折叠按钮已被 CSS 隐藏，侧边栏即永久固定展开。
         components.html(
             """
             <script>
-            try {
-                var ls = parent.window.localStorage;
-                var changed = false;
-                for (var i = 0; i < ls.length; i++) {
-                    var k = ls.key(i);
-                    if (k && k.indexOf('stSidebarCollapsed-') === 0 && ls.getItem(k) !== 'false') {
-                        ls.setItem(k, 'false');
-                        changed = true;
-                    }
-                }
-                if (changed) {
-                    parent.window.location.reload();
-                }
-            } catch (e) {}
+            function forceExpand() {
+                var el = parent.document.querySelector('[data-testid="stExpandSidebarButton"]');
+                if (el) { el.click(); }
+            }
+            function scheduleExpand() {
+                forceExpand();
+                setTimeout(forceExpand, 500);
+                setTimeout(forceExpand, 1500);
+            }
+            if (parent.document.readyState === 'complete') {
+                setTimeout(scheduleExpand, 300);
+            } else {
+                parent.window.addEventListener('load', function(){ setTimeout(scheduleExpand, 300); });
+            }
             </script>
             """,
             height=0,
