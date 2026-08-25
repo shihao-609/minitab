@@ -3620,16 +3620,23 @@ def main():
         """), unsafe_allow_html=True)
 
         # ===== 强制侧边栏展开 =====
-        # Streamlit 1.5x 的侧边栏折叠状态保存在 localStorage['sidebarNavState']：
-        #   'expanded' = 展开，缺失 = 折叠。这里直接写回 'expanded' 并刷新页面，
-        #   彻底清除浏览器遗留的折叠状态（折叠按钮已被 CSS 隐藏，无法再折叠）。
+        # Streamlit 把侧边栏折叠状态保存在 localStorage['stSidebarCollapsed-<appId>']，
+        # 值为 'true' 表示折叠（浏览器会一直记住）。这里把所有该键置为 'false'
+        # 并刷新页面，彻底清除浏览器遗留的折叠状态；折叠按钮已被 CSS 隐藏，无法再折叠。
         components.html(
             """
             <script>
             try {
                 var ls = parent.window.localStorage;
-                if (ls.getItem('sidebarNavState') !== 'expanded') {
-                    ls.setItem('sidebarNavState', 'expanded');
+                var changed = false;
+                for (var i = 0; i < ls.length; i++) {
+                    var k = ls.key(i);
+                    if (k && k.indexOf('stSidebarCollapsed-') === 0 && ls.getItem(k) !== 'false') {
+                        ls.setItem(k, 'false');
+                        changed = true;
+                    }
+                }
+                if (changed) {
                     parent.window.location.reload();
                 }
             } catch (e) {}
