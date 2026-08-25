@@ -12,6 +12,7 @@
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 from io import BytesIO
@@ -3614,6 +3615,48 @@ def main():
         </style>
         """), unsafe_allow_html=True)
 
+        # ===== 固定"展开侧边栏"悬浮按钮（侧边栏折叠后仍可重新打开） =====
+        components.html(
+            """
+            <style>
+            .sb-open-btn {
+                position: fixed !important;
+                top: 4px !important;
+                left: 4px !important;
+                z-index: 999999 !important;
+                background: transparent !important;
+                border: none !important;
+                color: rgba(49, 51, 63, 0.55) !important;
+                font-size: 20px !important;
+                line-height: 1 !important;
+                cursor: pointer !important;
+                padding: 4px 8px !important;
+                border-radius: 6px !important;
+                transition: background .2s, color .2s;
+            }
+            .sb-open-btn:hover {
+                background: rgba(49, 51, 63, 0.08) !important;
+                color: rgba(49, 51, 63, 0.9) !important;
+            }
+            </style>
+            <button class="sb-open-btn" title="展开侧边栏" onclick="tryOpenSidebar()">☰</button>
+            <script>
+            function tryOpenSidebar() {
+                var sel = [
+                    '[data-testid="stSidebarCollapsedControl"]',
+                    '[data-testid="stSidebarCollapsedButton"]',
+                    '[data-testid="stSidebarCollapseButton"]'
+                ];
+                for (var i = 0; i < sel.length; i++) {
+                    var el = parent.document.querySelector(sel[i]);
+                    if (el) { el.click(); break; }
+                }
+            }
+            </script>
+            """,
+            height=48,
+        )
+
         # ===== 弹窗居中样式 + 遮罩透明 =====
         st.markdown(textwrap.dedent("""
         <style>
@@ -3646,6 +3689,7 @@ def main():
             '选择页面',
             ['🔍 检验对比',
              '📊 分析模块'],
+            key='sidebar_menu',
         )
         st.sidebar.divider()
         st.sidebar.caption('支持 CSV / Excel · 支持 Supabase 云存储')
@@ -3695,6 +3739,21 @@ def page_analysis_hub():
 
 
 def _route_main(menu):
+    # 顶部快捷导航：当侧边栏被折叠后仍可切换主模块
+    # 若 sidebar 已切换页面，清除顶部导航旧状态，确保它显示当前页面
+    if st.session_state.get('top_nav') != menu:
+        st.session_state.pop('top_nav', None)
+    nav = st.segmented_control(
+        '主模块',
+        ['🔍 检验对比', '📊 分析模块'],
+        default=menu,
+        key='top_nav',
+        label_visibility='collapsed',
+    )
+    if nav and nav != menu:
+        st.session_state.sidebar_menu = nav
+        st.rerun()
+
     if menu == '🔍 检验对比':
         page_inspection_match()
     elif menu == '📊 分析模块':
