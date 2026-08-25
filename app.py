@@ -12,7 +12,6 @@
 """
 
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 from io import BytesIO
@@ -3607,55 +3606,17 @@ def main():
         )
 
         # 隐藏右上角工具栏 (Share / 编辑代码等) + 隐藏右下角 Made with Streamlit
+        # 固定侧边栏：隐藏折叠/展开按钮，使侧边栏始终展开、不可折叠
         st.markdown(textwrap.dedent("""
         <style>
         [data-testid="stToolbar"] { display: none !important; }
         footer { visibility: hidden; }
         [data-testid="manage-app-button"] { display: none !important; }
+        [data-testid="stSidebarCollapseButton"] { display: none !important; }
+        [data-testid="stSidebarCollapsedControl"] { display: none !important; }
+        [data-testid="stSidebarCollapsedButton"] { display: none !important; }
         </style>
         """), unsafe_allow_html=True)
-
-        # ===== 固定"展开侧边栏"悬浮按钮（侧边栏折叠后仍可重新打开） =====
-        components.html(
-            """
-            <style>
-            .sb-open-btn {
-                position: fixed !important;
-                top: 4px !important;
-                left: 4px !important;
-                z-index: 999999 !important;
-                background: transparent !important;
-                border: none !important;
-                color: rgba(49, 51, 63, 0.55) !important;
-                font-size: 20px !important;
-                line-height: 1 !important;
-                cursor: pointer !important;
-                padding: 4px 8px !important;
-                border-radius: 6px !important;
-                transition: background .2s, color .2s;
-            }
-            .sb-open-btn:hover {
-                background: rgba(49, 51, 63, 0.08) !important;
-                color: rgba(49, 51, 63, 0.9) !important;
-            }
-            </style>
-            <button class="sb-open-btn" title="展开侧边栏" onclick="tryOpenSidebar()">☰</button>
-            <script>
-            function tryOpenSidebar() {
-                var sel = [
-                    '[data-testid="stSidebarCollapsedControl"]',
-                    '[data-testid="stSidebarCollapsedButton"]',
-                    '[data-testid="stSidebarCollapseButton"]'
-                ];
-                for (var i = 0; i < sel.length; i++) {
-                    var el = parent.document.querySelector(sel[i]);
-                    if (el) { el.click(); break; }
-                }
-            }
-            </script>
-            """,
-            height=48,
-        )
 
         # ===== 弹窗居中样式 + 遮罩透明 =====
         st.markdown(textwrap.dedent("""
