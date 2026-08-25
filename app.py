@@ -3619,28 +3619,20 @@ def main():
         </style>
         """), unsafe_allow_html=True)
 
-        # ===== 自动强制展开侧边栏（修复浏览器遗留的折叠状态，展开后不可再折叠） =====
+        # ===== 强制侧边栏展开 =====
+        # Streamlit 1.5x 的侧边栏折叠状态保存在 localStorage['sidebarNavState']：
+        #   'expanded' = 展开，缺失 = 折叠。这里直接写回 'expanded' 并刷新页面，
+        #   彻底清除浏览器遗留的折叠状态（折叠按钮已被 CSS 隐藏，无法再折叠）。
         components.html(
             """
             <script>
-            function forceExpand() {
-                var sel = ['[data-testid="stSidebarCollapsedControl"]',
-                           '[data-testid="stSidebarCollapsedButton"]'];
-                for (var i = 0; i < sel.length; i++) {
-                    var el = parent.document.querySelector(sel[i]);
-                    if (el) { el.click(); return; }
+            try {
+                var ls = parent.window.localStorage;
+                if (ls.getItem('sidebarNavState') !== 'expanded') {
+                    ls.setItem('sidebarNavState', 'expanded');
+                    parent.window.location.reload();
                 }
-            }
-            function scheduleExpand() {
-                forceExpand();
-                setTimeout(forceExpand, 600);
-                setTimeout(forceExpand, 1800);
-            }
-            if (parent.document.readyState === 'complete') {
-                setTimeout(scheduleExpand, 300);
-            } else {
-                parent.window.addEventListener('load', function(){ setTimeout(scheduleExpand, 300); });
-            }
+            } catch (e) {}
             </script>
             """,
             height=0,
