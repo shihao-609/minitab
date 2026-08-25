@@ -3727,21 +3727,6 @@ def page_analysis_hub():
 
 
 def _route_main(menu):
-    # 顶部快捷导航：当侧边栏被折叠后仍可切换主模块
-    # 若 sidebar 已切换页面，清除顶部导航旧状态，确保它显示当前页面
-    if st.session_state.get('top_nav') != menu:
-        st.session_state.pop('top_nav', None)
-    nav = st.segmented_control(
-        '主模块',
-        ['🔍 检验对比', '📊 分析模块'],
-        default=menu,
-        key='top_nav',
-        label_visibility='collapsed',
-    )
-    if nav and nav != menu:
-        st.session_state.sidebar_menu = nav
-        st.rerun()
-
     if menu == '🔍 检验对比':
         page_inspection_match()
     elif menu == '📊 分析模块':
