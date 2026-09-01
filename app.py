@@ -3156,14 +3156,14 @@ def _unchecked_rows_for_snapshot(result):
         rows = []
         for _, r in df.iterrows():
             rows.append({
-                'supplier': str(r.get('供应商') or '')[:200],
-                'material_code': str(r.get('物料编码') or '')[:200],
-                'spec': str(r.get('规格型号') or '')[:200],
-                'material_name': str(r.get('物料名称') or '')[:200],
-                'received_date': _snapshot_date(r.get('收料日期')),
-                'received_qty': _snapshot_qty(r.get('实收数量')),
-                'purchaser': str(r.get('采购员') or '')[:100],
-                'unmatched_reason': str(r.get('未匹配原因') or '')[:300],
+                '供应商': str(r.get('供应商') or '')[:200],
+                '物料编码': str(r.get('物料编码') or '')[:200],
+                '规格型号': str(r.get('规格型号') or '')[:200],
+                '物料名称': str(r.get('物料名称') or '')[:200],
+                '收料日期': _snapshot_date(r.get('收料日期')),
+                '实收数量': _snapshot_qty(r.get('实收数量')),
+                '采购员': str(r.get('采购员') or '')[:100],
+                '未匹配原因': str(r.get('未匹配原因') or '')[:300],
             })
         return rows
     except Exception:
@@ -3185,6 +3185,18 @@ def _render_persisted_unchecked(inspect_type):
     st.subheader('📌 最近一次持久化未检验清单')
     st.caption(f'保存时间：{str(snap.get("saved_at", ""))[:19]} · 共 {len(rows)} 条（每次比对结果自动覆盖上一次，刷新页面仍可查看）')
     df = pd.DataFrame(rows)
+    # 兼容旧快照的英文字段名
+    rename_map = {
+        'supplier': '供应商',
+        'material_code': '物料编码',
+        'spec': '规格型号',
+        'material_name': '物料名称',
+        'received_date': '收料日期',
+        'received_qty': '实收数量',
+        'purchaser': '采购员',
+        'unmatched_reason': '未匹配原因',
+    }
+    df = df.rename(columns=rename_map)
     cols = ['供应商', '物料编码', '规格型号', '物料名称', '收料日期', '实收数量', '采购员', '未匹配原因']
     cols = [c for c in cols if c in df.columns]
     st.dataframe(df[cols], use_container_width=True, hide_index=True)
