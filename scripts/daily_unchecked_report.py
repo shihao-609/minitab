@@ -25,7 +25,7 @@ import os
 import sys
 import smtplib
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -53,6 +53,11 @@ RETRY_INTERVAL = max(0, int(_get_env('REPORT_RETRY_INTERVAL', '60')))
 
 _SRV_CLIENT = None
 
+# 北京时间（与前端发送时间设置一致）
+BJ_TZ = timezone(timedelta(hours=8))
+
+_DUMMY_UUID = '00000000-0000-0000-0000-000000000000'
+
 
 def _load_all_rows(table: str):
     """用 service_role 读取指定表全部数据（绕过 RLS，含所有用户）"""
@@ -67,6 +72,71 @@ def _load_all_rows(table: str):
     return res.data or []
 
 
+def _load_schedule():
+    """读取前端配置的邮件发送排程（report_schedule 表，service_role 绕过 RLS）。
+
+    返回 {'send_days': [1..5], 'send_time': 'HH:MM', 'last_sent': 'YYYY-MM-DD'|''}；
+    表已创建但无配置行时自动写入默认行（周一~周五 08:00）；
+    表不存在（未创建）时返回 None，脚本回退旧行为（周一~周五发送、无时间门控、无防重复）。
+    """
+    try:
+        rows = _load_all_rows('report_schedule')
+    except Exception as e:
+        print(f'[排程] 读取 report_schedule 失败（表可能尚未创建），回退默认排程: {e}')
+        return None
+    if not rows:
+        try:
+            print('[排程] report_schedule 表为空，写入默认排程（周一~周五 08:00）')
+            _SRV_CLIENT.table('report_schedule').delete().neq('id', _DUMMY_UUID).execute()
+            _SRV_CLIENT.table('report_schedule').insert(
+                {'send_days': '1,2,3,4,5', 'send_time': '08:00'}).execute()
+            rows = _load_all_rows('report_schedule')
+        except Exception as e:
+            print(f'[排程] 初始化默认排程失败: {e}')
+            return None
+    r = rows[0]
+    send_days = sorted({
+        int(x) for x in str(r.get('send_days', '')).split(',')
+        if x.strip().isdigit() and 1 <= int(x) <= 5
+    })
+    send_time = str(r.get('send_time') or '').strip()
+    last_sent = str(r.get('last_sent_date') or '').strip()
+    return {'send_days': send_days, 'send_time': send_time, 'last_sent': last_sent}
+
+
+def _mark_sent(d: date):
+    """记录今日已发送（北京时间），防止同一日重复发送"""
+    try:
+        _SRV_CLIENT.table('report_schedule').update(
+            {'last_sent_date': d.isoformat()}).neq('id', _DUMMY_UUID).execute()
+        print(f'[排程] 已记录今日（{d.isoformat()}）发送状态')
+    except Exception as e:
+        print(f'[排程] 更新最近发送日期失败（不影响本次发送结果）: {e}')
+
+
+def _check_schedule():
+    """按前端配置检查是否应在今天/此刻发送。
+
+    返回 (should_send: bool, reason: str)
+    """
+    sched = _load_schedule()
+    now = datetime.now(BJ_TZ)
+    today = now.date()
+    if sched is None:
+        # 表未创建：回退旧行为（周一~周五发送，无时间门控，无防重复保护）
+        if today.weekday() >= 5:
+            return False, f'今天是周末（{today}），不在默认周一~周五发送范围内'
+        return True, '未配置 report_schedule 表，按默认规则（周一~周五）发送'
+    send_days, send_time, last_sent = sched['send_days'], sched['send_time'], sched['last_sent']
+    if (today.weekday() + 1) not in send_days:
+        return False, f'今天（周{"一二三四五六日"[today.weekday()]}）不在配置的发送日内'
+    if send_time and now.strftime('%H:%M') < send_time:
+        return False, f'当前 {now.strftime("%H:%M")} 未到配置发送时间 {send_time}'
+    if last_sent == today.isoformat():
+        return False, f'今日（{today}）已发送过，跳过防重复'
+    return True, f'符合排程（周{"一二三四五六日"[today.weekday()]} {send_time or "任意时刻"}）'
+
+
 def _parse_dt(s):
     """解析 ISO 格式时间（如 '2026-08-21T09:00:00+00:00'），失败返回 None"""
     if not s:
@@ -78,7 +148,8 @@ def _parse_dt(s):
 
 
 def _today_yesterday():
-    today = date.today()
+    """以北京时间为基准计算今天/昨天（与前端发送时间设置一致）"""
+    today = datetime.now(BJ_TZ).date()
     return today, today - timedelta(days=1)
 
 
@@ -159,7 +230,14 @@ def _load_recipients():
 
 def build_report():
     today, yesterday = _today_yesterday()
-    print(f'[任务] 运行日期: {today}，回算基准日: {yesterday}')
+    print(f'[任务] 运行日期: {today}（北京时间），回算基准日: {yesterday}')
+
+    # 0. 发送排程检查（前端可配置周几/几点，仅在此发送）
+    should_send, reason = _check_schedule()
+    if not should_send:
+        print(f'[跳过] {reason}')
+        return None
+    print(f'[排程] {reason}')
 
     # 1. 拉取全量数据
     sub_records = _load_all_rows('inspection_submissions')
@@ -327,6 +405,8 @@ def build_report():
     print(f'[完成] 共发送 {len(sent_emails)} 封邮件，合计未检验 {total_unchecked} 条')
     if failed_emails:
         print(f'[警告] {len(failed_emails)} 封发送失败: {", ".join(failed_emails)}')
+    # 记录今日已发送，防止 hourly 触发下同一日重复发送
+    _mark_sent(today)
     return {'emails': sent_emails, 'unchecked_count': total_unchecked, 'failed': failed_emails}
 
 

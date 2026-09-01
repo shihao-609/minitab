@@ -31,16 +31,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install supabase requests
 
-      - name: Ping Supabase database
+      - name: Ping Supabase database + wake Streamlit app
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          # ANON_KEY 缺失时自动回退 SERVICE_ROLE_KEY（该密钥邮件流程已配置，更可靠）
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          STREAMLIT_URL: ${{ vars.STREAMLIT_URL }}
         run: python keep_alive.py
-
-      - name: Wake up Streamlit app
-        run: |
-          # 访问 Streamlit 应用，防止社区版应用休眠（冷启动会导致打开慢）
-          # 冷启动可能需 1~3 分钟，超时也没关系：请求本身已触发应用启动
-          curl -s -o /dev/null -w "streamlit status: %{http_code}\n" \
-            "https://minitab-nappfbsncsxtsc9gst2mjvx.streamlit.app/" \
-            --max-time 180 || echo "streamlit wake triggered (cold start may still be running)"

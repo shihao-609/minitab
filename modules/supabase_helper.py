@@ -607,6 +607,7 @@ CREATE TABLE IF NOT EXISTS inspection_submissions (
     material_name TEXT DEFAULT '',
     received_date DATE,
     received_qty NUMERIC,
+    purchaser TEXT DEFAULT '',
     inspect_type TEXT NOT NULL DEFAULT '来料检',
     dedup_key TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ DEFAULT NOW()
@@ -657,9 +658,10 @@ DECLARE
     inserted integer := 0;
     r jsonb;
 BEGIN
-    -- 老库自愈：确保 inspect_type / dedup_key 列存在（无动态 SQL，安全）
+    -- 老库自愈：确保 inspect_type / dedup_key / purchaser 列存在（无动态 SQL，安全）
     ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
     ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
+    ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS purchaser TEXT DEFAULT '';
     -- 老库自愈：确保去重索引为跨账号全局（账号隔离索引存在则重建；索引缺失则补建）
     IF EXISTS (
         SELECT 1 FROM pg_indexes
@@ -693,7 +695,7 @@ BEGIN
 
     FOR r IN SELECT * FROM jsonb_array_elements(p_rows) LOOP
         INSERT INTO inspection_submissions
-            (user_id, supplier, material_code, spec, material_name, received_date, received_qty, inspect_type, dedup_key)
+            (user_id, supplier, material_code, spec, material_name, received_date, received_qty, purchaser, inspect_type, dedup_key)
         VALUES
             (auth.uid(),
              COALESCE(r->>'supplier', ''),
@@ -702,6 +704,7 @@ BEGIN
              COALESCE(r->>'material_name', ''),
              NULLIF(r->>'received_date', '')::date,
              (r->>'received_qty')::numeric,
+             COALESCE(r->>'purchaser', ''),
              COALESCE(NULLIF(r->>'inspect_type', ''), '来料检'),
              COALESCE(NULLIF(r->>'dedup_key', ''), md5(
                  COALESCE(r->>'supplier','')||'|'||COALESCE(r->>'material_code','')||'|'||COALESCE(r->>'spec','')||'|'||
@@ -777,16 +780,22 @@ def fetch_submission_keys() -> list:
 def _do_fetch_submission_records(client):
     """只拉取对比所需的业务列（不含 id / created_at）"""
     return client.table("inspection_submissions").select(
-        "inspect_type,supplier,material_code,spec,material_name,received_date,received_qty"
+        "inspect_type,supplier,material_code,spec,material_name,received_date,received_qty,purchaser"
     ).order("received_date", desc=True).order("created_at", desc=True).execute()
 
 
 def fetch_submission_records() -> list:
-    """轻量查询：全部累计送检记录（6 业务列），用于检验对比。"""
+    """轻量查询：全部累计送检记录（6 业务列 + 采购员），用于检验对比。"""
     try:
         client = _get_client()
         _check_client(client)
-        result = _do_fetch_submission_records(client)
+        try:
+            result = _do_fetch_submission_records(client)
+        except Exception:
+            # 老库尚无 purchaser 列 → 回退不带该列查询（采购员显示为空，迁移后自动恢复）
+            result = client.table("inspection_submissions").select(
+                "inspect_type,supplier,material_code,spec,material_name,received_date,received_qty"
+            ).order("received_date", desc=True).order("created_at", desc=True).execute()
         return result.data
     except Exception as e:
         st.error(f"获取送检记录失败: {e}")
@@ -932,6 +941,7 @@ CREATE TABLE IF NOT EXISTS inspection_records (
     inspector TEXT DEFAULT '',
     batch_no TEXT DEFAULT '',
     category TEXT DEFAULT '',
+    purchaser TEXT DEFAULT '',
     inspect_type TEXT NOT NULL DEFAULT '来料检',
     dedup_key TEXT NOT NULL DEFAULT '',
     source_file TEXT DEFAULT '',
@@ -977,9 +987,10 @@ DECLARE
     inserted integer := 0;
     r jsonb;
 BEGIN
-    -- 老库自愈：确保 inspect_type / dedup_key 列存在（无动态 SQL，安全）
+    -- 老库自愈：确保 inspect_type / dedup_key / purchaser 列存在（无动态 SQL，安全）
     ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
     ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
+    ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS purchaser TEXT DEFAULT '';
     -- 老库自愈：确保去重索引为跨账号全局（账号隔离索引存在则重建；索引缺失则补建）
     IF EXISTS (
         SELECT 1 FROM pg_indexes
@@ -1015,7 +1026,7 @@ BEGIN
         INSERT INTO inspection_records
             (user_id, doc_no, supplier, material_code, spec, material_name,
              inspect_date, inspect_qty, qualified_qty, unqualified_qty,
-             result, inspector, batch_no, category, inspect_type, source_file, dedup_key)
+             result, inspector, batch_no, category, purchaser, inspect_type, source_file, dedup_key)
         VALUES
             (auth.uid(),
              COALESCE(r->>'doc_no', ''),
@@ -1031,6 +1042,7 @@ BEGIN
              COALESCE(r->>'inspector', ''),
              COALESCE(r->>'batch_no', ''),
              COALESCE(r->>'category', ''),
+             COALESCE(r->>'purchaser', ''),
              COALESCE(NULLIF(r->>'inspect_type', ''), '来料检'),
              COALESCE(r->>'source_file', ''),
              COALESCE(NULLIF(r->>'dedup_key', ''), md5(
@@ -1108,13 +1120,63 @@ CREATE POLICY "All auth can view report_recipients"
 
 CREATE POLICY "All auth can manage report_recipients"
     ON report_recipients FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+-- ============ 未检验清单快照表（持久化：每次比对结果覆盖上一次） ============
+CREATE TABLE IF NOT EXISTS unchecked_snapshots (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    inspect_type TEXT NOT NULL DEFAULT '来料检',
+    supplier TEXT DEFAULT '',
+    material_code TEXT DEFAULT '',
+    spec TEXT DEFAULT '',
+    material_name TEXT DEFAULT '',
+    received_date DATE,
+    received_qty NUMERIC,
+    purchaser TEXT DEFAULT '',
+    unmatched_reason TEXT DEFAULT '',
+    saved_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE unchecked_snapshots ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "All auth can view unchecked_snapshots" ON unchecked_snapshots;
+DROP POLICY IF EXISTS "All auth can manage unchecked_snapshots" ON unchecked_snapshots;
+
+CREATE POLICY "All auth can view unchecked_snapshots"
+    ON unchecked_snapshots FOR SELECT TO authenticated USING (true);
+
+CREATE POLICY "All auth can manage unchecked_snapshots"
+    ON unchecked_snapshots FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+-- ============ 邮件发送排程表（前端设置周几/几点发送） ============
+-- send_days: 周几发送，1=周一 ... 5=周五，逗号分隔（如 '1,3,5'）
+-- send_time: 发送时间（北京时间 HH:MM），如 '08:00'
+-- last_sent_date: 最近一次成功发送的日期（北京时间 YYYY-MM-DD），用于防止重复发送
+CREATE TABLE IF NOT EXISTS report_schedule (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    send_days TEXT NOT NULL DEFAULT '1,2,3,4,5',
+    send_time TEXT NOT NULL DEFAULT '08:00',
+    last_sent_date TEXT DEFAULT '',
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE report_schedule ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "All auth can view report_schedule" ON report_schedule;
+DROP POLICY IF EXISTS "All auth can manage report_schedule" ON report_schedule;
+
+CREATE POLICY "All auth can view report_schedule"
+    ON report_schedule FOR SELECT TO authenticated USING (true);
+
+CREATE POLICY "All auth can manage report_schedule"
+    ON report_schedule FOR ALL TO authenticated USING (true) WITH CHECK (true);
 """
 
 
 def get_inspect_type_migration_sql() -> str:
-    """老表迁移 SQL：补充 inspect_type / dedup_key 字段，回填去重键，重建通用去重索引（幂等，可重复执行）"""
+    """老表迁移 SQL：补充 inspect_type / dedup_key / purchaser 字段，回填去重键，
+    重建通用去重索引并重建入库 RPC（幂等，可重复执行）"""
     return """
--- ============ 检验类型 + 通用去重键迁移（来料检/过程检/出货检…） ============
+-- ============ 检验类型 + 通用去重键 + 采购员迁移（来料检/过程检/出货检…） ============
 -- 1. 两张表补充 inspect_type 列（老数据默认「来料检」）
 ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
 ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
@@ -1122,6 +1184,10 @@ ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NU
 -- 2. 补充通用去重键 dedup_key 列（以后新增工序字段可不同，去重不再绑定固定列）
 ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
 ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
+
+-- 2b. 补充采购员 purchaser 列（未检验清单展示用，不参与匹配/去重）
+ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS purchaser TEXT DEFAULT '';
+ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS purchaser TEXT DEFAULT '';
 
 -- 3. 回填已有数据的去重键（算法与 Python 端 _fmt_qty 一致：整数去小数尾，非整数保留原样）
 UPDATE inspection_submissions SET dedup_key = md5(
@@ -1147,6 +1213,161 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_dedup
     ON inspection_submissions(inspect_type, dedup_key) WHERE dedup_key <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ins_records_dedup
     ON inspection_records(inspect_type, dedup_key) WHERE dedup_key <> '';
+
+-- 5. 重建批量入库 RPC（携带 purchaser 字段；与完整建表 SQL 一致，幂等）
+CREATE OR REPLACE FUNCTION bulk_insert_inspections(p_rows jsonb)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    inserted integer := 0;
+    r jsonb;
+BEGIN
+    ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
+    ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
+    ALTER TABLE inspection_submissions ADD COLUMN IF NOT EXISTS purchaser TEXT DEFAULT '';
+    IF EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = 'inspection_submissions'
+          AND indexname = 'idx_inspection_dedup'
+          AND indexdef LIKE '%(user_id, inspect_type, dedup_key)%'
+    ) THEN
+        DELETE FROM inspection_submissions
+        WHERE id IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY inspect_type, dedup_key ORDER BY created_at, id
+                ) AS rn
+                FROM inspection_submissions WHERE dedup_key <> ''
+            ) t WHERE rn > 1
+        );
+        DROP INDEX idx_inspection_dedup;
+        CREATE UNIQUE INDEX idx_inspection_dedup
+            ON inspection_submissions(inspect_type, dedup_key) WHERE dedup_key <> '';
+    ELSIF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = 'inspection_submissions'
+          AND indexname = 'idx_inspection_dedup'
+          AND indexdef LIKE '%ON inspection_submissions(inspect_type, dedup_key)%'
+    ) THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_dedup
+            ON inspection_submissions(inspect_type, dedup_key) WHERE dedup_key <> '';
+    END IF;
+
+    FOR r IN SELECT * FROM jsonb_array_elements(p_rows) LOOP
+        INSERT INTO inspection_submissions
+            (user_id, supplier, material_code, spec, material_name, received_date, received_qty, purchaser, inspect_type, dedup_key)
+        VALUES
+            (auth.uid(),
+             COALESCE(r->>'supplier', ''),
+             COALESCE(r->>'material_code', ''),
+             COALESCE(r->>'spec', ''),
+             COALESCE(r->>'material_name', ''),
+             NULLIF(r->>'received_date', '')::date,
+             (r->>'received_qty')::numeric,
+             COALESCE(r->>'purchaser', ''),
+             COALESCE(NULLIF(r->>'inspect_type', ''), '来料检'),
+             COALESCE(NULLIF(r->>'dedup_key', ''), md5(
+                 COALESCE(r->>'supplier','')||'|'||COALESCE(r->>'material_code','')||'|'||COALESCE(r->>'spec','')||'|'||
+                 COALESCE(r->>'material_name','')||'|'||
+                 CASE WHEN r->>'received_qty' IS NULL OR r->>'received_qty' = '' THEN ''
+                      WHEN (r->>'received_qty')::numeric = floor((r->>'received_qty')::numeric)
+                           THEN to_char((r->>'received_qty')::numeric, 'FM99999999999999999999')
+                      ELSE (r->>'received_qty')::numeric::text END)))
+        ON CONFLICT DO NOTHING;
+        IF FOUND THEN
+            inserted := inserted + 1;
+        END IF;
+    END LOOP;
+    RETURN inserted;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION bulk_insert_inspection_records(p_rows jsonb)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    inserted integer := 0;
+    r jsonb;
+BEGIN
+    ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS inspect_type TEXT NOT NULL DEFAULT '来料检';
+    ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS dedup_key TEXT NOT NULL DEFAULT '';
+    ALTER TABLE inspection_records ADD COLUMN IF NOT EXISTS purchaser TEXT DEFAULT '';
+    IF EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = 'inspection_records'
+          AND indexname = 'idx_ins_records_dedup'
+          AND indexdef LIKE '%(user_id, inspect_type, dedup_key)%'
+    ) THEN
+        DELETE FROM inspection_records
+        WHERE id IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY inspect_type, dedup_key ORDER BY created_at, id
+                ) AS rn
+                FROM inspection_records WHERE dedup_key <> ''
+            ) t WHERE rn > 1
+        );
+        DROP INDEX idx_ins_records_dedup;
+        CREATE UNIQUE INDEX idx_ins_records_dedup
+            ON inspection_records(inspect_type, dedup_key) WHERE dedup_key <> '';
+    ELSIF NOT EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = 'inspection_records'
+          AND indexname = 'idx_ins_records_dedup'
+          AND indexdef LIKE '%ON inspection_records(inspect_type, dedup_key)%'
+    ) THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ins_records_dedup
+            ON inspection_records(inspect_type, dedup_key) WHERE dedup_key <> '';
+    END IF;
+
+    FOR r IN SELECT * FROM jsonb_array_elements(p_rows) LOOP
+        INSERT INTO inspection_records
+            (user_id, doc_no, supplier, material_code, spec, material_name,
+             inspect_date, inspect_qty, qualified_qty, unqualified_qty,
+             result, inspector, batch_no, category, purchaser, inspect_type, source_file, dedup_key)
+        VALUES
+            (auth.uid(),
+             COALESCE(r->>'doc_no', ''),
+             COALESCE(r->>'supplier', ''),
+             COALESCE(r->>'material_code', ''),
+             COALESCE(r->>'spec', ''),
+             COALESCE(r->>'material_name', ''),
+             NULLIF(r->>'inspect_date', '')::date,
+             NULLIF(r->>'inspect_qty', '')::numeric,
+             NULLIF(r->>'qualified_qty', '')::numeric,
+             NULLIF(r->>'unqualified_qty', '')::numeric,
+             COALESCE(r->>'result', ''),
+             COALESCE(r->>'inspector', ''),
+             COALESCE(r->>'batch_no', ''),
+             COALESCE(r->>'category', ''),
+             COALESCE(r->>'purchaser', ''),
+             COALESCE(NULLIF(r->>'inspect_type', ''), '来料检'),
+             COALESCE(r->>'source_file', ''),
+             COALESCE(NULLIF(r->>'dedup_key', ''), md5(
+                 COALESCE(r->>'supplier','')||'|'||COALESCE(r->>'material_code','')||'|'||COALESCE(r->>'spec','')||'|'||
+                 COALESCE(r->>'material_name','')||'|'||
+                 CASE WHEN r->>'inspect_qty' IS NULL OR r->>'inspect_qty' = '' THEN ''
+                      WHEN (r->>'inspect_qty')::numeric = floor((r->>'inspect_qty')::numeric)
+                           THEN to_char((r->>'inspect_qty')::numeric, 'FM99999999999999999999')
+                      ELSE (r->>'inspect_qty')::numeric::text END||'|'||
+                 COALESCE(r->>'doc_no','')||'|'||COALESCE(NULLIF(r->>'inspect_date',''),''))))
+        ON CONFLICT DO NOTHING;
+        IF FOUND THEN
+            inserted := inserted + 1;
+        END IF;
+    END LOOP;
+    RETURN inserted;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION bulk_insert_inspections(jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION bulk_insert_inspections(jsonb) TO authenticated;
+REVOKE ALL ON FUNCTION bulk_insert_inspection_records(jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION bulk_insert_inspection_records(jsonb) TO authenticated;
 """
 
 
@@ -1252,13 +1473,13 @@ def is_shared_mode() -> bool:
 
 
 def ensure_inspect_type_columns() -> bool:
-    """检测两张表是否已有 inspect_type / dedup_key 列（老库需先执行迁移 SQL）"""
+    """检测两张表是否已有 inspect_type / dedup_key / purchaser 列（老库需先执行迁移 SQL）"""
     global _last_db_check_error
     try:
         client = _get_client()
         _check_client(client)
-        client.table("inspection_submissions").select("inspect_type,dedup_key").limit(1).execute()
-        client.table("inspection_records").select("inspect_type,dedup_key").limit(1).execute()
+        client.table("inspection_submissions").select("inspect_type,dedup_key,purchaser").limit(1).execute()
+        client.table("inspection_records").select("inspect_type,dedup_key,purchaser").limit(1).execute()
         _last_db_check_error = ""
         return True
     except Exception as e:
@@ -1321,7 +1542,7 @@ def _do_fetch_inspection_records(client):
     """只拉取对账所需的业务列（不含 id / created_at）"""
     return client.table("inspection_records").select(
         "doc_no,supplier,material_code,spec,material_name,inspect_date,"
-        "inspect_qty,qualified_qty,unqualified_qty,result,inspector,batch_no,category,inspect_type"
+        "inspect_qty,qualified_qty,unqualified_qty,result,inspector,batch_no,category,purchaser,inspect_type"
     ).order("inspect_date", desc=True).order("created_at", desc=True).execute()
 
 
@@ -1330,7 +1551,14 @@ def fetch_inspection_records() -> list:
     try:
         client = _get_client()
         _check_client(client)
-        result = _do_fetch_inspection_records(client)
+        try:
+            result = _do_fetch_inspection_records(client)
+        except Exception:
+            # 老库尚无 purchaser 列 → 回退不带该列查询
+            result = client.table("inspection_records").select(
+                "doc_no,supplier,material_code,spec,material_name,inspect_date,"
+                "inspect_qty,qualified_qty,unqualified_qty,result,inspector,batch_no,category,inspect_type"
+            ).order("inspect_date", desc=True).order("created_at", desc=True).execute()
         return result.data
     except Exception as e:
         st.error(f"获取检验记录失败: {e}")
@@ -1560,4 +1788,169 @@ def delete_report_recipient(rid: str) -> bool:
         return True
     except Exception as e:
         st.error(f"删除收件人失败: {e}")
+        return False
+
+
+# ==================== 未检验清单快照（持久化：每次比对结果覆盖上一次） ====================
+
+def get_create_unchecked_snapshots_sql() -> str:
+    """未检验清单快照表建表 SQL（幂等，可重复执行）"""
+    return """
+CREATE TABLE IF NOT EXISTS unchecked_snapshots (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    inspect_type TEXT NOT NULL DEFAULT '来料检',
+    supplier TEXT DEFAULT '',
+    material_code TEXT DEFAULT '',
+    spec TEXT DEFAULT '',
+    material_name TEXT DEFAULT '',
+    received_date DATE,
+    received_qty NUMERIC,
+    purchaser TEXT DEFAULT '',
+    unmatched_reason TEXT DEFAULT '',
+    saved_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE unchecked_snapshots ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "All auth can view unchecked_snapshots" ON unchecked_snapshots;
+DROP POLICY IF EXISTS "All auth can manage unchecked_snapshots" ON unchecked_snapshots;
+
+CREATE POLICY "All auth can view unchecked_snapshots"
+    ON unchecked_snapshots FOR SELECT TO authenticated USING (true);
+
+CREATE POLICY "All auth can manage unchecked_snapshots"
+    ON unchecked_snapshots FOR ALL TO authenticated USING (true) WITH CHECK (true);
+"""
+
+
+def ensure_unchecked_snapshots_table() -> bool:
+    """检测 unchecked_snapshots 表是否存在"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("unchecked_snapshots").select("id").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def save_unchecked_snapshot(inspect_type: str, rows: list) -> bool:
+    """持久化未检验清单：先删除该工序旧快照，再写入最新比对结果（覆盖语义，保存最新的）"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("unchecked_snapshots").delete().eq("inspect_type", inspect_type).execute()
+        if rows:
+            client.table("unchecked_snapshots").insert(rows).execute()
+        return True
+    except Exception as e:
+        if "unchecked_snapshots" in str(e):
+            st.error("保存未检验清单失败：`unchecked_snapshots` 表尚未创建。"
+                     "请先到「📮 邮件收件人」页或 Supabase SQL Editor 执行建表 SQL：")
+            st.code(get_create_unchecked_snapshots_sql(), language='sql')
+        else:
+            st.error(f"保存未检验清单失败: {e}")
+        return False
+
+
+def load_unchecked_snapshot(inspect_type: str) -> dict:
+    """读取该工序最近一次持久化的未检验清单（覆盖保存，故仅一份最新数据）"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        result = client.table("unchecked_snapshots").select(
+            "*"
+        ).eq("inspect_type", inspect_type).order("saved_at", desc=True).execute()
+        data = result.data or []
+        return {"rows": data, "saved_at": data[0].get("saved_at") if data else None}
+    except Exception as e:
+        st.error(f"读取未检验清单失败: {e}")
+        return {"rows": [], "saved_at": None}
+
+
+def delete_unchecked_snapshots(inspect_type: str) -> bool:
+    """删除该工序全部未检验清单快照"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("unchecked_snapshots").delete().eq("inspect_type", inspect_type).execute()
+        return True
+    except Exception as e:
+        st.error(f"删除未检验清单失败: {e}")
+        return False
+
+
+# ==================== 邮件发送排程（前端设置周几/几点发送） ====================
+
+def get_create_report_schedule_sql() -> str:
+    """邮件发送排程表建表 SQL（幂等，可重复执行）"""
+    return """
+CREATE TABLE IF NOT EXISTS report_schedule (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    send_days TEXT NOT NULL DEFAULT '1,2,3,4,5',
+    send_time TEXT NOT NULL DEFAULT '08:00',
+    last_sent_date TEXT DEFAULT '',
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE report_schedule ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "All auth can view report_schedule" ON report_schedule;
+DROP POLICY IF EXISTS "All auth can manage report_schedule" ON report_schedule;
+
+CREATE POLICY "All auth can view report_schedule"
+    ON report_schedule FOR SELECT TO authenticated USING (true);
+
+CREATE POLICY "All auth can manage report_schedule"
+    ON report_schedule FOR ALL TO authenticated USING (true) WITH CHECK (true);
+"""
+
+
+def ensure_report_schedule_table() -> bool:
+    """检测 report_schedule 表是否存在"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        client.table("report_schedule").select("id").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def get_report_schedule() -> dict:
+    """读取邮件发送排程（默认：周一至周五 08:00，北京时间）"""
+    default = {"send_days": "1,2,3,4,5", "send_time": "08:00", "last_sent_date": ""}
+    try:
+        client = _get_client()
+        _check_client(client)
+        result = client.table("report_schedule").select("send_days,send_time,last_sent_date").limit(1).execute()
+        data = result.data
+        if data:
+            r = data[0]
+            return {
+                "send_days": str(r.get("send_days") or "1,2,3,4,5"),
+                "send_time": str(r.get("send_time") or "08:00"),
+                "last_sent_date": str(r.get("last_sent_date") or ""),
+            }
+        return default
+    except Exception as e:
+        st.error(f"读取发送排程失败: {e}")
+        return default
+
+
+def save_report_schedule(send_days: list, send_time: str) -> bool:
+    """保存邮件发送排程（单行 upsert：有行则更新，无行则插入）"""
+    try:
+        client = _get_client()
+        _check_client(client)
+        days = ",".join(str(int(d)) for d in send_days)
+        payload = {"send_days": days, "send_time": send_time}
+        rows = client.table("report_schedule").select("id").limit(1).execute().data
+        if rows:
+            client.table("report_schedule").update(payload).eq("id", rows[0]["id"]).execute()
+        else:
+            client.table("report_schedule").insert(payload).execute()
+        return True
+    except Exception as e:
+        st.error(f"保存发送排程失败: {e}")
         return False

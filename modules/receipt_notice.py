@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 GROUP_COL = '单据编号'
-FILL_COLS = ['收料日期', '单据状态', '供应商', '整单关闭状态']
+FILL_COLS = ['收料日期', '单据状态', '供应商', '整单关闭状态', '采购员']
 SUM_MARKERS = ('合计', '总计')
 
 

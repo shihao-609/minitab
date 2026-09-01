@@ -3014,7 +3014,7 @@ def _render_submission_tab(inspect_type):
     uploaded = st.file_uploader(
         f'📤 上传「{inspect_type}」送检清单 Excel（列：供应商 / 物料编码 / 规格型号 / 物料名称 / 收料日期 / 实收数量）',
         type=['xlsx', 'xls'], key=f'sub_upload_{inspect_type}',
-        help='收料日期按 Excel 原样保存，留空则保持为空；重复记录（工序+供应商+物料编码+规格型号+物料名称+实收数量一致）不会重复入库')
+        help='若表内含「采购员」列会自动保留，用于未检验清单展示；收料日期按 Excel 原样保存，留空则保持为空；重复记录（工序+供应商+物料编码+规格型号+物料名称+实收数量一致）不会重复入库')
     if uploaded is not None:
         # 用文件 ID 判断是否新文件：避免每次 rerun 重新解析/查库
         fid = getattr(uploaded, 'file_id', None) or (uploaded.name, uploaded.size)
@@ -3125,11 +3125,76 @@ def _render_submission_tab(inspect_type):
                 st.rerun()
 
 
+def _snapshot_qty(v):
+    """快照入库前的数量清洗：NaN/空 → None，其余转 float"""
+    if v is None or v == '':
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f:  # NaN
+        return None
+    return f
+
+
+def _snapshot_date(v):
+    """快照入库前的日期清洗：None/空 → None，date/datetime → ISO 字符串"""
+    if v is None or v == '':
+        return None
+    if hasattr(v, 'isoformat'):
+        return v.isoformat()
+    return str(v)
+
+
+def _unchecked_rows_for_snapshot(result):
+    """比对结果 → 未检验清单快照行（覆盖保存用），失败时返回空列表"""
+    try:
+        df = result['unchecked']
+        if df is None or len(df) == 0:
+            return []
+        rows = []
+        for _, r in df.iterrows():
+            rows.append({
+                'supplier': str(r.get('供应商') or '')[:200],
+                'material_code': str(r.get('物料编码') or '')[:200],
+                'spec': str(r.get('规格型号') or '')[:200],
+                'material_name': str(r.get('物料名称') or '')[:200],
+                'received_date': _snapshot_date(r.get('收料日期')),
+                'received_qty': _snapshot_qty(r.get('实收数量')),
+                'purchaser': str(r.get('采购员') or '')[:100],
+                'unmatched_reason': str(r.get('未匹配原因') or '')[:300],
+            })
+        return rows
+    except Exception:
+        return []
+
+
+def _render_persisted_unchecked(inspect_type):
+    """展示最近一次持久化的未检验清单（跨刷新保留，覆盖保存）"""
+    try:
+        if not supabase_helper.ensure_unchecked_snapshots_table():
+            return
+        snap = supabase_helper.load_unchecked_snapshot(inspect_type)
+    except Exception:
+        snap = {'rows': [], 'saved_at': None}
+    rows = snap.get('rows') or []
+    if not rows:
+        return
+    st.divider()
+    st.subheader('📌 最近一次持久化未检验清单')
+    st.caption(f'保存时间：{str(snap.get("saved_at", ""))[:19]} · 共 {len(rows)} 条（每次比对结果自动覆盖上一次，刷新页面仍可查看）')
+    df = pd.DataFrame(rows)
+    cols = ['供应商', '物料编码', '规格型号', '物料名称', '收料日期', '实收数量', '采购员', '未匹配原因']
+    cols = [c for c in cols if c in df.columns]
+    st.dataframe(df[cols], use_container_width=True, hide_index=True)
+
+
 def _render_compare_tab(inspect_type):
     # 工序切换后重置本 tab 的临时状态，避免不同工序文件/结果串扰
     if st.session_state.get('_ins_active_type') != inspect_type:
         st.session_state._ins_active_type = inspect_type
-        for k in ['_ins_fid', '_ins_parse_err', '_ins_df', 'inspection_match_result']:
+        for k in ['_ins_fid', '_ins_parse_err', '_ins_df', '_ins_filled_tip', 'inspection_match_result']:
             st.session_state[k] = None
 
     st.session_state.setdefault('_ins_fid', None)
@@ -3159,7 +3224,7 @@ def _render_compare_tab(inspect_type):
     uploaded = st.file_uploader(
         f'📤 上传「{inspect_type}」检验清单 Excel（列：供应商 / 物料编码 / 规格型号 / 物料名称 / 质检日期 / 检验数量）',
         type=['xlsx', 'xls'], key=f'ins_upload_{inspect_type}',
-        help='支持用户 ERP 导出的完整表头（含单据编号、批号、检验结果等），自动抽取核心列并过滤「合计」行；勾选入库后写入检验记录库，可用于跨窗口自动对账')
+        help='支持用户 ERP 导出的完整表头（含单据编号、批号、检验结果、采购员等），自动抽取核心列并过滤「合计」行；含「单据编号」列时按单据号分组自动填充供应商等空值（与送检清单填充规则一致）；勾选入库后写入检验记录库，可用于跨窗口自动对账')
     if uploaded is not None:
         # 文件 ID 判断是否新文件：避免每次 rerun 重复解析
         fid = getattr(uploaded, 'file_id', None) or (uploaded.name, uploaded.size)
@@ -3168,21 +3233,31 @@ def _render_compare_tab(inspect_type):
             st.session_state._ins_fid = fid
             st.session_state._ins_parse_err = None
             st.session_state._ins_df = None
+            st.session_state._ins_filled_tip = None
             st.session_state.inspection_match_result = None  # 新文件 → 旧结果作废
             try:
-                ins_df = inspection_match.parse_inspection_full(uploaded)
+                _clean_report = {}
+                ins_df = inspection_match.parse_inspection_full(uploaded, clean_report=_clean_report)
             except Exception as e:
                 st.session_state._ins_parse_err = str(e)
             else:
                 ins_df = ins_df.copy()
                 ins_df['检验类型'] = inspect_type
                 st.session_state._ins_df = ins_df
+                _filled = _clean_report.get('filled_rows', {}) or {}
+                if _filled:
+                    _tips = '，'.join(f'「{k}」{v} 处' for k, v in _filled.items())
+                    st.session_state._ins_filled_tip = f'✅ 已按单据号分组自动填充空值：{_tips}（与送检清单「收料日期填充规则」一致）'
+                else:
+                    st.session_state._ins_filled_tip = None
 
     if st.session_state.get('_ins_parse_err'):
         st.error(f'❌ 文件解析失败: {st.session_state._ins_parse_err}')
     elif st.session_state.get('_ins_df') is not None:
         ins_df = st.session_state._ins_df
         st.success(f'✅ 检验清单解析成功：共 {len(ins_df)} 行（送检库 {len(sub_df)} 条）。')
+        if st.session_state.get('_ins_filled_tip'):
+            st.caption(st.session_state._ins_filled_tip)
 
         store_cb = st.checkbox(
             '📥 同时写入检验记录库（持久化，供后续跨窗口对账）',
@@ -3232,11 +3307,16 @@ def _render_compare_tab(inspect_type):
             progress_bar.empty()
             st.session_state.inspection_match_result = result
             st.session_state.inspection_match_dt = dt
+            # 未检验清单持久化：保存最新比对结果，覆盖上一次（按工序）
+            _snap_rows = _unchecked_rows_for_snapshot(result)
+            if supabase_helper.save_unchecked_snapshot(inspect_type, _snap_rows):
+                st.info(f'💾 未检验清单已持久化保存（{len(_snap_rows)} 条），覆盖了上一次结果')
             st.rerun()
 
     result = st.session_state.get('inspection_match_result')
     if result is None:
         st.info('👆 上传检验清单后点击「🚀 开始比对」')
+        _render_persisted_unchecked(inspect_type)
         return
     if not isinstance(result, dict) or 'summary' not in result:
         # 旧版本残留的脏数据 → 清掉，避免渲染崩溃
@@ -3253,6 +3333,7 @@ def _render_compare_tab(inspect_type):
     col4.metric('📋 额外检验', s['extra'])
     col5.metric('🆔 名称不一致', s['name_mismatch'])
     st.caption(f'⏱️ 本次比对耗时 {dt:.2f}s')
+    st.caption('💾 本次比对结果已自动持久化保存；刷新页面后可在本页查看最近一次未检验清单。')
 
     c1, c2 = st.columns(2)
     with c1:
@@ -3332,7 +3413,7 @@ def _render_inspection_records_tab(inspect_type):
                else f'📅 质检日期范围：未知（已加载 {len(records)} 条）')
     df = inspection_match.inspection_records_to_df(records)
     show_cols = ['检验类型', '单据编号', '供应商', '物料编码', '物料名称', '质检日期', '检验数量',
-                 '合格数', '不合格数', '检验结果', '质检员', '批号', '类别', '入库时间']
+                 '合格数', '不合格数', '检验结果', '质检员', '批号', '类别', '采购员', '入库时间']
     st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
 
     c1, c2 = st.columns([1, 3])
@@ -3457,7 +3538,52 @@ def _render_report_recipients_tab(inspect_type):
         st.caption('说明：「全部」收件人会收到所有工序邮件，在当前工序页面也可看到。'
                    '至少保留 1 个收件人，否则对应工序的邮件不会发送。')
     else:
-        st.info('暂无收件人，添加后每天凌晨的未检验清单才会发送。')
+        st.info('暂无收件人，添加后按下方发送时间设置自动发送未检验清单。')
+
+    # ---------- 发送时间设置（前端可配周一到周五任意几天 + 时间，团队共享） ----------
+    st.divider()
+    st.subheader('⏰ 发送时间设置')
+    if not supabase_helper.ensure_report_schedule_table():
+        st.warning('⚠️ 发送排程表 `report_schedule` 尚未创建，请先在 Supabase SQL Editor 中执行：')
+        st.code(supabase_helper.get_create_report_schedule_sql(), language='sql')
+    else:
+        sched = supabase_helper.get_report_schedule()
+        cur_days = sorted({
+            int(x) for x in str(sched.get('send_days', '1,2,3,4,5')).split(',')
+            if x.strip().isdigit() and 1 <= int(x) <= 5
+        })
+        cur_time = str(sched.get('send_time') or '08:00')
+        try:
+            _h, _m = [int(p) for p in cur_time.split(':')[:2]]
+            cur_time = f'{_h:02d}:{_m:02d}'
+        except Exception:
+            cur_time = '08:00'
+        day_labels = {'1': '周一', '2': '周二', '3': '周三', '4': '周四', '5': '周五'}
+        with st.form(f'schedule_form_{inspect_type}', clear_on_submit=False):
+            st.caption('选择自动发送「未检验清单」邮件的星期（周一~周五可选任意几天），'
+                       '并设置发送时间（北京时间）。至少勾选 1 天。')
+            c1, c2, c3, c4, c5 = st.columns(5)
+            boxes = {}
+            with c1: boxes['1'] = st.checkbox('周一', value=1 in cur_days, key=f'sched_mon_{inspect_type}')
+            with c2: boxes['2'] = st.checkbox('周二', value=2 in cur_days, key=f'sched_tue_{inspect_type}')
+            with c3: boxes['3'] = st.checkbox('周三', value=3 in cur_days, key=f'sched_wed_{inspect_type}')
+            with c4: boxes['4'] = st.checkbox('周四', value=4 in cur_days, key=f'sched_thu_{inspect_type}')
+            with c5: boxes['5'] = st.checkbox('周五', value=5 in cur_days, key=f'sched_fri_{inspect_type}')
+            t = st.time_input('发送时间（北京时间）',
+                               value=datetime.strptime(cur_time, '%H:%M').time(),
+                               key=f'sched_time_{inspect_type}')
+            submitted = st.form_submit_button('💾 保存发送时间设置')
+        if submitted:
+            days = [int(k) for k in ('1', '2', '3', '4', '5') if boxes.get(k)]
+            if not days:
+                st.warning('请至少勾选一天（全不勾选 = 不自动发送邮件）')
+            else:
+                if supabase_helper.save_report_schedule(days, t.strftime('%H:%M')):
+                    st.success(f'已保存：{", ".join(day_labels[str(d)] for d in sorted(days))} '
+                               f'{t.strftime("%H:%M")} 自动发送未检验清单')
+                    st.rerun()
+        st.caption('说明：邮件由 GitHub Actions 每小时触发检查一次，到设定的发送时间后最近一次触发即发送'
+                   '（误差约 1 小时内）；同一天只发送一次。')
 
 
 @st.dialog('⚠️ 确认清除记录')
@@ -3521,6 +3647,7 @@ def page_inspection_match():
     st.session_state.setdefault('_ins_fid', None)
     st.session_state.setdefault('_ins_parse_err', None)
     st.session_state.setdefault('_ins_df', None)
+    st.session_state.setdefault('_ins_filled_tip', None)
     st.session_state.setdefault('_rpc_ok', None)
 
     # 顶层工序导航：从配置中心读取已配置工序，以后新增工序 = 加一段配置即可

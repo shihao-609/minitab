@@ -80,7 +80,11 @@ EXTRA_INS_COLS = {
     '质检员': ['质检员', '检验员', '检验人', '质检人'],
     '批号': ['批号', '批次', '批号/序号'],
     '类别': ['类别', '检验类别', '检验方式', '分类'],
+    '采购员': ['采购员', '采购人', 'buyer'],
 }
+
+# 送检清单可选展示列（非匹配/去重字段，仅用于展示，缺失时置空）
+SUBMISSION_EXTRA_COLS = ['采购员']
 
 COLUMN_ALIASES = {
     '供应商': ['供应商', 'supplier', '供应商名称', 'vendor'],
@@ -272,7 +276,7 @@ def parse_sheet(uploaded_file, kind='submission', default_date=None, clean_repor
     if kind == 'submission':
         norm = {_normalize_header(c): c for c in df.columns}
         rename_map = {}
-        for _key in ('单据编号', '供应商', '整单关闭状态'):
+        for _key in ('单据编号', '供应商', '整单关闭状态', '采购员'):
             if _key in norm and norm[_key] != _key:
                 rename_map[norm[_key]] = _key
         if rename_map:
@@ -292,6 +296,15 @@ def parse_sheet(uploaded_file, kind='submission', default_date=None, clean_repor
     if missing:
         raise ValueError(f'缺少必要列: {", ".join(missing)}（请使用标准列名或下载模板）')
 
+    # 可选列：采购员（送检清单展示用，缺失置空；不参与匹配/去重）
+    if kind == 'submission':
+        _purchaser_col = None
+        for _c in df.columns:
+            if _normalize_header(_c).lower() in ('采购员', '采购人', 'buyer'):
+                _purchaser_col = _c
+                break
+        df['采购员'] = df[_purchaser_col].map(_clean_text) if _purchaser_col else ''
+
     df['供应商'] = df['供应商'].map(_clean_text)
     # 过滤 Excel 底部的「合计」汇总行（供应商列含"合计"，如 ERP 导出常见的合计行）
     df = df[~df['供应商'].str.contains('合计', na=False)].reset_index(drop=True)
@@ -306,7 +319,9 @@ def parse_sheet(uploaded_file, kind='submission', default_date=None, clean_repor
         df['检验数量'] = df['检验数量'].map(_parse_qty)
 
     df = df[df['物料编码'] != ''].reset_index(drop=True)
-    return df[SUBMISSION_COLS if kind == 'submission' else INSPECTION_COLS]
+    if kind == 'submission':
+        return df[SUBMISSION_COLS + SUBMISSION_EXTRA_COLS]
+    return df[INSPECTION_COLS]
 
 
 # ==================== 幂等去重入库 ====================
@@ -401,6 +416,7 @@ def import_submissions(df, progress=None, batch_size=1000, inspect_type='来料�
             'material_name': row['物料名称'],
             'received_date': d.isoformat() if isinstance(d, (date, datetime)) else None,
             'received_qty': row['实收数量'],
+            'purchaser': _clean_text(row.get('采购员', '')),
             'inspect_type': inspect_type,
             'dedup_key': make_dedup_key(row, inspect_type, 'submission'),
         })
@@ -418,7 +434,7 @@ def import_submissions(df, progress=None, batch_size=1000, inspect_type='来料�
 
 
 def submissions_to_df(records):
-    """数据库记录 → 展示用 DataFrame（检验类型 + 6 标准列 + 入库时间 + id + 去重键）"""
+    """数据库记录 → 展示用 DataFrame（检验类型 + 6 标准列 + 采购员 + 入库时间 + id + 去重键）"""
     rows = [{
         '检验类型': _clean_text(r.get('inspect_type')) or '来料检',
         '供应商': _clean_text(r.get('supplier')),
@@ -427,12 +443,13 @@ def submissions_to_df(records):
         '物料名称': _clean_text(r.get('material_name')),
         '收料日期': _fmt_date(r.get('received_date')),
         '实收数量': _parse_qty(r.get('received_qty')),
+        '采购员': _clean_text(r.get('purchaser')),
         '入库时间': str(r.get('created_at', ''))[:19],
         'id': r.get('id'),
         '去重键': _clean_text(r.get('dedup_key')),
     } for r in records]
     return pd.DataFrame(rows, columns=['检验类型', '供应商', '物料编码', '规格型号', '物料名称',
-                                       '收料日期', '实收数量', '入库时间', 'id', '去重键'])
+                                       '收料日期', '实收数量', '采购员', '入库时间', 'id', '去重键'])
 
 
 # ==================== 对比 ====================
@@ -457,12 +474,14 @@ def _date_ge(ins_date, sub_date):
 
 def _sub_dict(row):
     d = {c: row.get(c, '') for c in SUBMISSION_COLS}
+    d['采购员'] = row.get('采购员', '')
     d['检验类型'] = row.get('检验类型', '来料检')
     return d
 
 
 def _ins_dict(row):
     d = {c: row.get(c, '') for c in INSPECTION_COLS}
+    d['采购员'] = row.get('采购员', '')
     d['检验类型'] = row.get('检验类型', '来料检')
     return d
 
@@ -602,6 +621,7 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True, inspect_typ
                 row[sc] = _parse_qty(v)
             else:
                 row[sc] = _clean_text(v)
+        row['采购员'] = _clean_text(r.get('采购员', ''))  # 展示用，不参与匹配/去重
         if has_date:
             src_date = ins_date_field if is_ins else sub_date_field
             row[src_date] = _parse_date(r.get(src_date))
@@ -757,11 +777,11 @@ def compare(sub_df, ins_df, progress=None, normalize_suppliers=True, inspect_typ
             note = f"{note}；{dup_tip}" if note else dup_tip
         extra.append({**_ins_dict(irow), '备注': note})
 
-    checked_df = pd.DataFrame(checked, columns=SUBMISSION_COLS + ['检验类型', '匹配检验记录'])
-    unchecked_df = pd.DataFrame(unchecked, columns=SUBMISSION_COLS + ['检验类型', '未匹配原因'])
-    extra_df = pd.DataFrame(extra, columns=INSPECTION_COLS + ['检验类型', '备注'])
-    mismatch_sub_df = pd.DataFrame(name_mismatch_sub, columns=SUBMISSION_COLS + ['检验类型'])
-    mismatch_ins_df = pd.DataFrame(name_mismatch_ins, columns=INSPECTION_COLS + ['检验类型', '对应送检编码'])
+    checked_df = pd.DataFrame(checked, columns=SUBMISSION_COLS + ['采购员', '检验类型', '匹配检验记录'])
+    unchecked_df = pd.DataFrame(unchecked, columns=SUBMISSION_COLS + ['采购员', '检验类型', '未匹配原因'])
+    extra_df = pd.DataFrame(extra, columns=INSPECTION_COLS + ['采购员', '检验类型', '备注'])
+    mismatch_sub_df = pd.DataFrame(name_mismatch_sub, columns=SUBMISSION_COLS + ['采购员', '检验类型'])
+    mismatch_ins_df = pd.DataFrame(name_mismatch_ins, columns=INSPECTION_COLS + ['采购员', '检验类型', '对应送检编码'])
 
     summary = {
         'total_sub': total_sub,
@@ -821,10 +841,14 @@ def export_all(result):
 
 # ==================== 检验记录入库（方案四：持久化 + 跨窗口对账） ====================
 
-def parse_inspection_full(uploaded_file):
+def parse_inspection_full(uploaded_file, clean_report=None):
     """
     解析检验清单 Excel，保留入库所需完整字段。
-    返回 DataFrame（6 核心列 + 扩展列：单据编号/合格数/不合格数/检验结果/质检员/批号/类别）。
+    返回 DataFrame（6 核心列 + 扩展列：单据编号/合格数/不合格数/检验结果/质检员/批号/类别/采购员）。
+
+    供应商空值沿用「收料日期填充规则」：若含「单据编号」列，则按单据号分组统一填充
+    供应商（以及单据状态/整单关闭状态等 ERP 导出时仅首行有值的列），与送检清单解析行为一致。
+    填充明细写入 clean_report（若传入 dict）。
     """
     df = pd.read_excel(uploaded_file, header=None)
     header_row = _find_header_row(df)
@@ -833,6 +857,19 @@ def parse_inspection_full(uploaded_file):
     df.columns = df.iloc[header_row].astype(str).str.strip()
     df = df.iloc[header_row + 1:].reset_index(drop=True)
     df = df.dropna(how='all')
+
+    # ERP 单据格式（含「单据编号」列）：按单据号分组填充供应商/采购员等空值（沿用收料日期填充规则）
+    norm = {_normalize_header(c): c for c in df.columns}
+    rename_map = {}
+    for _key in ('单据编号', '供应商', '整单关闭状态', '采购员'):
+        if _key in norm and norm[_key] != _key:
+            rename_map[norm[_key]] = _key
+    if rename_map:
+        df = df.rename(columns=rename_map)
+    if '单据编号' in df.columns:
+        df, clean_notes = fill_receipt_order(df)
+        if isinstance(clean_report, dict):
+            clean_report.update(clean_notes)
 
     df, missing = _map_columns(df, 'inspection')
     if missing:
@@ -863,7 +900,7 @@ def parse_inspection_full(uploaded_file):
     for std in ('合格数', '不合格数'):
         if std in df.columns:
             df[std] = df[std].map(_parse_qty)
-    for std in ('检验结果', '质检员', '批号', '类别', '单据编号'):
+    for std in ('检验结果', '质检员', '批号', '类别', '单据编号', '采购员'):
         if std in df.columns:
             df[std] = df[std].map(_clean_text)
 
@@ -895,6 +932,7 @@ def import_inspection_records(df, progress=None, batch_size=1000, source_file=''
             'inspector': row.get('质检员', '') or '',
             'batch_no': row.get('批号', '') or '',
             'category': row.get('类别', '') or '',
+            'purchaser': _clean_text(row.get('采购员', '')),
             'inspect_type': inspect_type,
             'source_file': source_file,
             'dedup_key': make_dedup_key(row, inspect_type, 'inspection'),
@@ -929,10 +967,12 @@ def inspection_records_to_df(records):
         '质检员': _clean_text(r.get('inspector')),
         '批号': _clean_text(r.get('batch_no')),
         '类别': _clean_text(r.get('category')),
+        '采购员': _clean_text(r.get('purchaser')),
         '入库时间': str(r.get('created_at', ''))[:19],
         'id': r.get('id'),
         '去重键': _clean_text(r.get('dedup_key')),
     } for r in records]
     cols = ['检验类型', '供应商', '物料编码', '规格型号', '物料名称', '质检日期', '检验数量',
-            '单据编号', '合格数', '不合格数', '检验结果', '质检员', '批号', '类别', '入库时间', 'id', '去重键']
+            '单据编号', '合格数', '不合格数', '检验结果', '质检员', '批号', '类别', '采购员',
+            '入库时间', 'id', '去重键']
     return pd.DataFrame(rows, columns=cols)

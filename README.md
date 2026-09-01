@@ -47,12 +47,15 @@ streamlit run app.py
 
 ## 📮 每日未检验清单自动邮件
 
-工作日（周一至周五）凌晨自动把「未检验清单」通过邮件发给配置的收件人。
+自动把「未检验清单」通过邮件发给配置的收件人。**发送日期与时间可在前端设置**（周一至周五可选任意几天 + 北京时间发送时刻），无需改代码。
 
-- 触发方式：GitHub Actions 定时任务（`.github/workflows/daily_unchecked_report.yml`）
+- 触发方式：GitHub Actions 每小时触发一次（`.github/workflows/daily_unchecked_report.yml`），脚本按前端配置的排程判断当天/当刻是否发送
 - 脚本：`scripts/daily_unchecked_report.py`（独立运行，复用检验对比逻辑）
+- 发送时间配置：应用「🔍 质量管理 → 📮 邮件收件人」页 → **⏰ 发送时间设置**，勾选周一~周五任意几天并设置时间（北京时间，误差约 1 小时内），团队共享、立即生效
+- 防重复：同一天只会发送一次（记录 `report_schedule.last_sent_date`）
+- 未配置排程表时回退旧行为：周一至周五发送
 - 无未检验记录时不会发邮件
-- Excel 附件含两个 sheet：`未检验清单`（含"新增/持续"状态列）、`变动摘要`（昨日 vs 今日对比）
+- Excel 附件含两个 sheet：`未检验清单`（含"新增/持续"状态列 + 采购员列）、`变动摘要`（昨日 vs 今日对比）
 
 ### 配置 GitHub Secrets
 
@@ -82,3 +85,16 @@ streamlit run app.py
 ### 手动触发测试
 
 GitHub 仓库 → **Actions** → 左侧「每日未检验清单邮件」→ **Run workflow** → 点绿色按钮，即可立即发送一封测试邮件。
+
+## 🔋 Supabase 保活（防睡眠）
+
+Supabase 免费版约 7 天无活动会暂停项目，且 Streamlit 社区版应用休眠后首次打开会冷启动（变慢）。仓库内置保活机制：
+
+- Workflow：`.github/workflows/keep_alive.yml`（每 3 小时执行一次）
+- 脚本：`keep_alive.py`（ping `inspection_submissions` 等业务表 + REST 兜底 + 唤醒 Streamlit 应用）
+
+> ⚠️ 若发现"防睡眠失效"（应用经常冷启动/打开慢），请检查：
+> 1. GitHub 仓库 → **Actions** 页左侧是否有「Supabase Keep-Alive」工作流；
+> 2. 若显示被禁用（Disable），点击启用；GitHub 会在仓库 60 天无活动时自动禁用定时工作流，重新 commit/push 一次即可恢复；
+> 3. 检查运行日志是否有红色失败（如缺少 `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` Secret）；
+> 4. `keep_alive.py` 已支持回退使用 `SUPABASE_SERVICE_ROLE_KEY`（邮件流程已配置，通常更可靠）。
