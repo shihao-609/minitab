@@ -3414,6 +3414,7 @@ def _render_inspection_records_tab(inspect_type):
     df = inspection_match.inspection_records_to_df(records)
     show_cols = ['检验类型', '单据编号', '供应商', '物料编码', '物料名称', '质检日期', '检验数量',
                  '合格数', '不合格数', '检验结果', '质检员', '批号', '类别', '采购员', '入库时间']
+    show_cols = [c for c in show_cols if c in df.columns]
     st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
 
     c1, c2 = st.columns([1, 3])
