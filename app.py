@@ -3199,6 +3199,17 @@ def _render_persisted_unchecked(inspect_type):
     df = df.rename(columns=rename_map)
     cols = ['供应商', '物料编码', '规格型号', '物料名称', '收料日期', '实收数量', '采购员', '未匹配原因']
     cols = [c for c in cols if c in df.columns]
+    c_exp, _ = st.columns([1, 5])
+    with c_exp:
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+            df[cols].to_excel(writer, index=False, sheet_name='未检验清单')
+        st.download_button('⬇️ 导出未检验清单',
+                           buf.getvalue(),
+                           f'未检验清单_{date.today()}.xlsx',
+                           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                           key='dl_persisted_unchecked',
+                           use_container_width=True)
     st.dataframe(df[cols], use_container_width=True, hide_index=True)
 
 
