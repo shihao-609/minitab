@@ -1,11 +1,17 @@
 """
-认证模块 — 基于 Supabase Auth 的登录/注册/用户管理
+认证模块 — 基于 Supabase Auth 的免密登录 / 用户管理
 =====================================================
 功能:
-  - 邮箱 + 密码 注册/登录
+  - 从个人工作站跳转的免密静默登录（未注册邮箱自动创建账号）
   - JWT 令牌管理（session 生命周期内有效）
   - 登出
   - 用户信息获取
+
+安全策略 v2（锁死自助注册，仅允许从个人工作站进入）:
+  - 自助注册与"邮箱 + 密码"登录已彻底关闭，页面不再提供任何注册/登录表单
+  - 唯一入口：个人工作站跳转到本系统 URL 并携带 ?email=xxx，
+    由 sso_login() 触发免密静默登录；该邮箱不存在时会自动创建账号并登录
+  - 直接访问本系统（无 email 参数）时，只展示"请从个人工作站进入"引导页
 
 关键设计（解决"额外注意项"）:
   1. 登录后使用用户的 JWT 创建 Supabase 客户端，替代 anon key
@@ -45,7 +51,7 @@ def _get_supabase_service_key() -> str:
 
 
 def get_anon_client() -> Optional[Client]:
-    """获取使用 anon key 的客户端（仅用于注册/登录，无权读写受 RLS 保护的数据）"""
+    """获取使用 anon key 的客户端（仅用于免密登录环节，无权读写受 RLS 保护的数据）"""
     url = _get_supabase_url()
     key = _get_supabase_anon_key()
     if not url or not key:
@@ -61,8 +67,7 @@ def init_auth_session():
         "authenticated": False,
         "user": None,           # Supabase 返回的 user 对象
         "session": None,        # Supabase 返回的 session 对象（含 access_token）
-        "auth_error": None,     # 登录/注册时的错误信息
-        "auth_mode": "login",   # "login" | "register"
+        "auth_error": None,     # 登录时的错误信息
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -142,83 +147,11 @@ def get_authenticated_client() -> Optional[Client]:
 
 # ==================== 认证操作 ====================
 
-def login(email: str, password: str) -> bool:
-    """邮箱登录
-    
-    Returns:
-        True 表示登录成功，False 表示失败（错误信息在 st.session_state.auth_error）
-    """
-    client = get_anon_client()
-    if client is None:
-        st.session_state.auth_error = "Supabase 配置未设置，请检查 SUPABASE_URL 和 SUPABASE_ANON_KEY"
-        return False
-
-    try:
-        response = client.auth.sign_in_with_password({
-            "email": email,
-            "password": password,
-        })
-        st.session_state.authenticated = True
-        st.session_state.user = response.user
-        st.session_state.session = response.session
-        st.session_state.auth_error = None
-        return True
-    except Exception as e:
-        msg = str(e)
-        if "Invalid login credentials" in msg:
-            st.session_state.auth_error = "邮箱或密码错误"
-        elif "Email not confirmed" in msg:
-            st.session_state.auth_error = "邮箱未验证，请先验证邮箱"
-        else:
-            st.session_state.auth_error = f"登录失败: {msg}"
-        return False
-
-
-def register(email: str, password: str) -> bool:
-    """邮箱注册
-    
-    注：默认不要求邮箱验证，如需验证请在 Supabase Dashboard 中开启。
-    
-    Returns:
-        True 表示注册成功并自动登录，False 表示失败
-    """
-    client = get_anon_client()
-    if client is None:
-        st.session_state.auth_error = "Supabase 配置未设置，请检查 SUPABASE_URL 和 SUPABASE_ANON_KEY"
-        return False
-
-    if len(password) < 6:
-        st.session_state.auth_error = "密码至少需要 6 个字符"
-        return False
-
-    try:
-        response = client.auth.sign_up({
-            "email": email,
-            "password": password,
-        })
-        
-        # Supabase sign_up 可能返回 user 也可能需要邮箱验证
-        if response.user:
-            # 如果开启了邮箱确认，user 存在但 session 为 None
-            if response.session:
-                st.session_state.authenticated = True
-                st.session_state.user = response.user
-                st.session_state.session = response.session
-                st.session_state.auth_error = None
-                return True
-            else:
-                st.session_state.auth_error = "注册成功！请在邮箱中确认验证链接后登录。"
-                return False
-        else:
-            st.session_state.auth_error = "注册失败，请重试"
-            return False
-    except Exception as e:
-        msg = str(e)
-        if "already registered" in msg.lower() or "already exists" in msg.lower():
-            st.session_state.auth_error = "该邮箱已注册，请直接登录"
-        else:
-            st.session_state.auth_error = f"注册失败: {msg}"
-        return False
+# 【安全策略 v2】自助注册与"邮箱 + 密码"登录已彻底关闭：
+#   - 应用不再提供任何注册/登录表单（见下方 render_auth_page）；
+#   - 唯一登录入口为"从个人工作站跳转"触发的免密静默登录 sso_login()；
+#   - 若未来确有密码登录需求，可在此补回 login()/register()，
+#     同时需在 Supabase Dashboard 重新开启 Email 注册，否则会被 Supabase 侧拒绝。
 
 
 def logout():
@@ -235,7 +168,7 @@ def logout():
             del st.session_state[key]
 
 
-# ==================== 免密静默登录（从知识库跳转） ====================
+# ==================== 免密静默登录（从个人工作站跳转） ====================
 
 def _generate_magiclink_otp(url, service_key, email) -> Optional[str]:
     """
@@ -336,7 +269,7 @@ def _verify_otp_login(anon, email, otp) -> bool:
 
 def sso_login(email: str) -> bool:
     """
-    知识库跳转免密登录（支持未注册邮箱自动创建账号）。
+    个人工作站跳转免密登录（当前系统唯一登录方式，支持未注册邮箱自动创建账号）。
 
     流程：
       1. 先直接 magiclink 登录（已注册且已确认的邮箱）
@@ -404,10 +337,36 @@ def sso_login(email: str) -> bool:
 
 # ==================== 登录页面渲染 ====================
 
+def _render_portal_only_hint():
+    """渲染"仅从个人工作站进入"引导页（不提供任何注册/登录表单）"""
+    st.markdown(
+        """
+        <div style="text-align:center; padding:2.5rem 0;">
+            <div style="font-size:3rem; margin-bottom:.5rem;">🚪</div>
+            <h3>本系统仅支持从个人工作站进入</h3>
+            <p style="color:#555; line-height:1.8;">
+                请在 <b>个人工作站</b> 的应用列表中找到「质量管理系统」并点击进入，
+                系统将自动完成免密登录，无需输入账号密码，也无需注册。
+            </p>
+            <p style="color:#999; font-size:.85rem; margin-top:1rem;">
+                直接打开本页面无法登录。如确有使用需要，请联系管理员在个人工作站中为你开通入口。
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_auth_page():
-    """渲染登录/注册页面
-    
-    所有需要认证的页面调用前，先由 login_required 装饰器检查，
+    """渲染登录页 —— 仅支持从个人工作站跳转进入
+
+    安全策略 v2（已锁死自助注册）：
+      - 页面不提供任何"邮箱 + 密码"登录表单或注册表单；
+      - 无跳转参数（直接访问）时，仅显示"请从个人工作站进入"的引导页；
+      - 唯一登录入口：个人工作站跳转携带 ?email=xxx，
+        触发下方免密静默登录（sso_login），未注册邮箱会自动创建账号。
+
+    所有需要认证的页面调用前，先由 login_required 守卫检查，
     未登录时跳转到此页面。
     """
     st.set_page_config(
@@ -428,82 +387,41 @@ def render_auth_page():
     """, unsafe_allow_html=True)
 
     st.title("🔐 质量管理系统 QMS")
-    st.caption("Quality Management System — 请登录后使用")
+    st.caption("Quality Management System — 请从个人工作站进入")
 
-    # 支持从知识库跳转：优先免密静默登录，失败则回退为邮箱已填充的登录表单
+    # 个人工作站跳转参数：URL 需携带 ?email=xxx
     try:
         url_email = st.query_params.get("email", "")
     except Exception:
         url_email = ""
-    if url_email:
-        st.session_state["login_email"] = str(url_email)
-        if not st.session_state.get("authenticated") and not st.session_state.get("sso_attempted"):
-            st.session_state["sso_attempted"] = True
-            st.session_state.auth_error = None
-            if sso_login(str(url_email)):
-                # 登录成功：清理 URL 参数，避免刷新重复触发
-                try:
-                    st.query_params.clear()
-                except Exception:
-                    pass
-                st.rerun()
 
-    mode = st.session_state.get("auth_mode", "login")
+    # 无跳转参数 → 不渲染任何表单，只提示从个人工作站进入
+    if not url_email:
+        _render_portal_only_hint()
+        return
 
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        if mode == "login":
-            st.subheader("登录")
-            email = st.text_input("邮箱", placeholder="your@email.com", key="login_email")
-            password = st.text_input("密码", type="password", placeholder="输入密码", key="login_password")
+    # ---- 已带 email 参数：触发免密静默登录 ----
+    st.session_state["login_email"] = str(url_email)
+    if not st.session_state.get("sso_attempted"):
+        st.session_state["sso_attempted"] = True
+        st.session_state.auth_error = None
+        if sso_login(str(url_email)):
+            # 登录成功：清理 URL 参数，避免刷新重复触发
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+            st.rerun()
 
-            btn_col1, btn_col2 = st.columns(2)
-            with btn_col1:
-                if st.button("登录", type="primary", use_container_width=True):
-                    if not email or not password:
-                        st.error("请输入邮箱和密码")
-                    else:
-                        if login(email, password):
-                            st.rerun()
-                        else:
-                            st.error(st.session_state.auth_error)
-
-            with btn_col2:
-                if st.button("没有账号？注册", use_container_width=True):
-                    st.session_state.auth_mode = "register"
-                    st.session_state.auth_error = None
-                    st.rerun()
-
-        else:  # register
-            st.subheader("注册")
-            email = st.text_input("邮箱", placeholder="your@email.com", key="reg_email")
-            password = st.text_input("密码", type="password", placeholder="至少6个字符", key="reg_password")
-            password2 = st.text_input("确认密码", type="password", placeholder="再次输入密码", key="reg_password2")
-
-            btn_col1, btn_col2 = st.columns(2)
-            with btn_col1:
-                if st.button("注册", type="primary", use_container_width=True):
-                    if not email or not password:
-                        st.error("请填写所有字段")
-                    elif password != password2:
-                        st.error("两次密码输入不一致")
-                    else:
-                        if register(email, password):
-                            st.rerun()
-                        else:
-                            st.error(st.session_state.auth_error)
-
-            with btn_col2:
-                if st.button("已有账号？登录", use_container_width=True):
-                    st.session_state.auth_mode = "login"
-                    st.session_state.auth_error = None
-                    st.rerun()
-
-    # 显示错误
+    # 登录失败：给出明确提示 + 重试入口
+    st.warning("⚠️ 未能自动登录，请确认你是通过个人工作站中的入口进入本系统。")
     err = st.session_state.get("auth_error")
     if err:
         st.error(err)
-        st.session_state.auth_error = None
+    st.info("若多次重试仍失败，请联系管理员确认该邮箱是否已在个人工作站开通本系统入口。")
+    if st.button("🔄 重新尝试登录", type="primary", use_container_width=True):
+        st.session_state["sso_attempted"] = False
+        st.rerun()
 
 
 # ==================== 登录守卫 ====================
