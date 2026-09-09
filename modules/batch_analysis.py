@@ -238,6 +238,31 @@ def generate_report(all_analyses: List[dict], filenames: List[str]) -> str:
             data_info = f"{summary.get('操作员数', '?')}操作员×{summary.get('样本数', '?')}样本"
             key_findings.append(f"两两一致性: {summary.get('两两一致性', 'N/A')}")
 
+        elif atype == 'doe':
+            data_info = f"{summary.get('试验次数', '?')}次试验/{summary.get('因子数', '?')}因子"
+            key_findings.append(f"响应: {summary.get('响应变量', 'N/A')}")
+            key_findings.append(f"因子: {summary.get('因子', 'N/A')}")
+
+        elif atype == 'fmea':
+            data_info = f"{summary.get('总失效模式', '?')}项模式"
+            key_findings.append(f"高风险: {summary.get('高风险 (RPN≥200)', 'N/A')}")
+            key_findings.append(f"最大 RPN: {summary.get('最大 RPN', 'N/A')}")
+
+        elif atype == 'sampling':
+            data_info = f"N={summary.get('批数量 N', '?')}, n={summary.get('样本量 n', '?')}, Ac={summary.get('合格判定数 Ac', '?')}"
+            key_findings.append(f"AQL: {summary.get('AQL', 'N/A')}")
+
+        elif atype == 't2':
+            data_info = f"{summary.get('变量数', '?')}变量×{summary.get('样本量', '?')}样本"
+            key_findings.append(f"状态: {summary.get('受控状态', 'N/A')}")
+            if int(summary.get('超限点数', 0) or 0) > 0:
+                total_issues += 1
+
+        elif atype == 'hypothesis_test':
+            data_info = f"分组: {summary.get('分组列', 'N/A')}"
+            key_findings.append(f"结论: {summary.get('结论', 'N/A')}")
+            key_findings.append(f"显著结果: {summary.get('显著结果数', 0)}/{summary.get('检验总数', 0)}")
+
         else:
             data_info = f"{summary.get('数据行数', '?')}行"
 
@@ -500,6 +525,83 @@ def generate_report(all_analyses: List[dict], filenames: List[str]) -> str:
                 lines.append(f'- 🔴 操作员一致性差，急需统一判定标准和培训')
             lines.append(f'')
 
+        elif atype == 'doe':
+            summary = analysis.get('summary', {})
+            lines.append(f'### DOE 全因子试验设计')
+            lines.append(f'- **响应变量**: {summary.get("响应变量", "N/A")}')
+            lines.append(f'- **试验次数**: {summary.get("试验次数", "N/A")}')
+            lines.append(f'- **因子数**: {summary.get("因子数", "N/A")}')
+            lines.append(f'- **因子**: {summary.get("因子", "N/A")}')
+            lines.append(f'')
+            eff_tbl = analysis.get('effects_table')
+            if eff_tbl is not None and not eff_tbl.empty:
+                lines.append(f'### 因子效应表')
+                lines.append(f'')
+                lines.append(f'| ' + ' | '.join(str(c) for c in eff_tbl.columns) + ' |')
+                lines.append(f'|' + '|'.join(['------'] * len(eff_tbl.columns)) + '|')
+                for _, row in eff_tbl.iterrows():
+                    lines.append(f'| ' + ' | '.join(str(v) for v in row) + ' |')
+                lines.append(f'')
+
+        elif atype == 'fmea':
+            summary = analysis.get('summary', {})
+            lines.append(f'### FMEA 风险评估')
+            lines.append(f'- **总失效模式**: {summary.get("总失效模式", "N/A")}')
+            lines.append(f'- **高风险 (RPN≥200)**: {summary.get("高风险 (RPN≥200)", "N/A")}')
+            lines.append(f'- **中风险 (100≤RPN<200)**: {summary.get("中风险 (100≤RPN<200)", "N/A")}')
+            lines.append(f'- **低风险 (RPN<100)**: {summary.get("低风险 (RPN<100)", "N/A")}')
+            lines.append(f'- **最大 RPN**: {summary.get("最大 RPN", "N/A")}')
+            lines.append(f'- **列映射**: {summary.get("列映射", "N/A")}')
+            lines.append(f'')
+            top = analysis.get('top_risks', [])
+            if top:
+                lines.append(f'### TOP 风险项')
+                lines.append(f'')
+                lines.append(f'| 模式 | RPN | 风险等级 |')
+                lines.append(f'|------|-----|---------|')
+                for t in top:
+                    lines.append(f'| {t.get("模式", "N/A")} | {t.get("RPN", "N/A")} | {t.get("风险等级", "N/A")} |')
+                lines.append(f'')
+
+        elif atype == 'sampling':
+            summary = analysis.get('summary', {})
+            lines.append(f'### 抽样方案 OC 曲线')
+            lines.append(f'- **批数量 N**: {summary.get("批数量 N", "N/A")}')
+            lines.append(f'- **样本量 n**: {summary.get("样本量 n", "N/A")}')
+            lines.append(f'- **合格判定数 Ac**: {summary.get("合格判定数 Ac", "N/A")}')
+            lines.append(f'- **AQL**: {summary.get("AQL", "N/A")}')
+            lines.append(f'- **LTPD (Pa≈0.1)**: {summary.get("LTPD (Pa≈0.1)", "N/A")}')
+            lines.append(f'- **AOQL**: {summary.get("AOQL", "N/A")}')
+            lines.append(f'')
+
+        elif atype == 't2':
+            summary = analysis.get('summary', {})
+            lines.append(f'### Hotelling T² 多变量控制图')
+            lines.append(f'- **变量数**: {summary.get("变量数", "N/A")}')
+            lines.append(f'- **样本量**: {summary.get("样本量", "N/A")}')
+            lines.append(f'- **UCL**: {summary.get("UCL", "N/A")}')
+            lines.append(f'- **超限点数**: {summary.get("超限点数", "N/A")}')
+            lines.append(f'- **受控状态**: {summary.get("受控状态", "N/A")}')
+            lines.append(f'')
+
+        elif atype == 'hypothesis_test':
+            summary = analysis.get('summary', {})
+            lines.append(f'### 假设检验')
+            lines.append(f'- **分组列**: {summary.get("分组列", "N/A")}')
+            lines.append(f'- **检验数值列数**: {summary.get("检验数值列数", "N/A")}')
+            lines.append(f'- **检验总数**: {summary.get("检验总数", "N/A")}')
+            lines.append(f'- **显著结果数**: {summary.get("显著结果数", "N/A")}')
+            lines.append(f'- **结论**: {summary.get("结论", "N/A")}')
+            lines.append(f'')
+            results = analysis.get('results', [])
+            if results:
+                lines.append(f'| 检验 | 数值列 | 分组 | 统计量 | p值 | 结论 |')
+                lines.append(f'|------|--------|------|--------|-----|------|')
+                for rr in results:
+                    lines.append(f'| {rr.get("检验", "")} | {rr.get("数值列", "")} | {rr.get("分组", "")} | '
+                                 f'{rr.get("统计量", "")} | {rr.get("p值", "")} | {rr.get("结论", "")} |')
+                lines.append(f'')
+
     # === 总结 ===
     lines.append(f'---')
     lines.append(f'')
@@ -595,6 +697,339 @@ def generate_report(all_analyses: List[dict], filenames: List[str]) -> str:
 
 
 # ============================================================
+# 高级 / 独立模块分析（DOE / FMEA / 抽样方案 / T² / 假设检验）
+# 由 batch_import_and_analyze 与 restore_analyses_from_files 共用
+# ============================================================
+
+def analyze_doe(df: pd.DataFrame, params: dict) -> dict:
+    """批量 DOE 全因子：
+    - 响应列：优先使用用户指定的 doe_response；否则自动推断（数值列中唯一的非两水平连续列）。
+    - 其余列交给 doe_full_factorial 作为因子（仅统计两水平因子）。
+    """
+    params = params or {}
+    response_col = params.get('doe_response') or None
+    if response_col in (None, '（自动推断）'):
+        response_col = None
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+
+    def _nuniq(c):
+        return df[c].dropna().nunique()
+
+    if response_col is None:
+        resp_cands = [c for c in numeric_cols if _nuniq(c) != 2]
+        if len(resp_cands) == 1:
+            response_col = resp_cands[0]
+        elif len(numeric_cols) == 1:
+            response_col = numeric_cols[0]
+        else:
+            raise ValueError('无法自动确定 DOE 响应列（需要唯一的连续数值列作响应，因子需两水平），请在参数配置中指定响应列')
+
+    if response_col not in df.columns:
+        raise ValueError(f'DOE 响应列 "{response_col}" 不存在于该文件')
+
+    factor_cands = [c for c in df.columns if c != response_col and 0 < _nuniq(c) <= 2]
+    if not factor_cands:
+        raise ValueError('DOE 需要至少一个两水平因子列（如 温度高/低），当前数据中未找到')
+
+    r = advanced_analysis.doe_full_factorial(df, response_col)
+    if 'error' in r:
+        raise ValueError(r['error'])
+    return {
+        'type': 'doe',
+        'chart': r['chart'],
+        'effects_table': r.get('effects_table'),
+        'summary': {
+            '响应变量': response_col,
+            '试验次数': r.get('total_runs', len(df)),
+            '因子数': r.get('factors', len(factor_cands)),
+            '因子': ', '.join(factor_cands[:6]) + ('…' if len(factor_cands) > 6 else ''),
+        },
+    }
+
+
+def analyze_sampling(df: pd.DataFrame, params: dict) -> dict:
+    """抽样方案 OC 曲线：参数 N/n/Ac/AQL，无实际数据列依赖。"""
+    params = params or {}
+
+    def _int(v, default):
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return default
+
+    N = _int(params.get('sp_N'), 1000)
+    n = _int(params.get('sp_n'), 50)
+    c_val = _int(params.get('sp_c'), 0)
+    try:
+        aql = float(params.get('sp_aql', 1.0))
+    except (TypeError, ValueError):
+        aql = 1.0
+    N = max(N, 10)
+    n = min(max(n, 1), N)
+    c_val = max(c_val, 0)
+    aql = min(max(aql, 0.01), 20.0)
+
+    r = advanced_analysis.sampling_plan_oc_curve(N, n, c_val, aql)
+    if 'error' in r:
+        raise ValueError(r['error'])
+    stats = r['stats']
+    return {
+        'type': 'sampling',
+        'chart': r['chart'],
+        'stats': stats,
+        'summary': {
+            '批数量 N': N,
+            '样本量 n': n,
+            '合格判定数 Ac': c_val,
+            'AQL': f'{aql}%',
+            'LTPD (Pa≈0.1)': stats.get('LTPD (Pa≈0.1)'),
+            'AOQL': stats.get('AOQL'),
+        },
+    }
+
+
+_FMEA_KEYWORD_MAP = {
+    '模式':   ['模式', '失效模式', 'failure', 'failure mode', 'mode'],
+    '严重度': ['严重度', '严重', 'severity'],
+    '发生度': ['发生度', '发生', 'occurrence'],
+    '探测度': ['探测度', '探测', 'detection'],
+}
+_FMEA_REQUIRED = ['模式', '严重度', '发生度', '探测度']
+
+
+def _fmea_match_col(cols, keywords):
+    for kw in keywords:
+        for c in cols:
+            if str(c).strip() == kw:
+                return c
+    for kw in keywords:
+        for c in cols:
+            if str(kw).lower() in str(c).lower():
+                return c
+    return None
+
+
+def analyze_fmea(df: pd.DataFrame, params: dict) -> dict:
+    """批量 FMEA：自动匹配 模式/严重度/发生度/探测度 列（支持用户手动映射）。"""
+    params = params or {}
+    cols = df.columns.tolist()
+    user_map = {
+        '模式': params.get('fmea_mode_col'),
+        '严重度': params.get('fmea_sev_col'),
+        '发生度': params.get('fmea_occ_col'),
+        '探测度': params.get('fmea_det_col'),
+    }
+    mapping = {}
+    for target in _FMEA_REQUIRED:
+        c = user_map.get(target)
+        if c in (None, '（自动识别）'):
+            c = None
+        if c is not None and c in df.columns and c not in mapping.values():
+            mapping[target] = c
+        else:
+            hit = _fmea_match_col(cols, _FMEA_KEYWORD_MAP[target])
+            if hit is None or hit in mapping.values():
+                raise ValueError(f'FMEA 需包含「{target}」列（模式/严重度/发生度/探测度），当前文件未自动识别到，请在参数配置中映射列')
+            mapping[target] = hit
+
+    sub = df[[mapping[t] for t in _FMEA_REQUIRED]].copy()
+    sub = sub.rename(columns={v: k for k, v in mapping.items()})
+    for t in ['严重度', '发生度', '探测度']:
+        sub[t] = pd.to_numeric(sub[t], errors='coerce')
+    sub = sub.dropna(subset=['严重度', '发生度', '探测度'])
+    if sub.empty:
+        raise ValueError('FMEA 无有效记录（严重度/发生度/探测度需为数值）')
+
+    r = advanced_analysis.fmea_analysis(sub.to_dict('records'))
+    if 'error' in r:
+        raise ValueError(r['error'])
+    return {
+        'type': 'fmea',
+        'chart': r['chart'],
+        'fmea_df': r.get('fmea_df'),
+        'top_risks': r.get('top_risks', []),
+        'summary': {
+            '总失效模式': int(r['summary'].get('总失效模式') or 0),
+            '高风险 (RPN≥200)': int(r['summary'].get('高风险 (RPN≥200)') or 0),
+            '中风险 (100≤RPN<200)': int(r['summary'].get('中风险 (100≤RPN<200)') or 0),
+            '低风险 (RPN<100)': int(r['summary'].get('低风险 (RPN<100)') or 0),
+            '最大 RPN': int(r['summary'].get('最大 RPN') or 0),
+            '列映射': ', '.join(f'{k}←{v}' for k, v in mapping.items()),
+        },
+    }
+
+
+def analyze_t2(df: pd.DataFrame, params: dict) -> dict:
+    """批量多变量 T² 控制图：默认整表数值列（Phase I 单批识别）。"""
+    params = params or {}
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    sel = params.get('t2_cols') or []
+    sel = [c for c in sel if c in numeric_cols]
+    cols = sel if len(sel) >= 2 else numeric_cols
+    if len(cols) < 2:
+        raise ValueError('多变量 T² 需要至少 2 个数值变量列（该文件仅 1 个，请改用 SPC/EWMA 等单变量模块）')
+    try:
+        alpha = float(params.get('t2_alpha', 0.0027))
+    except (TypeError, ValueError):
+        alpha = 0.0027
+    alpha = min(max(alpha, 0.0001), 0.5)
+
+    r = spc_advanced.t2_chart(df[cols], alpha)
+    if 'error' in r:
+        raise ValueError(r['error'])
+    ooc = int(r['stats'].get('超限点数', 0))
+    return {
+        'type': 't2',
+        'chart': r['chart'],
+        'stats': r['stats'],
+        'variables': cols,
+        'summary': {
+            '变量数': r['stats'].get('变量数 p'),
+            '样本量': r['stats'].get('样本量 n'),
+            'UCL': r['stats'].get('UCL (控制上限)'),
+            '超限点数': ooc,
+            '受控状态': '受控' if ooc == 0 else '⚠️ 存在超限',
+        },
+    }
+
+
+def analyze_hypothesis_tests(df: pd.DataFrame, params: dict) -> dict:
+    """批量假设检验（自动推断，尽量对齐单文件「统计推断」页能力）：
+    - 有分组列（类别/低基数数值，2~8 组）时：对每个数值列执行 等方差 Levene +
+      双样本独立 t（仅 2 组）或 单因素 ANOVA（≥2 组）。
+    - 无分组列且数值列 ≥2：按行配对做双样本配对 t 检验。
+    """
+    params = params or {}
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    non_num = [c for c in df.columns if c not in numeric_cols]
+
+    def _nuniq(c):
+        return df[c].dropna().nunique()
+
+    group_col = params.get('ht_group_col')
+    if group_col in (None, '（自动推断）'):
+        group_col = None
+    if group_col is not None and group_col not in df.columns:
+        raise ValueError(f'分组列 "{group_col}" 不存在')
+
+    if group_col is None:
+        cands = [c for c in non_num if 2 <= _nuniq(c) <= 8]
+        if not cands:
+            cands = [c for c in numeric_cols if 2 <= _nuniq(c) <= 8]
+        if cands:
+            group_col = cands[0]
+
+    val_cols = params.get('ht_value_cols') or []
+    val_cols = [c for c in val_cols if c in numeric_cols]
+    if not val_cols:
+        val_cols = [c for c in numeric_cols if c != group_col][:8]
+
+    results, charts = [], {}
+
+    def _fmt(x, nd=6):
+        try:
+            return f'{float(x):.{nd}f}'
+        except (TypeError, ValueError):
+            return 'N/A'
+
+    if group_col is not None:
+        for v in val_cols:
+            groups = {}
+            for lab in df[group_col].dropna().unique():
+                g = df[df[group_col] == lab][v].dropna()
+                if len(g) >= 2:
+                    groups[str(lab)] = g.values
+            if len(groups) < 2:
+                continue
+            # 等方差 Levene
+            try:
+                ev = stats_tools.equal_variance_test(groups)
+                if 'error' not in ev:
+                    results.append({
+                        '检验': '等方差 (Levene)', '数值列': v, '分组': group_col,
+                        '统计量': _fmt(ev['Levene']['statistic'], 4),
+                        'p值': _fmt(ev['Levene']['p_value']),
+                        '结论': '等方差 ✓' if ev['Levene']['equal'] else '方差不齐 ✗',
+                    })
+            except Exception:
+                pass
+            # 两组时双样本独立 t
+            if len(groups) == 2:
+                k1, k2 = list(groups.keys())
+                try:
+                    t = stats_tools.t_test_two_sample(groups[k1], groups[k2], paired=False)
+                    if 'error' not in t:
+                        results.append({
+                            '检验': '双样本 t (独立)', '数值列': v, '分组': group_col,
+                            '统计量': _fmt(t['t_stat'], 4), 'p值': _fmt(t['p_val']),
+                            '结论': '存在显著差异 ✓' if t['significant'] else '无显著差异',
+                        })
+                except Exception:
+                    pass
+            # 单因素 ANOVA（组数≥2 均适用）
+            try:
+                a = stats_tools.one_way_anova(groups)
+                if 'error' not in a:
+                    results.append({
+                        '检验': '单因素 ANOVA', '数值列': v, '分组': group_col,
+                        '统计量': _fmt(a['f_stat'], 4), 'p值': _fmt(a['p_val']),
+                        '结论': '存在显著差异 ✓' if a['significant'] else '无显著差异',
+                    })
+                    if a.get('chart') is not None:
+                        charts[v] = a['chart']
+            except Exception:
+                pass
+    else:
+        if len(numeric_cols) >= 2:
+            c1, c2 = numeric_cols[0], numeric_cols[1]
+            pairs = df[[c1, c2]].dropna()
+            if len(pairs) >= 4:
+                t = stats_tools.t_test_two_sample(pairs[c1].values, pairs[c2].values, paired=True)
+                if 'error' not in t:
+                    results.append({
+                        '检验': '双样本 t (配对)', '数值列': f'{c1} ↔ {c2}', '分组': '（无，行配对）',
+                        '统计量': _fmt(t['t_stat'], 4), 'p值': _fmt(t['p_val']),
+                        '结论': '存在显著差异 ✓' if t['significant'] else '无显著差异',
+                    })
+
+    if not results:
+        raise ValueError('假设检验无可执行项：请提供分组列（如 班次/设备/操作员）使每组 ≥2 个样本，'
+                         '或多列数据按行配对；可在参数配置中手动指定')
+
+    sig_n = sum(1 for r in results if '✓' in r['结论'])
+    return {
+        'type': 'hypothesis_test',
+        'group_col': group_col,
+        'results': results,
+        'charts': charts,
+        'summary': {
+            '分组列': group_col if group_col is not None else '（无，行配对）',
+            '检验数值列数': len(val_cols),
+            '检验总数': len(results),
+            '显著结果数': sig_n,
+            '结论': '存在显著差异' if sig_n else '未发现显著差异',
+        },
+    }
+
+
+_ADVANCED_MODULE_FUNCS = {
+    'doe': analyze_doe,
+    'fmea': analyze_fmea,
+    'sampling': analyze_sampling,
+    't2': analyze_t2,
+    'hypothesis_test': analyze_hypothesis_tests,
+}
+
+
+def run_advanced_module(mod: str, df: pd.DataFrame, params: dict) -> dict:
+    """统一执行高级/独立模块，返回 analysis 主体（不含 filename/module 等字段）。
+    数据不满足条件时抛出 ValueError，由调用方包装成 error 分析项。"""
+    if mod not in _ADVANCED_MODULE_FUNCS:
+        raise ValueError(f'未知分析模块: {mod}')
+    return _ADVANCED_MODULE_FUNCS[mod](df, params or {})
+
+
+# ============================================================
 # 第四部分：便捷批量导入接口（纯手动版）
 # ============================================================
 
@@ -630,9 +1065,17 @@ ALL_MODULES = {
     'grr':           {'label': '计量型 Gage R&R',    'group': 'msa',          'desc': 'X-bar R + ANOVA 法'},
     'grr_attribute': {'label': '计数型 Gage R&R',    'group': 'msa',          'desc': '属性一致性 Kappa 法'},
     'uncertainty':   {'label': '测量不确定度',       'group': 'msa',          'desc': 'GUM 法评定'},
+    # ---- SPC 多变量 ----
+    't2':            {'label': '多变量 T² 控制图',   'group': 'spc_control',  'desc': 'Hotelling T² (需≥2变量)'},
+    # ---- 统计推断 ----
+    'hypothesis_test': {'label': '假设检验',         'group': 'statistics',   'desc': 'ANOVA / 等方差 / t 检验'},
     # ---- 特殊分析 ----
     'dimension':     {'label': '型材尺寸分析',       'group': 'special',      'desc': '批次多测量值 SPC'},
-    'weibull':       {'label': 'Weibull 可靠性',     'group': 'special',      'desc': '失效时间/寿命分析'},
+    # ---- 高级分析 ----
+    'doe':           {'label': 'DOE 全因子试验',     'group': 'advanced',     'desc': '因子 2 水平全因子设计'},
+    'fmea':          {'label': 'FMEA 风险分析',      'group': 'advanced',     'desc': 'RPN 风险评估 (模式/S/O/D)'},
+    'sampling':      {'label': '抽样方案 OC 曲线',   'group': 'advanced',     'desc': 'N/n/Ac/AQL 方案评估'},
+    'weibull':       {'label': 'Weibull 可靠性',     'group': 'advanced',     'desc': '失效时间/寿命分析'},
 }
 
 # 休哈特控制图子类型（在勾选"SPC 控制图"后可多选）
@@ -654,7 +1097,15 @@ MODULE_GROUPS = [
     ('🔢 统计推断',    'statistics'),
     ('🔬 测量系统 MSA', 'msa'),
     ('📏 特殊分析',    'special'),
+    ('🧪 高级分析',    'advanced'),
 ]
+
+# 需要"特定列结构 / 独立参数"、不能与其他模块合并成连续分析的模块。
+# 这些模块在批量执行时各自单独产出分析结果。
+STANDALONE_MODULE_KEYS = {
+    'pareto', 'grr', 'grr_attribute', 'dimension',
+    'doe', 'fmea', 'sampling', 't2', 'hypothesis_test',
+}
 
 # 连续型模块的子分析函数映射
 _CONTINUOUS_ANALYZERS = {
@@ -1436,7 +1887,6 @@ def batch_import_and_analyze(
         params = params_map.get(fname, {})
 
         # 分组：standalone（需特定列格式） vs continuous（适用任何数值列）
-        STANDALONE_MODULE_KEYS = {'pareto', 'grr', 'grr_attribute', 'dimension'}
         standalone_mods = [m for m in modules if m in STANDALONE_MODULE_KEYS]
         continuous_mods = [m for m in modules if m not in STANDALONE_MODULE_KEYS]
 
@@ -1493,6 +1943,8 @@ def batch_import_and_analyze(
                     analysis = analyze_dimension(df,
                         batch_col=params.get('batch_col'),
                         meas_cols=params.get('meas_cols'))
+                elif mod in _ADVANCED_MODULE_FUNCS:
+                    analysis = run_advanced_module(mod, df, params)
                 else:
                     continue
                 analysis['filename'] = fname
@@ -1626,7 +2078,6 @@ def restore_analyses_from_files(files_data: list,
             continue
 
         # 分组（与 batch_import_and_analyze 保持一致）
-        STANDALONE_MODULE_KEYS = {'pareto', 'grr', 'grr_attribute', 'dimension'}
         standalone_mods = [m for m in modules if m in STANDALONE_MODULE_KEYS]
         continuous_mods = [m for m in modules if m not in STANDALONE_MODULE_KEYS]
 
@@ -1678,6 +2129,8 @@ def restore_analyses_from_files(files_data: list,
                     analysis = analyze_dimension(df,
                         batch_col=params.get('batch_col'),
                         meas_cols=params.get('meas_cols'))
+                elif mod in _ADVANCED_MODULE_FUNCS:
+                    analysis = run_advanced_module(mod, df, params)
                 else:
                     continue
                 analysis['filename'] = fname

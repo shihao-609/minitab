@@ -2200,6 +2200,107 @@ def _show_analysis_detail(analysis, data_dict, file_idx):
             st.table(pd.DataFrame(kappa))
         st.metric('两两一致性均值', f'{agreement:.1%}')
 
+    elif atype == 'doe':
+        chart = analysis.get('chart')
+        if chart:
+            st.plotly_chart(chart, use_container_width=True, key=f'batch_doe_{file_idx}')
+        eff_tbl = analysis.get('effects_table')
+        if eff_tbl is not None and not eff_tbl.empty:
+            st.caption('**因子效应表**')
+            st.dataframe(eff_tbl, use_container_width=True)
+        s = analysis.get('summary', {})
+        cm1, cm2, cm3 = st.columns(3)
+        with cm1:
+            st.metric('响应变量', s.get('响应变量', 'N/A'))
+        with cm2:
+            st.metric('试验次数', s.get('试验次数', 'N/A'))
+        with cm3:
+            st.metric('因子数', s.get('因子数', 'N/A'))
+
+    elif atype == 'fmea':
+        chart = analysis.get('chart')
+        if chart:
+            st.plotly_chart(chart, use_container_width=True, key=f'batch_fmea_{file_idx}')
+        top = analysis.get('top_risks', [])
+        if top:
+            st.caption('**TOP 3 风险项**')
+            st.dataframe(pd.DataFrame(top), use_container_width=True)
+        s = analysis.get('summary', {})
+        fm1, fm2, fm3, fm4 = st.columns(4)
+        with fm1:
+            st.metric('总失效模式', s.get('总失效模式', 'N/A'))
+        with fm2:
+            st.metric('高风险', s.get('高风险 (RPN≥200)', 'N/A'))
+        with fm3:
+            st.metric('最大 RPN', s.get('最大 RPN', 'N/A'))
+        with fm4:
+            st.metric('列映射', s.get('列映射', 'N/A'))
+        fdf = analysis.get('fmea_df')
+        if fdf is not None and not fdf.empty:
+            with st.expander('查看完整 FMEA 表'):
+                st.dataframe(fdf, use_container_width=True)
+
+    elif atype == 'sampling':
+        chart = analysis.get('chart')
+        if chart:
+            st.plotly_chart(chart, use_container_width=True, key=f'batch_samp_{file_idx}')
+        s = analysis.get('summary', {})
+        sp1, sp2, sp3 = st.columns(3)
+        with sp1:
+            st.metric('批量 N', s.get('批数量 N', 'N/A'))
+            st.metric('LTPD (Pa≈0.1)', s.get('LTPD (Pa≈0.1)', 'N/A'))
+        with sp2:
+            st.metric('样本量 n', s.get('样本量 n', 'N/A'))
+            st.metric('AOQL', s.get('AOQL', 'N/A'))
+        with sp3:
+            st.metric('合格判定 Ac', s.get('合格判定数 Ac', 'N/A'))
+            st.metric('AQL', s.get('AQL', 'N/A'))
+
+    elif atype == 't2':
+        chart = analysis.get('chart')
+        if chart:
+            st.plotly_chart(chart, use_container_width=True, key=f'batch_t2_{file_idx}')
+        s = analysis.get('summary', {})
+        t1, t2, t3, t4 = st.columns(4)
+        with t1:
+            st.metric('变量数', s.get('变量数', 'N/A'))
+        with t2:
+            st.metric('样本量', s.get('样本量', 'N/A'))
+        with t3:
+            st.metric('UCL', s.get('UCL', 'N/A'))
+        with t4:
+            st.metric('超限点数', s.get('超限点数', 'N/A'))
+        st.metric('受控状态', s.get('受控状态', 'N/A'))
+
+    elif atype == 'hypothesis_test':
+        s = analysis.get('summary', {})
+        h1, h2, h3, h4 = st.columns(4)
+        with h1:
+            st.metric('分组列', s.get('分组列', 'N/A'))
+        with h2:
+            st.metric('检验数值列', s.get('检验数值列数', 'N/A'))
+        with h3:
+            st.metric('检验总数', s.get('检验总数', 'N/A'))
+        with h4:
+            st.metric('显著结果', s.get('显著结果数', 'N/A'))
+        results = analysis.get('results', [])
+        if results:
+            st.dataframe(pd.DataFrame(results), use_container_width=True)
+        charts = analysis.get('charts', {}) or {}
+        if charts:
+            st.caption('**ANOVA 组间分布图**')
+            cols_charts = list(charts.items())
+            for i in range(0, len(cols_charts), 2):
+                row_c = st.columns(2)
+                for j, (col_name, fig) in enumerate(cols_charts[i:i + 2]):
+                    with row_c[j]:
+                        st.plotly_chart(fig, use_container_width=True,
+                                        key=f'batch_ht_{file_idx}_{col_name}_{i}')
+        if s.get('结论'):
+            if '存在显著差异' in s.get('结论'):
+                st.warning(f"结论：{s.get('结论')}（p<0.05），建议进一步排查影响因素")
+            else:
+                st.success(f"结论：{s.get('结论')}")
 
 
 
@@ -2356,6 +2457,88 @@ def _dlg_step_params(fname, file_idx, cols_list, numeric_cols,
             default_meas = [c for c in numeric_cols if c != params.get('batch_col')]
             params['meas_cols'] = st.multiselect('测量值列', numeric_cols,
                                                  default=default_meas, key=f'dlg_dim_meas_{file_idx}')
+
+    # === 多变量 T² ===
+    if 't2' in modules:
+        st.caption('▸ **多变量 T² 控制图**')
+        t2c1, t2c2 = st.columns([3, 1])
+        with t2c1:
+            default_t2 = numeric_cols[:min(6, len(numeric_cols))]
+            prev_t2 = params.get('t2_cols')
+            params['t2_cols'] = st.multiselect('变量列（需 ≥2，默认全部/前6个）', numeric_cols,
+                                               default=prev_t2 or default_t2,
+                                               key=f'dlg_t2_cols_{file_idx}')
+        with t2c2:
+            params['t2_alpha'] = st.number_input('α', min_value=0.0001, max_value=0.5,
+                                                 value=float(params.get('t2_alpha', 0.0027)),
+                                                 step=0.0001, format='%.4f',
+                                                 key=f'dlg_t2_a_{file_idx}')
+        if len(numeric_cols) < 2:
+            st.warning('该文件仅 1 个数值列，T² 无法计算，可改用 SPC/EWMA 单变量模块')
+
+    # === DOE 全因子 ===
+    if 'doe' in modules:
+        st.caption('▸ **DOE 全因子试验**')
+        doe_opts = ['（自动推断）'] + numeric_cols
+        prev_doe = params.get('doe_response')
+        doe_idx = doe_opts.index(prev_doe) if prev_doe in doe_opts else 0
+        dc1, dc2 = st.columns([1, 1])
+        with dc1:
+            params['doe_response'] = st.selectbox('响应列', doe_opts, index=doe_idx,
+                                                  key=f'dlg_doe_resp_{file_idx}')
+        with dc2:
+            st.caption('自动推断：数值列中唯一非两水平的连续列；其余列视为因子，统计两水平因子效应')
+
+    # === FMEA ===
+    if 'fmea' in modules:
+        st.caption('▸ **FMEA 风险分析**')
+        auto_opt = '（自动识别）'
+        fopts = [auto_opt] + cols_list
+        fc1, fc2, fc3, fc4 = st.columns(4)
+        with fc1:
+            params['fmea_mode_col'] = st.selectbox('模式列', fopts, key=f'dlg_fmea_mode_{file_idx}')
+        with fc2:
+            params['fmea_sev_col'] = st.selectbox('严重度列', fopts, key=f'dlg_fmea_sev_{file_idx}')
+        with fc3:
+            params['fmea_occ_col'] = st.selectbox('发生度列', fopts, key=f'dlg_fmea_occ_{file_idx}')
+        with fc4:
+            params['fmea_det_col'] = st.selectbox('探测度列', fopts, key=f'dlg_fmea_det_{file_idx}')
+
+    # === 抽样方案 ===
+    if 'sampling' in modules:
+        st.caption('▸ **抽样方案 OC 曲线**')
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        with sc1:
+            params['sp_N'] = st.number_input('批量 N', 10, 1000000, int(params.get('sp_N', 1000)),
+                                             key=f'dlg_sp_N_{file_idx}')
+        with sc2:
+            params['sp_n'] = st.number_input('样本量 n', 1, 100000, int(params.get('sp_n', 50)),
+                                             key=f'dlg_sp_n_{file_idx}')
+        with sc3:
+            params['sp_c'] = st.number_input('合格判定 Ac', 0, 100, int(params.get('sp_c', 0)),
+                                             key=f'dlg_sp_c_{file_idx}')
+        with sc4:
+            params['sp_aql'] = st.number_input('AQL (%)', 0.01, 20.0,
+                                               float(params.get('sp_aql', 1.0)), 0.1, key=f'dlg_sp_aql_{file_idx}')
+
+    # === 假设检验 ===
+    if 'hypothesis_test' in modules:
+        st.caption('▸ **假设检验**（自动：等方差 + t 检验/单因素 ANOVA，p<0.05 为显著）')
+        text_cols = [c for c in cols_list if c not in numeric_cols]
+        auto_h = '（自动推断）'
+        hopts = [auto_h] + text_cols
+        prev_h = params.get('ht_group_col')
+        h_idx = hopts.index(prev_h) if prev_h in hopts else 0
+        hc1, hc2 = st.columns([1, 2])
+        with hc1:
+            params['ht_group_col'] = st.selectbox('分组列', hopts, index=h_idx,
+                                                  key=f'dlg_ht_grp_{file_idx}')
+        with hc2:
+            prev_v = params.get('ht_value_cols')
+            default_v = prev_v or numeric_cols[:min(6, len(numeric_cols))]
+            params['ht_value_cols'] = st.multiselect('比较的数值列（默认前6个）', numeric_cols,
+                                                     default=default_v,
+                                                     key=f'dlg_ht_vals_{file_idx}')
 
     # === 连续型通用参数 ===
     continuous_keys = {'histogram', 'boxplot', 'run_chart', 'normality',
@@ -2784,16 +2967,17 @@ def page_batch_analysis():
         # 空状态
         if 'batch_analyses' not in st.session_state or not st.session_state.batch_analyses:
             st.info('👆 上传 CSV 文件，手动选择数据类型和分析模块，然后点击「开始分析」')
-            with st.expander('📖 支持的分析模块 (19个)', expanded=False):
+            with st.expander('📖 支持的分析模块 (24个)', expanded=False):
                 st.markdown("""
                 | 分类 | 分析模块 | 说明 |
                 |------|---------|------|
                 | 📊 基础图形 | 帕累托图、直方图、箱线图、运行图 | 缺陷/分布/异常值/趋势分析 |
-                | 📈 SPC 控制 | SPC控制图(7种)、EWMA、CUSUM | 过程稳定性和小偏移检测 |
+                | 📈 SPC 控制 | SPC控制图(7种)、EWMA、CUSUM、多变量T² | 过程稳定性/小偏移/多变量监测 |
                 | 🎯 能力分析 | Cp/Cpk、Box-Cox、Cg/Cgk | 过程能力/非正态/检具评估 |
-                | 🔢 统计推断 | 正态性检验、相关性、回归、描述性统计 | 分布检验/关联分析/回归建模 |
+                | 🔢 统计推断 | 正态性、相关性、回归、描述统计、假设检验 | 分布/关联/建模/组间差异比较 |
                 | 🔬 测量系统 | 计量型GRR、计数型GRR、测量不确定度 | MSA 全面评估 |
-                | 📏 特殊分析 | 型材尺寸、Weibull可靠性 | 批次尺寸/寿命分析 |
+                | 📏 特殊分析 | 型材尺寸分析 | 批次多测量值 SPC |
+                | 🧪 高级分析 | DOE、Weibull、抽样方案、FMEA | 试验设计/寿命/抽样/风险分析 |
                 """)
 
         show_data_info()
