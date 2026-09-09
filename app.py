@@ -2203,6 +2203,19 @@ def _show_analysis_detail(analysis, data_dict, file_idx):
 
 
 
+def _close_batch_config_dialog():
+    """清理批量配置弹窗的打开状态。
+
+    在"确认保存"或用户点 X / 点弹窗外区域关闭时调用，避免残留的打开标志
+    在后续 rerun 中导致弹窗自动重开，或在同一轮脚本运行里重复调用
+    @st.dialog 而触发 "Only one dialog is allowed..." 报错。
+    """
+    idx = st.session_state.pop('_active_config_idx', None)
+    if idx is not None:
+        st.session_state.pop(f'_dlg_step_{idx}', None)
+        st.session_state.pop(f'dlg_mods_{idx}_temp', None)
+
+
 def _show_config_dialog(fname, file_idx, cols_list, numeric_cols,
                          global_tol, global_ewma_lam, global_ewma_L,
                          global_cusum_k, global_cusum_h, global_cg_pct,
@@ -2210,7 +2223,8 @@ def _show_config_dialog(fname, file_idx, cols_list, numeric_cols,
     """弹窗：两步式配置 — Step1选模块 → Step2设参数 → 确认保存"""
     step = st.session_state.get(f'_dlg_step_{file_idx}', 'modules')
 
-    @st.dialog(f'配置分析 — {fname}', width='large')
+    @st.dialog(f'配置分析 — {fname}', width='large',
+               on_dismiss=_close_batch_config_dialog)
     def _dlg():
         if step == 'modules':
             _dlg_step_modules(fname, file_idx)
@@ -2495,9 +2509,8 @@ def _dlg_step_params(fname, file_idx, cols_list, numeric_cols,
         if st.button('✅ 确认保存', type='primary', use_container_width=True,
                      key=f'dlg_save_{file_idx}'):
             st.session_state.batch_param_map[fname] = params
-            # 清理弹窗状态
-            st.session_state.pop(f'_dlg_open_{file_idx}', None)
-            st.session_state.pop(f'_dlg_step_{file_idx}', None)
+            # 清理弹窗状态（含打开标志与步骤），随后 rerun 使弹窗关闭
+            _close_batch_config_dialog()
             st.rerun()
 
 
@@ -2509,6 +2522,11 @@ def page_batch_analysis():
     for key in ['batch_module_map', 'batch_param_map']:
         if key not in st.session_state:
             st.session_state[key] = {}
+
+    # 清理旧版本残留的逐文件弹窗标志（_dlg_open_{i}），避免干扰
+    for k in list(st.session_state.keys()):
+        if k.startswith('_dlg_open_'):
+            del st.session_state[k]
 
     sub = st.segmented_control(
         '视图', ['📤 上传与手动分析', '📂 历史报告'],
@@ -2611,12 +2629,16 @@ def page_batch_analysis():
                     with cbtn1:
                         if st.button('📋 配置' if not current_modules else '⚙️ 重新配置',
                                      key=f'open_dlg_{i}', use_container_width=True):
-                            st.session_state[f'_dlg_open_{i}'] = True
+                            # 单活动弹窗：直接覆盖索引，保证同一脚本运行最多打开一个弹窗，
+                            # 避免旧实现里每个文件各留一个 _dlg_open_{i} 标志残留，
+                            # 在打开其他文件时同一轮内两次调用 @st.dialog 报错
+                            st.session_state['_active_config_idx'] = i
                             st.session_state.pop(f'_dlg_step_{i}', None)  # reset step
+                            st.session_state.pop(f'dlg_mods_{i}_temp', None)  # 清上次未保存选择
                             st.rerun()
 
                 # ---- 弹窗：两步式模块选择 + 参数配置 ----
-                if st.session_state.get(f'_dlg_open_{i}', False):
+                if st.session_state.get('_active_config_idx') == i:
                     _show_config_dialog(uf.name, i, cols_list, numeric_cols,
                                         global_tolerance, global_ewma_lam, global_ewma_L,
                                         global_cusum_k, global_cusum_h, global_cg_pct,
