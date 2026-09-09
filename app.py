@@ -3378,17 +3378,22 @@ def _unchecked_rows_for_snapshot(result):
 
 def _render_persisted_unchecked(inspect_type):
     """展示最近一次持久化的未检验清单（跨刷新保留，覆盖保存）"""
+    st.divider()
+    st.subheader(f'📌 最近一次持久化未检验清单（{inspect_type}）')
     try:
         if not supabase_helper.ensure_unchecked_snapshots_table():
+            st.warning('⚠️ 持久化表 `unchecked_snapshots` 尚未创建，未检验清单暂时无法跨刷新保留。'
+                       '请先在 Supabase SQL Editor 执行建表 SQL（幂等，可重复执行）：')
+            st.code(supabase_helper.get_create_unchecked_snapshots_sql(), language='sql')
             return
         snap = supabase_helper.load_unchecked_snapshot(inspect_type)
     except Exception:
         snap = {'rows': [], 'saved_at': None}
     rows = snap.get('rows') or []
     if not rows:
+        st.info('暂无可查看内容。在本页上传「检验清单」并点击「🚀 开始比对」后，'
+                '会自动保存最近一次未检验结果（每次覆盖上一次），刷新或重新打开页面仍可在此查看。')
         return
-    st.divider()
-    st.subheader('📌 最近一次持久化未检验清单')
     st.caption(f'保存时间：{str(snap.get("saved_at", ""))[:19]} · 共 {len(rows)} 条（每次比对结果自动覆盖上一次，刷新页面仍可查看）')
     df = pd.DataFrame(rows)
     # 兼容旧快照的英文字段名
@@ -3434,6 +3439,8 @@ def _render_compare_tab(inspect_type):
     records = _load_compare_records()
     if not records:
         st.info('📌 送检清单为空。请先在「📤 送检清单管理」中上传送检清单。')
+        # 送检清单为空时仍展示最近一次持久化未检验清单（跨刷新保留，便于核对 / 下载）
+        _render_persisted_unchecked(inspect_type)
         return
 
     # 送检记录转 DataFrame 后缓存，避免每次 rerun 重复转换
@@ -3544,7 +3551,7 @@ def _render_compare_tab(inspect_type):
 
     result = st.session_state.get('inspection_match_result')
     if result is None:
-        st.info('👆 上传检验清单后点击「🚀 开始比对」')
+        st.info('👆 上传「检验清单」后点击「🚀 开始比对」；下方展示最近一次已持久化的未检验清单（跨刷新保留）。')
         _render_persisted_unchecked(inspect_type)
         return
     if not isinstance(result, dict) or 'summary' not in result:
@@ -3562,7 +3569,8 @@ def _render_compare_tab(inspect_type):
     col4.metric('📋 额外检验', s['extra'])
     col5.metric('🆔 名称不一致', s['name_mismatch'])
     st.caption(f'⏱️ 本次比对耗时 {dt:.2f}s')
-    st.caption('💾 本次比对结果已自动持久化保存；刷新页面后可在本页查看最近一次未检验清单。')
+    st.caption('💾 本次比对结果已自动持久化保存（覆盖上一次）。刷新或重新打开页面后，在本页下方「📌 最近一次持久化未检验清单」中查看；'
+               '注意上方「选择工序」需切换到本次比对的工序。')
 
     c1, c2 = st.columns(2)
     with c1:
@@ -3789,28 +3797,48 @@ def _render_report_recipients_tab(inspect_type):
         except Exception:
             cur_time = '08:00'
         day_labels = {'1': '周一', '2': '周二', '3': '周三', '4': '周四', '5': '周五'}
+        # 当前生效排程：每次运行都从数据库读取，任何人保存后此处都会立即显示团队最新设置
+        if cur_days:
+            st.success(f'⏰ **当前生效排程**（团队共享，全局一份）：'
+                       f'**{"、".join(day_labels[str(d)] for d in sorted(cur_days))} {cur_time}** '
+                       f'自动发送未检验清单邮件（北京时间）')
+        else:
+            st.success('⏰ **当前生效排程**：未勾选任何一天，当前不会自动发送未检验清单邮件。')
+
+        # 每次渲染前清空本区块控件缓存，让表单回显数据库中的最新保存值（以数据库为唯一事实来源），
+        # 避免旧会话缓存的控件值覆盖他人已保存的新时间 / 新日期。
+        # 若本轮是「保存发送时间设置」的提交轮（submit key 已在本轮事件中置位），则保留缓存以读取用户提交值，
+        # 保存成功后再统一清除并刷新，从而回显刚保存的新值。
+        _sched_keys = [f'sched_{_w}_{inspect_type}' for _w in ('mon', 'tue', 'wed', 'thu', 'fri')] + \
+            [f'sched_time_{inspect_type}']
+        _submit_key = f'sched_submit_{inspect_type}'
+        if not st.session_state.get(_submit_key):
+            for _wk in _sched_keys:
+                st.session_state.pop(_wk, None)
         with st.form(f'schedule_form_{inspect_type}', clear_on_submit=False):
-            st.caption('选择自动发送「未检验清单」邮件的星期（周一~周五可选任意几天），'
-                       '并设置发送时间（北京时间）。至少勾选 1 天。')
+            st.caption('修改后点击「保存」即对团队生效；每次刷新 / 操作页面都会回显数据库中最新保存的设置。至少勾选 1 天。')
             c1, c2, c3, c4, c5 = st.columns(5)
             boxes = {}
-            with c1: boxes['1'] = st.checkbox('周一', value=1 in cur_days, key=f'sched_mon_{inspect_type}')
-            with c2: boxes['2'] = st.checkbox('周二', value=2 in cur_days, key=f'sched_tue_{inspect_type}')
-            with c3: boxes['3'] = st.checkbox('周三', value=3 in cur_days, key=f'sched_wed_{inspect_type}')
-            with c4: boxes['4'] = st.checkbox('周四', value=4 in cur_days, key=f'sched_thu_{inspect_type}')
-            with c5: boxes['5'] = st.checkbox('周五', value=5 in cur_days, key=f'sched_fri_{inspect_type}')
+            with c1: boxes['1'] = st.checkbox('周一', value=1 in cur_days, key=_sched_keys[0])
+            with c2: boxes['2'] = st.checkbox('周二', value=2 in cur_days, key=_sched_keys[1])
+            with c3: boxes['3'] = st.checkbox('周三', value=3 in cur_days, key=_sched_keys[2])
+            with c4: boxes['4'] = st.checkbox('周四', value=4 in cur_days, key=_sched_keys[3])
+            with c5: boxes['5'] = st.checkbox('周五', value=5 in cur_days, key=_sched_keys[4])
             t = st.time_input('发送时间（北京时间）',
                                value=datetime.strptime(cur_time, '%H:%M').time(),
-                               key=f'sched_time_{inspect_type}')
-            submitted = st.form_submit_button('💾 保存发送时间设置')
+                               key=_sched_keys[5])
+            submitted = st.form_submit_button('💾 保存发送时间设置', key=_submit_key)
         if submitted:
             days = [int(k) for k in ('1', '2', '3', '4', '5') if boxes.get(k)]
             if not days:
                 st.warning('请至少勾选一天（全不勾选 = 不自动发送邮件）')
             else:
                 if supabase_helper.save_report_schedule(days, t.strftime('%H:%M')):
-                    st.success(f'已保存：{", ".join(day_labels[str(d)] for d in sorted(days))} '
-                               f'{t.strftime("%H:%M")} 自动发送未检验清单')
+                    st.success(f'✅ 已保存并生效：{"、".join(day_labels[str(d)] for d in sorted(days))} '
+                               f'{t.strftime("%H:%M")} 自动发送未检验清单（北京时间）')
+                    # 清除控件与提交标志缓存并刷新，使表单立即回显刚保存的新时间 / 新日期
+                    for _wk in _sched_keys + [_submit_key]:
+                        st.session_state.pop(_wk, None)
                     st.rerun()
         st.caption('说明：邮件由 GitHub Actions 每小时触发检查一次，到设定的发送时间后最近一次触发即发送'
                    '（误差约 1 小时内）；同一天只发送一次。')

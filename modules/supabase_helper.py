@@ -1834,14 +1834,48 @@ def ensure_unchecked_snapshots_table() -> bool:
         return False
 
 
+# 快照行业务键（中文）→ 表列名（英文）映射
+_SNAPSHOT_COL_MAP = {
+    '供应商': 'supplier',
+    '物料编码': 'material_code',
+    '规格型号': 'spec',
+    '物料名称': 'material_name',
+    '收料日期': 'received_date',
+    '实收数量': 'received_qty',
+    '采购员': 'purchaser',
+    '未匹配原因': 'unmatched_reason',
+    '检验类型': 'inspect_type',
+}
+# 表已有的英文列（兼容直接传英文键的旧调用）
+_SNAPSHOT_EN_COLS = {
+    'supplier', 'material_code', 'spec', 'material_name', 'received_date',
+    'received_qty', 'purchaser', 'unmatched_reason', 'inspect_type',
+}
+
+
 def save_unchecked_snapshot(inspect_type: str, rows: list) -> bool:
-    """持久化未检验清单：先删除该工序旧快照，再写入最新比对结果（覆盖语义，保存最新的）"""
+    """持久化未检验清单：先删除该工序旧快照，再写入最新比对结果（覆盖语义，保存最新的）。
+
+    入参 rows 使用中文业务键（供应商 / 物料编码 …），写入前映射为表英文列，
+    并自动补充当前工序 inspect_type，避免「找列失败」或跨工序串档。
+    """
     try:
         client = _get_client()
         _check_client(client)
         client.table("unchecked_snapshots").delete().eq("inspect_type", inspect_type).execute()
         if rows:
-            client.table("unchecked_snapshots").insert(rows).execute()
+            norm_rows = []
+            for r in rows:
+                row = {}
+                for k, v in r.items():
+                    en = _SNAPSHOT_COL_MAP.get(k)
+                    if en:
+                        row[en] = v
+                    elif k in _SNAPSHOT_EN_COLS:
+                        row[k] = v
+                row['inspect_type'] = inspect_type
+                norm_rows.append(row)
+            client.table("unchecked_snapshots").insert(norm_rows).execute()
         return True
     except Exception as e:
         if "unchecked_snapshots" in str(e):
