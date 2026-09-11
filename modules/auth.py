@@ -174,6 +174,27 @@ def logout():
             del st.session_state[key]
 
 
+# ==================== HTTP 连接复用 ====================
+# 复用同一个 httpx.Client：避免每次请求都重新做 DNS + TCP + TLS 握手，
+# 跨区域访问 Supabase 时通常可省 100~500ms。
+_HTTP_CLIENT = None
+
+
+def _get_http_client():
+    """获取进程内复用的 httpx.Client（不可用时返回 None）"""
+    global _HTTP_CLIENT
+    try:
+        import httpx
+    except Exception:
+        return None
+    if _HTTP_CLIENT is None:
+        _HTTP_CLIENT = httpx.Client(
+            timeout=15,
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+        )
+    return _HTTP_CLIENT
+
+
 # ==================== 免密静默登录（从个人工作站跳转） ====================
 
 SSO_SIGNATURE_TTL = 300  # 工作站跳转签名有效期（秒）
@@ -240,12 +261,11 @@ def _generate_magiclink_otp(url, service_key, email) -> Optional[str]:
       - supabase-py 的 generate_link 只解析 user 对象，email_otp/action_link
         会被丢弃，所以必须用 REST 方式拿原始返回。
     """
-    try:
-        import httpx
-    except Exception:
+    client = _get_http_client()
+    if client is None:
         return None
     try:
-        resp = httpx.post(
+        resp = client.post(
             f"{url}/auth/v1/admin/generate_link",
             headers={
                 "apikey": service_key,
@@ -257,7 +277,6 @@ def _generate_magiclink_otp(url, service_key, email) -> Optional[str]:
                 "email": email,
                 "options": {"should_send_link": False},
             },
-            timeout=15,
         )
         if resp.status_code != 200:
             return None
@@ -278,9 +297,8 @@ def _find_user_id(url, service_key, email) -> Optional[str]:
     不用 supabase-py 的 list_users：不同版本返回结构不一致（列表 / 对象），
     解析失败会导致误判邮箱不存在。REST 调用已实测可靠。
     """
-    try:
-        import httpx
-    except Exception:
+    client = _get_http_client()
+    if client is None:
         return None
     try:
         headers = {
@@ -289,10 +307,9 @@ def _find_user_id(url, service_key, email) -> Optional[str]:
         }
         page = 1
         while page <= 50:
-            resp = httpx.get(
+            resp = client.get(
                 f"{url}/auth/v1/admin/users?page={page}&per_page=1000",
                 headers=headers,
-                timeout=15,
             )
             if resp.status_code != 200:
                 return None
@@ -502,7 +519,9 @@ def render_auth_page():
     if not st.session_state.get("sso_attempted"):
         st.session_state["sso_attempted"] = True
         st.session_state.auth_error = None
-        if sso_login(str(url_email)):
+        with st.spinner("正在通过个人工作站登录..."):
+            _ok = sso_login(str(url_email))
+        if _ok:
             # 登录成功：清理 URL 参数，避免刷新重复触发
             try:
                 st.query_params.clear()
