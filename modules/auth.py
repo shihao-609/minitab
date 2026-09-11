@@ -12,6 +12,9 @@
   - 唯一入口：个人工作站跳转到本系统 URL 并携带 ?email=xxx，
     由 sso_login() 触发免密静默登录；该邮箱不存在时会自动创建账号并登录
   - 直接访问本系统（无 email 参数）时，只展示"请从个人工作站进入"引导页
+  - 【v3 加固】配置 WORKSTATION_SSO_SECRET 后，跳转链接必须携带
+    ts + sig（HMAC-SHA256 签名），验签不通过一律拒绝且不建号，
+    防止任何人手拼 ?email= 伪造入口；未配置该密钥时为兼容模式（不验签）
 
 关键设计（解决"额外注意项"）:
   1. 登录后使用用户的 JWT 创建 Supabase 客户端，替代 anon key
@@ -22,6 +25,9 @@
 
 import streamlit as st
 import os
+import hmac
+import hashlib
+import time
 from supabase import create_client, Client
 from typing import Optional
 
@@ -170,6 +176,61 @@ def logout():
 
 # ==================== 免密静默登录（从个人工作站跳转） ====================
 
+SSO_SIGNATURE_TTL = 300  # 工作站跳转签名有效期（秒）
+
+
+def _get_workstation_secret() -> str:
+    """获取个人工作站与 QMS 的共享签名密钥（未配置则返回空字符串）"""
+    try:
+        return st.secrets.get("WORKSTATION_SSO_SECRET", "") or os.environ.get("WORKSTATION_SSO_SECRET", "")
+    except Exception:
+        return os.environ.get("WORKSTATION_SSO_SECRET", "")
+
+
+def verify_workstation_signature(email: str, ts: str, sig: str):
+    """
+    校验个人工作站跳转链接的 HMAC-SHA256 签名。
+
+    工作站侧生成的链接格式：
+        ?email=<urlencode(email)>&ts=<unix秒>&sig=<小写十六进制>
+        sig = HMAC_SHA256(secret, f"{email}|{ts}").hexdigest()
+
+    要点：
+      - email 必须是 URL 编码前的原值，双方保持一致（不要自行转小写/去空格）；
+      - 邮箱含 \"+\" 时必须编码为 %2B（用标准 urlencode 即可）。
+
+    Returns:
+        (是否通过: bool, 提示信息: str)
+        - 未配置 WORKSTATION_SSO_SECRET → (True, "")：兼容模式，不强制验签，
+          保证现有"无签名跳转"仍可用，便于灰度上线。
+    """
+    secret = _get_workstation_secret()
+    if not secret:
+        return True, ""  # 兼容模式：未配置密钥则不验签
+
+    if not email or not ts or not sig:
+        return False, "链接缺少签名参数，请从个人工作站重新进入"
+
+    try:
+        ts_int = int(ts)
+    except (TypeError, ValueError):
+        return False, "链接签名参数无效，请从个人工作站重新进入"
+
+    if abs(time.time() - ts_int) > SSO_SIGNATURE_TTL:
+        return False, "链接已过期，请从个人工作站重新进入"
+
+    expected = hmac.new(
+        secret.encode("utf-8"),
+        f"{email}|{ts}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected, str(sig).strip().lower()):
+        return False, "链接签名校验失败，请从个人工作站重新进入"
+
+    return True, ""
+
+
 def _generate_magiclink_otp(url, service_key, email) -> Optional[str]:
     """
     后台生成 magiclink 令牌（不发邮件），返回可用的 email_otp（6 位数字）。
@@ -267,16 +328,37 @@ def _verify_otp_login(anon, email, otp) -> bool:
         return False
 
 
+def _password_login(anon, email: str, password: str) -> bool:
+    """用"邮箱 + 密码"登录（仅用于刚由后台创建的新账号），成功则写入 session_state"""
+    if anon is None:
+        return False
+    try:
+        resp = anon.auth.sign_in_with_password({"email": email, "password": password})
+        st.session_state.authenticated = True
+        st.session_state.user = resp.user
+        st.session_state.session = resp.session
+        st.session_state.auth_error = None
+        return True
+    except Exception:
+        return False
+
+
 def sso_login(email: str) -> bool:
     """
     个人工作站跳转免密登录（当前系统唯一登录方式，支持未注册邮箱自动创建账号）。
 
     流程：
-      1. 先直接 magiclink 登录（已注册且已确认的邮箱）
-      2. 失败则检查邮箱：
-         - 不存在 → 后台自动创建已确认账号（无需邮箱验证）
-         - 存在但未确认 → 后台直接标记为已确认
-      3. 再次 magiclink 登录
+      1. 先直接 magiclink 登录（已注册且已确认的邮箱，最常用、最快）
+      2. 失败则用 service_role 直接创建"已确认"账号：
+         - 创建成功（新邮箱）→ 用刚设置的密码直接登录（省一次往返）
+         - 报"已存在"（如未确认邮箱）→ 才回查 ID 标记为已确认
+      3. 兜底：再次 magiclink 登录
+
+    性能说明（关闭自助注册后的关键改动）：
+      Supabase 关闭 "Allow new users to sign up" 后，admin/generate_link
+      不再为陌生邮箱隐式建号，第一步必然失败。因此这里刻意避免
+      "遍历整个用户表找 ID"（用户多时极慢），改为直接创建、
+      仅在冲突这一极少分支才回查。
 
     需要 Streamlit Secrets 配置 SUPABASE_SERVICE_ROLE_KEY。
 
@@ -301,27 +383,30 @@ def sso_login(email: str) -> bool:
             return True
 
         # 第二步：确保用户存在且已确认（未注册邮箱也能登录）
-        uid = _find_user_id(url, service_key, email)
-        if uid:
-            admin.auth.admin.update_user_by_id(uid, {"email_confirm": True})
-        else:
-            # 用户不存在 → 创建已确认账号
-            created = False
-            try:
-                admin.auth.admin.create_user({
-                    "email": email,
-                    "password": _secrets.token_urlsafe(16),
-                    "email_confirm": True,
-                })
-                created = True
-            except Exception as ce:
-                # 并发/重复创建：邮箱其实已存在 → 再查一次拿到 ID
-                uid = _find_user_id(url, service_key, email)
-                if uid:
-                    admin.auth.admin.update_user_by_id(uid, {"email_confirm": True})
-                    created = True
-            if not created:
+        # 优化：不再先遍历用户表找 ID（用户量大时很慢）。
+        # 直接用 service_role 创建"已确认"账号：
+        #   - 成功（新邮箱）→ 用刚设置的密码一步登录；
+        #   - 抛"已存在" → 该邮箱其实已注册（第一步失败多因未确认），
+        #     此时才回查 ID 并标记已确认（极少触发）。
+        pwd = _secrets.token_urlsafe(16)
+        created_new = False
+        try:
+            admin.auth.admin.create_user({
+                "email": email,
+                "password": pwd,
+                "email_confirm": True,
+            })
+            created_new = True
+        except Exception as ce:
+            uid = _find_user_id(url, service_key, email)
+            if uid:
+                admin.auth.admin.update_user_by_id(uid, {"email_confirm": True})
+            else:
                 raise ce
+
+        # 新账号：用刚设置的密码直接登录（比再生成/校验令牌少一次往返）
+        if created_new and _password_login(anon, email, pwd):
+            return True
 
         # 第三步：再次尝试登录
         otp = _generate_magiclink_otp(url, service_key, email)
@@ -389,14 +474,26 @@ def render_auth_page():
     st.title("🔐 质量管理系统 QMS")
     st.caption("Quality Management System — 请从个人工作站进入")
 
-    # 个人工作站跳转参数：URL 需携带 ?email=xxx
+    # 个人工作站跳转参数：URL 需携带 ?email=xxx（配了共享密钥后还需 ts + sig 签名）
     try:
         url_email = st.query_params.get("email", "")
+        url_ts = st.query_params.get("ts", "")
+        url_sig = st.query_params.get("sig", "")
     except Exception:
         url_email = ""
+        url_ts = ""
+        url_sig = ""
 
     # 无跳转参数 → 不渲染任何表单，只提示从个人工作站进入
     if not url_email:
+        _render_portal_only_hint()
+        return
+
+    # 签名校验：配置 WORKSTATION_SSO_SECRET 后强制生效；未配置则为兼容模式，
+    # 验签失败一律拒绝，且不建号、不登录。
+    _sig_ok, _sig_msg = verify_workstation_signature(str(url_email), str(url_ts), str(url_sig))
+    if not _sig_ok:
+        st.error(f"⚠️ {_sig_msg}")
         _render_portal_only_hint()
         return
 

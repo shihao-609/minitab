@@ -48,6 +48,10 @@ SUPABASE_ANON_KEY=eyJhbGciOi...（你的 anon/public key）
 **需要配置 SUPABASE_SERVICE_ROLE_KEY**（service_role 密钥）：
 免密静默登录依赖它后台生成登录令牌/自动创建账号，务必妥善保管、只放服务端。
 
+**可选：配置 WORKSTATION_SSO_SECRET**（个人工作站跳转签名密钥）：
+配置后跳转链接必须带 HMAC 签名，未带 / 被篡改 / 过期的链接一律拒绝且不建号；
+不配置则维持"无签名也能跳转"的现状。详见步骤 5。
+
 ## 步骤 4：启动应用
 
 ```bash
@@ -57,6 +61,41 @@ streamlit run app.py
 首次访问会显示登录页：直接打开（URL 无 `?email=` 参数）只会看到"请从个人工作站进入"
 引导页，无法注册也无法输入密码；从个人工作站点击进入（携带 `?email=xxx`）会自动完成
 免密登录，无需任何人工操作。已登录状态下再进入即可直接使用。
+
+## 步骤 5：个人工作站跳转签名（防止伪造入口）
+
+仅靠 URL 的 `?email=` 参数无法区分"工作站跳转"与"手工拼链接"——任何人拼
+`https://站点/?email=任意邮箱` 都会触发自动建号。配置共享密钥后即可锁死：
+
+1. 在 Streamlit Secrets（或本地 `.env`）中加一行：
+   ```
+   WORKSTATION_SSO_SECRET=<一段足够长的随机字符串>
+   ```
+2. 把同一个密钥交给**个人工作站**那边，由其生成跳转链接：
+
+   ```
+   ?email=<urlencode(email)>&ts=<unix秒>&sig=<十六进制>
+   sig = HMAC_SHA256(WORKSTATION_SSO_SECRET, f"{email}|{ts}").hexdigest()
+   ```
+
+   示例（Python）：
+   ```python
+   import hmac, hashlib, time, urllib.parse
+
+   SECRET = "<与 QMS 相同的密钥>"
+   email = "user@example.com"
+   ts = str(int(time.time()))
+   sig = hmac.new(SECRET.encode(), f"{email}|{ts}".encode(), hashlib.sha256).hexdigest()
+   url = f"https://qms.example.com/?email={urllib.parse.quote(email, safe='')}&ts={ts}&sig={sig}"
+   ```
+
+3. QMS 侧校验规则：`|当前时间 - ts| ≤ 300` 秒 且 签名逐字节匹配；
+   不通过则只显示"请从个人工作站进入"引导页，**不建号、不登录**。
+
+注意：
+- `email` 必须用**编码前的原值**参与签名，双方不要各自转小写 / 去空格；
+- 邮箱里若含 `+`，务必编码为 `%2B`（用标准 urlencode 即可）；
+- 签名有效期 300 秒，如需调整改 `modules/auth.py` 里的 `SSO_SIGNATURE_TTL`。
 
 ## 额外注意项检查清单
 
